@@ -1462,6 +1462,49 @@ function Start-WinPulseOOShutUp {
     param()
 
     Write-Host 'O&O ShutUp10++ can change privacy/policy settings. Review options before applying.' -ForegroundColor Yellow
+
+    $targetDir = Join-Path $script:WinPulsePaths.Bin 'OOShutUp10'
+    if (-not (Test-Path -Path $targetDir)) {
+        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+    }
+    $targetExe = Join-Path $targetDir 'OOSU10.exe'
+
+    if (-not (Test-Path -Path $targetExe)) {
+        $directUrl = 'https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe'
+        $downloaded = $false
+        try {
+            Invoke-WebRequest -Uri $directUrl -OutFile $targetExe -UseBasicParsing -ErrorAction Stop
+            $downloaded = $true
+        }
+        catch {
+        }
+
+        if (-not $downloaded) {
+            try {
+                Start-BitsTransfer -Source $directUrl -Destination $targetExe -ErrorAction Stop
+                $downloaded = $true
+            }
+            catch {
+            }
+        }
+
+        if (-not $downloaded) {
+            try {
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add('User-Agent', 'Mozilla/5.0')
+                $wc.DownloadFile($directUrl, $targetExe)
+                $downloaded = $true
+            }
+            catch {
+            }
+        }
+    }
+
+    if (Test-Path -Path $targetExe) {
+        Start-Process -FilePath $targetExe
+        return
+    }
+
     try {
         $toolPath = Ensure-ToolInstalled -name 'OOShutUp10'
         Start-Process -FilePath $toolPath
@@ -1471,14 +1514,19 @@ function Start-WinPulseOOShutUp {
         Write-Log -level 'WARNING' -message ("O&O ShutUp10 portable failed: {0}" -f $_.Exception.Message)
     }
 
-    [void](Install-WinPulseWingetCandidates -ids @('OOSoftware.ShutUp10'))
-    $exe = Find-WinPulseExecutable -filenames @('OOSU10.exe', 'OOSU10_x64.exe') -hintfolders @('OOSU10', 'ShutUp10')
+    [void](Install-WinPulseWingetCandidates -ids @('OOSoftware.ShutUp10', 'OOSoftware.ShutUp10++'))
+    $exe = Find-WinPulseExecutable -filenames @('OOSU10.exe', 'OOSU10_x64.exe', 'ShutUp10.exe') -hintfolders @('OOSU10', 'ShutUp10', 'OOSoftware')
     if ($exe) {
         Start-Process -FilePath $exe
         return
     }
 
-    Write-Host 'O&O ShutUp10 launch failed (portable + winget fallback).' -ForegroundColor Red
+    if (Start-WinPulseAppByName -namepattern 'ShutUp10|O&O') {
+        return
+    }
+
+    Write-Host 'O&O ShutUp10 launch failed (portable + winget fallback). Opening official page...' -ForegroundColor DarkYellow
+    Start-Process 'https://www.oo-software.com/en/shutup10'
 }
 
 function Start-WinPulseSysinternalsSuite {
