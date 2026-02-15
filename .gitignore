@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# PowerShell / local artifacts
+*.log
+*.tmp
+*.bak
+*.zip
+
+# VS Code
+.vscode/
+
+# WinPulse local working folders (if someone runs inside repo)
+bin/
+logs/
+exports/
+backups/
+modules-cache/
