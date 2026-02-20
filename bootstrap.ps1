@@ -1325,16 +1325,9 @@ function Start-WinPulseBlueScreenView {
         Write-Log -level 'WARNING' -message ("BlueScreenView portable failed: {0}" -f $_.Exception.Message)
     }
 
-    [void](Install-WinPulseWingetCandidates -ids @('NirSoft.BlueScreenView'))
-    $exe = Find-WinPulseExecutable -filenames @('BlueScreenView.exe') -hintfolders @('BlueScreenView', 'NirSoft')
-    if ($exe) {
-        Start-Process -FilePath $exe
-        return
-    }
-
-    if (-not (Start-WinPulseAppByName -namepattern 'BlueScreenView|NirSoft')) {
-        Write-Host 'BlueScreenView launch failed (portable + winget fallback).' -ForegroundColor Red
-    }
+    Write-Host 'BlueScreenView portable launch failed. Winget install is disabled for this tool.' -ForegroundColor DarkYellow
+    Write-Host 'Opening official portable page...' -ForegroundColor Cyan
+    Start-Process 'https://www.nirsoft.net/utils/blue_screen_view.html'
 }
 
 function Start-WinPulseOpenHardwareMonitor {
