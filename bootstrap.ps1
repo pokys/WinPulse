@@ -1549,14 +1549,126 @@ function Start-DeepDiskAnalysis {
     [CmdletBinding()]
     param()
 
-    try {
-        $toolPath = Ensure-ToolInstalled -name 'CrystalDiskInfo'
-        Start-Process -FilePath $toolPath
+    if (-not (Test-WinGetAvailable)) {
+        Write-Host 'winget is required for CrystalDiskInfo install/run/uninstall flow.' -ForegroundColor Red
         return
     }
+
+    $installedPackageId = $null
+    $packageCandidates = @('CrystalDewWorld.CrystalDiskInfo')
+    $lastInstallError = $null
+    try {
+        foreach ($pkg in $packageCandidates) {
+            try {
+                $listOutput = & winget list --id $pkg --exact 2>&1
+                if (($listOutput | Out-String) -match [regex]::Escape($pkg)) {
+                    $installedPackageId = $pkg
+                    break
+                }
+            }
+            catch {
+            }
+        }
+
+        if (-not $installedPackageId) {
+            Write-Host 'Installing CrystalDiskInfo via winget...' -ForegroundColor Cyan
+            foreach ($pkg in $packageCandidates) {
+                $installOutput = & winget install --id $pkg --exact --disable-interactivity --accept-source-agreements --accept-package-agreements --silent 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $installedPackageId = $pkg
+                    break
+                }
+                $lastInstallError = ($installOutput | Out-String).Trim()
+            }
+
+            if (-not $installedPackageId) {
+                throw ("winget install failed for CrystalDiskInfo. Last error: {0}" -f $lastInstallError)
+            }
+        }
+        else {
+            Write-Host ("Using existing CrystalDiskInfo package: {0}" -f $installedPackageId) -ForegroundColor DarkCyan
+        }
+
+        $exe = $null
+        $exactNames = @(
+            'DiskInfo64.exe', 'DiskInfo32.exe', 'DiskInfoA64.exe',
+            'CrystalDiskInfo64.exe', 'CrystalDiskInfo32.exe', 'CrystalDiskInfo.exe'
+        )
+
+        $explicitCandidates = @(
+            (Join-Path $env:ProgramFiles 'CrystalDiskInfo\DiskInfo64.exe'),
+            (Join-Path $env:ProgramFiles 'CrystalDiskInfo\DiskInfo32.exe'),
+            (Join-Path $env:ProgramFiles 'CrystalDiskInfo\DiskInfoA64.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'CrystalDiskInfo\DiskInfo64.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'CrystalDiskInfo\DiskInfo32.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'CrystalDiskInfo\DiskInfoA64.exe')
+        )
+
+        foreach ($path in $explicitCandidates) {
+            if ($path -and (Test-Path -Path $path)) {
+                $exe = Get-Item -Path $path -ErrorAction SilentlyContinue
+                if ($exe) { break }
+            }
+        }
+
+        if (-not $exe) {
+            $wingetPackagesRoot = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+            if (Test-Path -Path $wingetPackagesRoot) {
+                $exe = (Get-ChildItem -Path $wingetPackagesRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -imatch '^CrystalDewWorld\.CrystalDiskInfo_' } |
+                    ForEach-Object {
+                        Get-ChildItem -Path $_.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                $_.Extension -ieq '.exe' -and (
+                                    $_.Name -in $exactNames -or
+                                    $_.Name -imatch '^DiskInfo.*\.exe$' -or
+                                    $_.Name -imatch '^CrystalDiskInfo.*\.exe$'
+                                )
+                            } |
+                            Select-Object -First 1
+                    } |
+                    Select-Object -First 1)
+            }
+        }
+
+        if (-not $exe) {
+            $exe = (Get-ChildItem -Path @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Extension -ieq '.exe' -and (
+                        $_.Name -in $exactNames -or
+                        $_.Name -imatch '^DiskInfo.*\.exe$' -or
+                        $_.Name -imatch '^CrystalDiskInfo.*\.exe$'
+                    )
+                } |
+                Select-Object -First 1)
+        }
+
+        if (-not $exe) {
+            throw 'CrystalDiskInfo executable was not found after winget installation.'
+        }
+
+        Write-Host ("Launching: {0}" -f $exe.FullName) -ForegroundColor Cyan
+        $proc = Start-Process -FilePath $exe.FullName -PassThru
+        if ($proc) {
+            Wait-Process -Id $proc.Id -ErrorAction SilentlyContinue
+        }
+    }
     catch {
-        Write-Host ('CrystalDiskInfo download failed (MajorGeeks flow): {0}' -f $_.Exception.Message) -ForegroundColor Red
-        Write-Host 'Source page: https://www.majorgeeks.com/files/details/crystaldiskinfo_portable.html' -ForegroundColor DarkYellow
+        Write-Host ('CrystalDiskInfo failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
+    }
+    finally {
+        if ($installedPackageId) {
+            Write-Host 'Uninstalling CrystalDiskInfo package...' -ForegroundColor Cyan
+            try {
+                $uninstallOutput = & winget uninstall --id $installedPackageId --exact --disable-interactivity --silent 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host ('CrystalDiskInfo uninstall warning: {0}' -f (($uninstallOutput | Out-String).Trim())) -ForegroundColor DarkYellow
+                }
+            }
+            catch {
+                Write-Host ('CrystalDiskInfo uninstall warning: {0}' -f $_.Exception.Message) -ForegroundColor DarkYellow
+            }
+        }
     }
 }
 
