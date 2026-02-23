@@ -946,10 +946,7 @@ function Get-WinPulseToolCatalog {
         }
         CrystalDiskInfo = [ordered]@{
             Urls = @(
-                'https://www.majorgeeks.com/files/details/crystaldiskinfo_portable.html',
-                'https://www.majorgeeks.com/files/details/crystaldiskinfo_portable',
-                'https://sourceforge.net/projects/crystaldiskinfo/files/latest/download',
-                'https://osdn.dl.osdn.net/crystaldiskinfo/CrystalDiskInfo9_3_2.zip'
+                'https://www.majorgeeks.com/files/details/crystaldiskinfo_portable.html'
             )
             BinaryCandidates = @('DiskInfo64.exe', 'DiskInfo32.exe', 'CrystalDiskInfo64.exe', 'CrystalDiskInfo32.exe', 'CrystalDiskInfo.exe')
         }
@@ -1558,81 +1555,8 @@ function Start-DeepDiskAnalysis {
         return
     }
     catch {
-        Write-Log -level 'WARNING' -message ("Portable CrystalDiskInfo failed, fallback to winget: {0}" -f $_.Exception.Message)
-    }
-
-    if (-not (Test-WinGetAvailable)) {
-        Write-Host 'CrystalDiskInfo portable download failed and winget is not available.' -ForegroundColor Red
-        return
-    }
-
-    $installedByWinPulse = $false
-    try {
-        $hadBefore = $false
-        try {
-            $listOutput = & winget list --id CrystalDewWorld.CrystalDiskInfo --exact 2>&1
-            if (($listOutput | Out-String) -match 'CrystalDewWorld\.CrystalDiskInfo') {
-                $hadBefore = $true
-            }
-        }
-        catch {
-        }
-
-        if (-not $hadBefore) {
-            Write-Host 'Installing CrystalDiskInfo via winget...' -ForegroundColor Cyan
-            $installOutput = & winget install --id CrystalDewWorld.CrystalDiskInfo --exact --disable-interactivity --accept-source-agreements --accept-package-agreements --silent 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw ("winget install failed: {0}" -f (($installOutput | Out-String).Trim()))
-            }
-            $installedByWinPulse = $true
-        }
-
-        $candidates = @(
-            (Join-Path $env:ProgramFiles 'CrystalDiskInfo\DiskInfo64.exe'),
-            (Join-Path $env:ProgramFiles 'CrystalDiskInfo\DiskInfo32.exe'),
-            (Join-Path ${env:ProgramFiles(x86)} 'CrystalDiskInfo\DiskInfo64.exe'),
-            (Join-Path ${env:ProgramFiles(x86)} 'CrystalDiskInfo\DiskInfo32.exe')
-        )
-        $exePath = $null
-        foreach ($path in $candidates) {
-            if ($path -and (Test-Path -Path $path)) {
-                $exePath = $path
-                break
-            }
-        }
-        if (-not $exePath) {
-            $exePath = (Get-ChildItem -Path @($env:ProgramFiles, ${env:ProgramFiles(x86)}) -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -in @('DiskInfo64.exe', 'DiskInfo32.exe', 'CrystalDiskInfo.exe') } |
-                Select-Object -First 1 -ExpandProperty FullName)
-        }
-
-        if (-not $exePath) {
-            throw 'CrystalDiskInfo executable not found after winget install.'
-        }
-
-        Write-Host 'Launching CrystalDiskInfo. WinPulse waits until you close it...' -ForegroundColor Cyan
-        $proc = Start-Process -FilePath $exePath -PassThru
-        if ($proc) {
-            Wait-Process -Id $proc.Id -ErrorAction SilentlyContinue
-        }
-    }
-    catch {
-        Write-Log -level 'ERROR' -message ("Deep disk analysis failed: {0}" -f $_.Exception.Message)
-        Write-Host ('CrystalDiskInfo failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
-    }
-    finally {
-        if ($installedByWinPulse) {
-            Write-Host 'Uninstalling temporary CrystalDiskInfo...' -ForegroundColor Cyan
-            try {
-                $uninstallOutput = & winget uninstall --id CrystalDewWorld.CrystalDiskInfo --exact --disable-interactivity --accept-source-agreements --silent 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host ('CrystalDiskInfo uninstall warning: {0}' -f (($uninstallOutput | Out-String).Trim())) -ForegroundColor DarkYellow
-                }
-            }
-            catch {
-                Write-Host ('CrystalDiskInfo uninstall warning: {0}' -f $_.Exception.Message) -ForegroundColor DarkYellow
-            }
-        }
+        Write-Host ('CrystalDiskInfo download failed (MajorGeeks flow): {0}' -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host 'Source page: https://www.majorgeeks.com/files/details/crystaldiskinfo_portable.html' -ForegroundColor DarkYellow
     }
 }
 
