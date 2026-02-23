@@ -1316,18 +1316,37 @@ function Start-WinPulseBlueScreenView {
     [CmdletBinding()]
     param()
 
-    try {
-        $toolPath = Ensure-ToolInstalled -name 'BlueScreenView'
-        Start-Process -FilePath $toolPath
-        return
-    }
-    catch {
-        Write-Log -level 'WARNING' -message ("BlueScreenView portable failed: {0}" -f $_.Exception.Message)
+    $directUrl = 'https://www.nirsoft.net/utils/bluescreenview.zip'
+    $targetDir = Join-Path $script:WinPulsePaths.Bin 'BlueScreenView'
+    $targetExe = Join-Path $targetDir 'BlueScreenView.exe'
+
+    if (-not (Test-Path -Path $targetDir)) {
+        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
     }
 
-    Write-Host 'BlueScreenView portable launch failed. Winget install is disabled for this tool.' -ForegroundColor DarkYellow
-    Write-Host 'Opening official portable page...' -ForegroundColor Cyan
-    Start-Process 'https://www.nirsoft.net/utils/blue_screen_view.html'
+    if (-not (Test-Path -Path $targetExe)) {
+        $zipPath = Join-Path $script:WinPulsePaths.Bin ('BlueScreenView-{0}.zip' -f ([Guid]::NewGuid().ToString('N')))
+        try {
+            Invoke-WebRequest -Uri $directUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+            Expand-Archive -Path $zipPath -DestinationPath $targetDir -Force
+        }
+        catch {
+            Write-Host ('BlueScreenView download failed (direct link): {0}' -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host ('Direct link: {0}' -f $directUrl) -ForegroundColor DarkYellow
+            return
+        }
+        finally {
+            Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (Test-Path -Path $targetExe) {
+        Start-Process -FilePath $targetExe
+        return
+    }
+
+    Write-Host 'BlueScreenView.exe not found in downloaded ZIP.' -ForegroundColor Red
+    Write-Host ('Direct link used: {0}' -f $directUrl) -ForegroundColor DarkYellow
 }
 
 function Start-WinPulseOpenHardwareMonitor {
@@ -1464,32 +1483,13 @@ function Start-WinPulseOOShutUp {
 
     if (-not (Test-Path -Path $targetExe)) {
         $directUrl = 'https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe'
-        $downloaded = $false
         try {
             Invoke-WebRequest -Uri $directUrl -OutFile $targetExe -UseBasicParsing -ErrorAction Stop
-            $downloaded = $true
         }
         catch {
-        }
-
-        if (-not $downloaded) {
-            try {
-                Start-BitsTransfer -Source $directUrl -Destination $targetExe -ErrorAction Stop
-                $downloaded = $true
-            }
-            catch {
-            }
-        }
-
-        if (-not $downloaded) {
-            try {
-                $wc = New-Object System.Net.WebClient
-                $wc.Headers.Add('User-Agent', 'Mozilla/5.0')
-                $wc.DownloadFile($directUrl, $targetExe)
-                $downloaded = $true
-            }
-            catch {
-            }
+            Write-Host ('O&O direct download failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host ('Direct link: {0}' -f $directUrl) -ForegroundColor DarkYellow
+            return
         }
     }
 
@@ -1498,28 +1498,8 @@ function Start-WinPulseOOShutUp {
         return
     }
 
-    try {
-        $toolPath = Ensure-ToolInstalled -name 'OOShutUp10'
-        Start-Process -FilePath $toolPath
-        return
-    }
-    catch {
-        Write-Log -level 'WARNING' -message ("O&O ShutUp10 portable failed: {0}" -f $_.Exception.Message)
-    }
-
-    [void](Install-WinPulseWingetCandidates -ids @('OOSoftware.ShutUp10', 'OOSoftware.ShutUp10++'))
-    $exe = Find-WinPulseExecutable -filenames @('OOSU10.exe', 'OOSU10_x64.exe', 'ShutUp10.exe') -hintfolders @('OOSU10', 'ShutUp10', 'OOSoftware')
-    if ($exe) {
-        Start-Process -FilePath $exe
-        return
-    }
-
-    if (Start-WinPulseAppByName -namepattern 'ShutUp10|O&O') {
-        return
-    }
-
-    Write-Host 'O&O ShutUp10 launch failed (portable + winget fallback). Opening official page...' -ForegroundColor DarkYellow
-    Start-Process 'https://www.oo-software.com/en/shutup10'
+    Write-Host 'O&O executable not found after direct download.' -ForegroundColor Red
+    Write-Host 'Direct link used: https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe' -ForegroundColor DarkYellow
 }
 
 function Start-WinPulseSysinternalsSuite {
