@@ -428,6 +428,691 @@ function Get-WinPulseRepairPlans {
     return $plans
 }
 
+# ── Extended Diagnostic Helpers ──────────────────────────────────────────────
+
+function Get-WinPulseHardwareDetail {
+    [CmdletBinding()]
+    param()
+
+    $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $archMap = @{ 0 = 'x86'; 5 = 'ARM'; 6 = 'IA64'; 9 = 'x64'; 12 = 'ARM64' }
+    $cpuInfo = [ordered]@{
+        Model       = if ($cpu) { $cpu.Name.Trim() } else { 'N/A' }
+        Cores       = if ($cpu) { [int]$cpu.NumberOfCores } else { 0 }
+        Threads     = if ($cpu) { [int]$cpu.NumberOfLogicalProcessors } else { 0 }
+        BaseFreqMHz = if ($cpu) { [int]$cpu.MaxClockSpeed } else { 0 }
+        Architecture = if ($cpu -and $archMap.ContainsKey([int]$cpu.Architecture)) { $archMap[[int]$cpu.Architecture] } else { 'Unknown' }
+    }
+
+    $gpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue)
+    $gpuList = @()
+    foreach ($gpu in $gpus) {
+        $vram = if ($gpu.AdapterRAM -and $gpu.AdapterRAM -gt 0) { ConvertTo-ReadableSize -bytes ([double]$gpu.AdapterRAM) } else { 'N/A' }
+        $res = if ($gpu.CurrentHorizontalResolution -and $gpu.CurrentVerticalResolution) { '{0}x{1}' -f $gpu.CurrentHorizontalResolution, $gpu.CurrentVerticalResolution } else { 'N/A' }
+        $gpuList += [ordered]@{
+            Name          = if ($gpu.Name) { $gpu.Name.Trim() } else { 'N/A' }
+            DriverVersion = if ($gpu.DriverVersion) { $gpu.DriverVersion } else { 'N/A' }
+            VRAM          = $vram
+            Resolution    = $res
+        }
+    }
+
+    $dimms = @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+    $typeMap = @{ 20 = 'DDR'; 21 = 'DDR2'; 22 = 'DDR2 FB-DIMM'; 24 = 'DDR3'; 26 = 'DDR4'; 34 = 'DDR5' }
+    $dimmList = @()
+    foreach ($dimm in $dimms) {
+        $slot = if ($dimm.DeviceLocator) { $dimm.DeviceLocator } elseif ($dimm.BankLabel) { $dimm.BankLabel } else { 'N/A' }
+        $memType = if ($dimm.SMBIOSMemoryType -and $typeMap.ContainsKey([int]$dimm.SMBIOSMemoryType)) { $typeMap[[int]$dimm.SMBIOSMemoryType] } else { 'Unknown' }
+        $dimmList += [ordered]@{
+            Slot         = $slot
+            Capacity     = if ($dimm.Capacity) { ConvertTo-ReadableSize -bytes ([double]$dimm.Capacity) } else { 'N/A' }
+            SpeedMHz     = if ($dimm.Speed) { [int]$dimm.Speed } else { 0 }
+            Type         = $memType
+            Manufacturer = if ($dimm.Manufacturer -and $dimm.Manufacturer.Trim()) { $dimm.Manufacturer.Trim() } else { 'Unknown' }
+        }
+    }
+
+    $batteryInfo = [ordered]@{ Present = $false; HealthPercent = $null; CycleCount = $null; DesignCapacityWh = $null; FullChargeCapacityWh = $null }
+    $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+    if ($battery) {
+        $batteryInfo.Present = $true
+        try {
+            $bStatic = Get-CimInstance -Namespace root\WMI -ClassName BatteryStaticData -ErrorAction SilentlyContinue | Select-Object -First 1
+            $bFull = Get-CimInstance -Namespace root\WMI -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($bStatic -and $bStatic.DesignedCapacity -and $bFull -and $bFull.FullChargedCapacity) {
+                $batteryInfo.DesignCapacityWh = [math]::Round($bStatic.DesignedCapacity / 1000, 1)
+                $batteryInfo.FullChargeCapacityWh = [math]::Round($bFull.FullChargedCapacity / 1000, 1)
+                if ($bStatic.DesignedCapacity -gt 0) {
+                    $batteryInfo.HealthPercent = [math]::Round(($bFull.FullChargedCapacity / $bStatic.DesignedCapacity) * 100, 1)
+                }
+            }
+            if ($bStatic -and $bStatic.PSObject.Properties['CycleCount']) {
+                $batteryInfo.CycleCount = [int]$bStatic.CycleCount
+            }
+        }
+        catch { }
+    }
+
+    $board = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+    $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mbInfo = [ordered]@{
+        Manufacturer = if ($board -and $board.Manufacturer) { $board.Manufacturer.Trim() } else { 'N/A' }
+        Model        = if ($board -and $board.Product) { $board.Product.Trim() } else { 'N/A' }
+        BIOSVersion  = if ($bios -and $bios.SMBIOSBIOSVersion) { $bios.SMBIOSBIOSVersion } else { 'N/A' }
+        BIOSDate     = if ($bios -and $bios.ReleaseDate) { $bios.ReleaseDate.ToString('yyyy-MM-dd') } else { 'N/A' }
+    }
+
+    return [ordered]@{
+        CPU         = $cpuInfo
+        GPU         = $gpuList
+        DIMMs       = $dimmList
+        Battery     = $batteryInfo
+        Motherboard = $mbInfo
+    }
+}
+
+function Get-WinPulseTemperatures {
+    [CmdletBinding()]
+    param()
+
+    $cpuTemp = $null
+    $cpuSource = 'Unavailable'
+    try {
+        $thermal = Get-CimInstance -Namespace root\WMI -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
+        if ($thermal) {
+            $raw = ($thermal | Select-Object -First 1).CurrentTemperature
+            $cpuTemp = [math]::Round(($raw - 2732) / 10, 1)
+            $cpuSource = 'WMI ThermalZone'
+        }
+    }
+    catch { }
+
+    $diskTemps = @()
+    if (Get-Command -Name Get-StorageReliabilityCounter -ErrorAction SilentlyContinue) {
+        try {
+            foreach ($pd in (Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+                $rel = $pd | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
+                if ($rel -and $rel.Temperature) {
+                    $diskTemps += [ordered]@{
+                        DiskModel   = if ($pd.FriendlyName) { $pd.FriendlyName } else { 'Disk' }
+                        TempCelsius = [int]$rel.Temperature
+                        Source      = 'StorageReliabilityCounter'
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    return [ordered]@{
+        CPUTempCelsius = $cpuTemp
+        CPUTempSource  = $cpuSource
+        DiskTemps      = $diskTemps
+        Note           = 'Native WMI temperature reading is limited. Use OpenHardwareMonitor for comprehensive temps.'
+    }
+}
+
+function Get-WinPulseTPMStatus {
+    [CmdletBinding()]
+    param()
+
+    $tpmResult = [ordered]@{ Present = $false; Enabled = $false; Version = 'N/A'; Manufacturer = 'N/A'; Win11Compatible = $false }
+    try {
+        $tpm = Get-Tpm -ErrorAction Stop
+        $tpmResult.Present = [bool]$tpm.TpmPresent
+        $tpmResult.Enabled = [bool]$tpm.TpmReady
+    }
+    catch { }
+
+    if ($tpmResult.Present) {
+        try {
+            $tpmWmi = Get-CimInstance -Namespace root\cimv2\Security\MicrosoftTpm -ClassName Win32_Tpm -ErrorAction Stop
+            if ($tpmWmi) {
+                $spec = $tpmWmi.SpecVersion
+                if ($spec) {
+                    $ver = ($spec -split ',')[0].Trim()
+                    $tpmResult.Version = $ver
+                }
+                if ($tpmWmi.ManufacturerIdTxt) {
+                    $tpmResult.Manufacturer = $tpmWmi.ManufacturerIdTxt.Trim()
+                }
+            }
+        }
+        catch { }
+    }
+
+    $tpmResult.Win11Compatible = ($tpmResult.Version -like '2.*' -or $tpmResult.Version -eq '2.0')
+    return $tpmResult
+}
+
+function Get-WinPulseDriverAnalysis {
+    [CmdletBinding()]
+    param()
+
+    $errorCodeMap = @{
+        1 = 'Not configured'; 3 = 'Driver corrupted'; 10 = 'Cannot start';
+        12 = 'Not enough resources'; 14 = 'Restart required'; 16 = 'Not fully detected';
+        22 = 'Disabled'; 24 = 'Not present'; 28 = 'Drivers not installed';
+        29 = 'Resource disabled in BIOS'; 31 = 'Not working properly'; 32 = 'Driver disabled';
+        33 = 'Cannot determine resources'; 34 = 'Cannot determine resources'; 43 = 'Windows stopped this device'; 44 = 'Shutdown signal received'
+    }
+
+    $problematic = @()
+    $devices = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -ne 0 }
+    foreach ($dev in $devices) {
+        $errDesc = if ($errorCodeMap.ContainsKey([int]$dev.ConfigManagerErrorCode)) { $errorCodeMap[[int]$dev.ConfigManagerErrorCode] } else { "Error code $($dev.ConfigManagerErrorCode)" }
+        $problematic += [ordered]@{
+            DeviceName       = if ($dev.Name) { $dev.Name } else { 'Unknown Device' }
+            ErrorCode        = [int]$dev.ConfigManagerErrorCode
+            ErrorDescription = $errDesc
+        }
+    }
+
+    $unsigned = @()
+    $recentlyChanged = @()
+    try {
+        $signedDrivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction SilentlyContinue)
+        foreach ($drv in $signedDrivers) {
+            if ($drv.IsSigned -eq $false -and $unsigned.Count -lt 50) {
+                $unsigned += [ordered]@{
+                    DeviceName     = if ($drv.DeviceName) { $drv.DeviceName } else { 'Unknown' }
+                    DriverProvider = if ($drv.DriverProviderName) { $drv.DriverProviderName } else { 'N/A' }
+                    InfName        = if ($drv.InfName) { $drv.InfName } else { 'N/A' }
+                }
+            }
+            if ($drv.DriverDate -and $drv.DriverDate -gt (Get-Date).AddDays(-30) -and $recentlyChanged.Count -lt 20) {
+                $recentlyChanged += [ordered]@{
+                    DeviceName    = if ($drv.DeviceName) { $drv.DeviceName } else { 'Unknown' }
+                    DriverVersion = if ($drv.DriverVersion) { $drv.DriverVersion } else { 'N/A' }
+                    DriverDate    = $drv.DriverDate.ToString('yyyy-MM-dd')
+                    DriverProvider = if ($drv.DriverProviderName) { $drv.DriverProviderName } else { 'N/A' }
+                }
+            }
+        }
+    }
+    catch { }
+
+    return [ordered]@{
+        Problematic     = $problematic
+        Unsigned        = $unsigned
+        RecentlyChanged = $recentlyChanged
+    }
+}
+
+function Get-WinPulseStartupAnalysis {
+    [CmdletBinding()]
+    param()
+
+    $runKeys = @()
+    $regPaths = @(
+        @{ Location = 'HKLM Run'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' },
+        @{ Location = 'HKLM RunOnce'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' },
+        @{ Location = 'HKCU Run'; Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' },
+        @{ Location = 'HKLM Run (32-bit)'; Path = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' }
+    )
+    foreach ($entry in $regPaths) {
+        if (Test-Path $entry.Path) {
+            $props = Get-ItemProperty -Path $entry.Path -ErrorAction SilentlyContinue
+            if ($props) {
+                foreach ($name in ($props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })) {
+                    $runKeys += [ordered]@{
+                        Location = $entry.Location
+                        Name     = $name.Name
+                        Command  = [string]$name.Value
+                    }
+                }
+            }
+        }
+    }
+
+    $startupItems = @()
+    $startupPaths = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+    )
+    foreach ($sp in $startupPaths) {
+        if (Test-Path $sp) {
+            foreach ($item in (Get-ChildItem -Path $sp -ErrorAction SilentlyContinue)) {
+                $startupItems += [ordered]@{
+                    Name = $item.Name
+                    Path = $item.FullName
+                }
+            }
+        }
+    }
+
+    $logonTasks = @()
+    try {
+        $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
+        foreach ($task in $allTasks) {
+            if ($task.Triggers) {
+                $hasLogon = $false
+                foreach ($trigger in $task.Triggers) {
+                    if ($trigger.CimClass -and $trigger.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger') {
+                        $hasLogon = $true
+                        break
+                    }
+                }
+                if ($hasLogon) {
+                    $logonTasks += [ordered]@{
+                        TaskName = $task.TaskName
+                        TaskPath = $task.TaskPath
+                        State    = [string]$task.State
+                    }
+                }
+            }
+        }
+    }
+    catch { }
+
+    $failedServices = @()
+    try {
+        $autoStopped = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' }
+        foreach ($svc in $autoStopped) {
+            $failedServices += [ordered]@{
+                Name        = $svc.Name
+                DisplayName = $svc.DisplayName
+                Status      = [string]$svc.Status
+            }
+        }
+    }
+    catch { }
+
+    $bootTime = $null
+    $bootDurationMs = $null
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) { $bootTime = $os.LastBootUpTime }
+        $bootEvent = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($bootEvent -and $bootEvent.Properties.Count -gt 0) {
+            $bootDurationMs = [int]$bootEvent.Properties[0].Value
+        }
+    }
+    catch { }
+
+    return [ordered]@{
+        RunKeyItems        = $runKeys
+        StartupFolderItems = $startupItems
+        LogonScheduledTasks = $logonTasks
+        FailedAutoServices = $failedServices
+        LastBootTime       = $bootTime
+        BootDurationMs     = $bootDurationMs
+    }
+}
+
+function Get-WinPulseUserAccounts {
+    [CmdletBinding()]
+    param()
+
+    $users = @()
+    $adminNames = @()
+    try {
+        $adminMembers = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue
+        $adminNames = @($adminMembers | ForEach-Object { ($_.Name -split '\\')[-1] })
+    }
+    catch { }
+
+    try {
+        foreach ($u in (Get-LocalUser -ErrorAction SilentlyContinue)) {
+            $users += [ordered]@{
+                Name            = $u.Name
+                Enabled         = [bool]$u.Enabled
+                IsAdmin         = ($u.Name -in $adminNames)
+                LastLogon       = if ($u.LastLogon) { $u.LastLogon.ToString('yyyy-MM-dd HH:mm') } else { 'Never' }
+                PasswordExpires = if ($u.PasswordExpires) { $u.PasswordExpires.ToString('yyyy-MM-dd') } else { 'Never' }
+                PasswordLastSet = if ($u.PasswordLastSet) { $u.PasswordLastSet.ToString('yyyy-MM-dd') } else { 'N/A' }
+            }
+        }
+    }
+    catch { }
+
+    $profileCount = 0
+    try {
+        $excludeNames = @('Public', 'Default', 'Default User', 'All Users')
+        $profileCount = @(Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $excludeNames }).Count
+    }
+    catch { }
+
+    return [ordered]@{
+        Users        = $users
+        ProfileCount = $profileCount
+    }
+}
+
+function Get-WinPulseNetworkDetail {
+    [CmdletBinding()]
+    param()
+
+    $adapters = @()
+    try {
+        foreach ($a in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+            $adapters += [ordered]@{
+                Name      = $a.Name
+                Status    = [string]$a.Status
+                Speed     = if ($a.LinkSpeed) { $a.LinkSpeed } else { 'N/A' }
+                MAC       = if ($a.MacAddress) { $a.MacAddress } else { 'N/A' }
+                MediaType = if ($a.MediaType) { $a.MediaType } else { 'N/A' }
+            }
+        }
+    }
+    catch { }
+
+    $wifi = $null
+    try {
+        $wlanOutput = & netsh wlan show interfaces 2>$null
+        if ($wlanOutput) {
+            $ssid = ($wlanOutput | Select-String '^\s+SSID\s+:\s+(.+)$' | Select-Object -First 1)
+            $signal = ($wlanOutput | Select-String '^\s+Signal\s+:\s+(\d+)%' | Select-Object -First 1)
+            $channel = ($wlanOutput | Select-String '^\s+Channel\s+:\s+(\d+)' | Select-Object -First 1)
+            $band = ($wlanOutput | Select-String '^\s+Band\s+:\s+(.+)$' | Select-Object -First 1)
+            if ($ssid) {
+                $wifi = [ordered]@{
+                    SSID          = $ssid.Matches[0].Groups[1].Value.Trim()
+                    SignalPercent = if ($signal) { [int]$signal.Matches[0].Groups[1].Value } else { $null }
+                    Channel       = if ($channel) { [int]$channel.Matches[0].Groups[1].Value } else { $null }
+                    Band          = if ($band) { $band.Matches[0].Groups[1].Value.Trim() } else { 'N/A' }
+                }
+            }
+        }
+    }
+    catch { }
+
+    $listeningPorts = @()
+    try {
+        $tcpConns = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -First 25
+        foreach ($conn in $tcpConns) {
+            $procName = 'N/A'
+            try {
+                $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+                if ($proc) { $procName = $proc.ProcessName }
+            }
+            catch { }
+            $listeningPorts += [ordered]@{
+                LocalAddress = [string]$conn.LocalAddress
+                Port         = [int]$conn.LocalPort
+                ProcessName  = $procName
+                PID          = [int]$conn.OwningProcess
+            }
+        }
+    }
+    catch { }
+
+    $smbShares = @()
+    try {
+        foreach ($share in (Get-SmbShare -ErrorAction SilentlyContinue)) {
+            $smbShares += [ordered]@{
+                Name        = $share.Name
+                Path        = if ($share.Path) { $share.Path } else { 'N/A' }
+                Description = if ($share.Description) { $share.Description } else { '' }
+            }
+        }
+    }
+    catch { }
+
+    $vpnProfiles = @()
+    try {
+        foreach ($vpn in (Get-VpnConnection -ErrorAction SilentlyContinue)) {
+            $vpnProfiles += [ordered]@{
+                Name             = $vpn.Name
+                ServerAddress    = if ($vpn.ServerAddress) { $vpn.ServerAddress } else { 'N/A' }
+                TunnelType       = if ($vpn.TunnelType) { [string]$vpn.TunnelType } else { 'N/A' }
+                ConnectionStatus = [string]$vpn.ConnectionStatus
+            }
+        }
+    }
+    catch { }
+
+    $gwReachable = $false
+    try {
+        $gw = (Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4DefaultGateway.NextHop
+        if ($gw) {
+            $gwReachable = [bool](Test-Connection -ComputerName $gw -Count 1 -Quiet -ErrorAction SilentlyContinue)
+        }
+    }
+    catch { }
+
+    return [ordered]@{
+        Adapters         = $adapters
+        WiFi             = $wifi
+        ListeningPorts   = $listeningPorts
+        SMBShares        = $smbShares
+        VPNProfiles      = $vpnProfiles
+        GatewayReachable = $gwReachable
+    }
+}
+
+function Get-WinPulseSoftwareInventory {
+    [CmdletBinding()]
+    param()
+
+    $regPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $seen = @{}
+    $items = @()
+    foreach ($rp in $regPaths) {
+        $entries = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
+        foreach ($entry in $entries) {
+            if (-not $entry.DisplayName) { continue }
+            $key = '{0}|{1}' -f $entry.DisplayName, $entry.DisplayVersion
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $items += [ordered]@{
+                Name        = $entry.DisplayName
+                Version     = if ($entry.DisplayVersion) { $entry.DisplayVersion } else { 'N/A' }
+                Publisher   = if ($entry.Publisher) { $entry.Publisher } else { 'N/A' }
+                InstallDate = if ($entry.InstallDate) { $entry.InstallDate } else { 'N/A' }
+            }
+        }
+    }
+
+    $items = @($items | Sort-Object { $_.Name })
+
+    return [ordered]@{
+        Items = $items
+        Count = $items.Count
+    }
+}
+
+function Get-WinPulsePrinterStatus {
+    [CmdletBinding()]
+    param()
+
+    $installed = @()
+    $defaultPrinter = 'N/A'
+    $stuckJobs = @()
+
+    if (-not (Get-Command -Name Get-Printer -ErrorAction SilentlyContinue)) {
+        return [ordered]@{ Installed = @(); DefaultPrinter = 'N/A'; StuckJobs = @() }
+    }
+
+    try {
+        $printers = Get-Printer -ErrorAction SilentlyContinue
+        foreach ($p in $printers) {
+            $isDefault = $false
+            if ($p.PSObject.Properties['Default']) { $isDefault = [bool]$p.Default }
+            if ($isDefault) { $defaultPrinter = $p.Name }
+            $installed += [ordered]@{
+                Name       = $p.Name
+                PortName   = if ($p.PortName) { $p.PortName } else { 'N/A' }
+                DriverName = if ($p.DriverName) { $p.DriverName } else { 'N/A' }
+                Shared     = [bool]$p.Shared
+                Default    = $isDefault
+            }
+        }
+    }
+    catch { }
+
+    try {
+        foreach ($p in $printers) {
+            $jobs = Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue
+            foreach ($job in $jobs) {
+                $stuckJobs += [ordered]@{
+                    PrinterName   = $p.Name
+                    DocumentName  = if ($job.DocumentName) { $job.DocumentName } else { 'N/A' }
+                    JobStatus     = [string]$job.JobStatus
+                    SubmittedTime = if ($job.SubmittedTime) { $job.SubmittedTime.ToString('yyyy-MM-dd HH:mm') } else { 'N/A' }
+                }
+            }
+        }
+    }
+    catch { }
+
+    return [ordered]@{
+        Installed      = $installed
+        DefaultPrinter = $defaultPrinter
+        StuckJobs      = $stuckJobs
+    }
+}
+
+function Get-WinPulseLicenseInfo {
+    [CmdletBinding()]
+    param()
+
+    $licResult = [ordered]@{
+        ActivationStatus = 'Unknown'
+        LicenseType      = 'Unknown'
+        PartialProductKey = 'N/A'
+        ExpiryDate       = $null
+        ProductName      = 'N/A'
+    }
+
+    try {
+        $lic = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue |
+            Where-Object { $_.PartialProductKey -and $_.Name -like '*Windows*' } |
+            Select-Object -First 1
+
+        if ($lic) {
+            $statusMap = @{ 0 = 'Unlicensed'; 1 = 'Activated'; 2 = 'OOB Grace'; 3 = 'OOT Grace'; 4 = 'Non-Genuine'; 5 = 'Notification'; 6 = 'Extended Grace' }
+            $licResult.ActivationStatus = if ($statusMap.ContainsKey([int]$lic.LicenseStatus)) { $statusMap[[int]$lic.LicenseStatus] } else { "Status $($lic.LicenseStatus)" }
+            $licResult.PartialProductKey = $lic.PartialProductKey
+            $licResult.ProductName = if ($lic.Name) { $lic.Name } else { 'N/A' }
+
+            $desc = [string]$lic.Description
+            if ($desc -match 'OEM') { $licResult.LicenseType = 'OEM' }
+            elseif ($desc -match 'RETAIL') { $licResult.LicenseType = 'Retail' }
+            elseif ($desc -match 'KMS') { $licResult.LicenseType = 'Volume/KMS' }
+            elseif ($desc -match 'MAK') { $licResult.LicenseType = 'Volume/MAK' }
+            elseif ($desc -match 'VOLUME') { $licResult.LicenseType = 'Volume' }
+
+            if ($lic.GracePeriodRemaining -and $lic.GracePeriodRemaining -gt 0) {
+                $licResult.ExpiryDate = (Get-Date).AddMinutes($lic.GracePeriodRemaining).ToString('yyyy-MM-dd')
+            }
+        }
+    }
+    catch { }
+
+    return $licResult
+}
+
+function Get-WinPulseScheduledTaskAnalysis {
+    [CmdletBinding()]
+    param()
+
+    $nonMicrosoft = @()
+    $failed = @()
+    $runAsSystem = @()
+
+    try {
+        $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
+        $nonMsTasks = @($allTasks | Where-Object { $_.TaskPath -notlike '\Microsoft\*' })
+
+        foreach ($task in $nonMsTasks) {
+            $nonMicrosoft += [ordered]@{
+                TaskName    = $task.TaskName
+                TaskPath    = $task.TaskPath
+                State       = [string]$task.State
+                Author      = if ($task.Author) { $task.Author } else { 'N/A' }
+                LastRunTime = 'N/A'
+            }
+
+            try {
+                $info = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+                if ($info) {
+                    if ($info.LastRunTime -and $info.LastRunTime.Year -gt 1999) {
+                        $nonMicrosoft[-1].LastRunTime = $info.LastRunTime.ToString('yyyy-MM-dd HH:mm')
+                    }
+                    if ($info.LastTaskResult -ne 0) {
+                        $failed += [ordered]@{
+                            TaskName    = $task.TaskName
+                            TaskPath    = $task.TaskPath
+                            LastResult  = '0x{0:X8}' -f $info.LastTaskResult
+                            LastRunTime = if ($info.LastRunTime -and $info.LastRunTime.Year -gt 1999) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'N/A' }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            $userId = $null
+            if ($task.Principal) { $userId = $task.Principal.UserId }
+            if ($userId -and ($userId -match 'SYSTEM' -or $userId -eq 'S-1-5-18')) {
+                $runAsSystem += [ordered]@{
+                    TaskName = $task.TaskName
+                    TaskPath = $task.TaskPath
+                    State    = [string]$task.State
+                }
+            }
+        }
+    }
+    catch { }
+
+    return [ordered]@{
+        NonMicrosoft = $nonMicrosoft
+        Failed       = $failed
+        RunAsSystem  = $runAsSystem
+    }
+}
+
+function Get-WinPulseVirtualizationInfo {
+    [CmdletBinding()]
+    param()
+
+    $isVM = $false
+    $vmPlatform = 'None'
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if ($cs) {
+            $model = [string]$cs.Model
+            $manufacturer = [string]$cs.Manufacturer
+            if ($model -match 'Virtual Machine|Hyper-V') { $isVM = $true; $vmPlatform = 'Hyper-V' }
+            elseif ($model -match 'VMware' -or $manufacturer -match 'VMware') { $isVM = $true; $vmPlatform = 'VMware' }
+            elseif ($model -match 'VirtualBox' -or $manufacturer -match 'innotek') { $isVM = $true; $vmPlatform = 'VirtualBox' }
+            elseif ($model -match 'KVM' -or $manufacturer -match 'QEMU') { $isVM = $true; $vmPlatform = 'KVM/QEMU' }
+            elseif ($cs.HypervisorPresent) { $isVM = $true; $vmPlatform = 'Unknown Hypervisor' }
+        }
+    }
+    catch { }
+
+    $hyperVEnabled = $null
+    try {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -ErrorAction SilentlyContinue
+        if ($feature) { $hyperVEnabled = ($feature.State -eq 'Enabled') }
+    }
+    catch { }
+
+    $wslDistros = @()
+    if (Get-Command wsl -ErrorAction SilentlyContinue) {
+        try {
+            $wslOutput = & wsl --list --quiet 2>$null
+            if ($wslOutput) {
+                $wslDistros = @($wslOutput | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() -replace '\x00', '' })
+            }
+        }
+        catch { }
+    }
+
+    return [ordered]@{
+        IsVM              = $isVM
+        VMPlatform        = $vmPlatform
+        HyperVEnabled     = $hyperVEnabled
+        WSLDistributions  = $wslDistros
+    }
+}
+
 function Invoke-CoreScan {
     [CmdletBinding()]
     param()
@@ -489,6 +1174,18 @@ function Invoke-CoreScan {
             DnsServers = @()
             Internet = $false
         }
+        HardwareDetail = $null
+        Temperatures   = $null
+        TPM            = $null
+        Drivers        = $null
+        Startup        = $null
+        UserAccounts   = $null
+        NetworkDetail  = $null
+        Software       = $null
+        Printers       = $null
+        License        = $null
+        ScheduledTasks = $null
+        Virtualization = $null
         Errors      = @()
     }
 
@@ -691,6 +1388,67 @@ function Invoke-CoreScan {
         $result.Errors += "NETWORK scan failed: $($_.Exception.Message)"
     }
 
+    # ── Extended diagnostic sections ─────────────────────────────────────────
+    Write-Host '  Scanning hardware details...' -ForegroundColor DarkGray -NoNewline
+    try { $result.HardwareDetail = Get-WinPulseHardwareDetail }
+    catch { $result.Errors += "HW DETAIL: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning temperatures...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Temperatures = Get-WinPulseTemperatures }
+    catch { $result.Errors += "TEMPERATURES: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning TPM...' -ForegroundColor DarkGray -NoNewline
+    try { $result.TPM = Get-WinPulseTPMStatus }
+    catch { $result.Errors += "TPM: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning drivers (this may take a moment)...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Drivers = Get-WinPulseDriverAnalysis }
+    catch { $result.Errors += "DRIVERS: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning startup items...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Startup = Get-WinPulseStartupAnalysis }
+    catch { $result.Errors += "STARTUP: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning user accounts...' -ForegroundColor DarkGray -NoNewline
+    try { $result.UserAccounts = Get-WinPulseUserAccounts }
+    catch { $result.Errors += "USERS: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning network details...' -ForegroundColor DarkGray -NoNewline
+    try { $result.NetworkDetail = Get-WinPulseNetworkDetail }
+    catch { $result.Errors += "NETWORK DETAIL: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning installed software...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Software = Get-WinPulseSoftwareInventory }
+    catch { $result.Errors += "SOFTWARE: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning printers...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Printers = Get-WinPulsePrinterStatus }
+    catch { $result.Errors += "PRINTERS: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning license...' -ForegroundColor DarkGray -NoNewline
+    try { $result.License = Get-WinPulseLicenseInfo }
+    catch { $result.Errors += "LICENSE: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning scheduled tasks...' -ForegroundColor DarkGray -NoNewline
+    try { $result.ScheduledTasks = Get-WinPulseScheduledTaskAnalysis }
+    catch { $result.Errors += "SCHEDULED TASKS: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    Write-Host '  Scanning virtualization...' -ForegroundColor DarkGray -NoNewline
+    try { $result.Virtualization = Get-WinPulseVirtualizationInfo }
+    catch { $result.Errors += "VIRTUALIZATION: $($_.Exception.Message)" }
+    Write-Host ' done' -ForegroundColor DarkGray
+
     return [pscustomobject]$result
 }
 
@@ -770,6 +1528,28 @@ function Show-WinPulseDashboard {
     Write-Status -label 'SECURITY' -value ('AV {0} | FW {1} | BitLocker {2}' -f $avLabel, $fwLabel, $blLabel) -state $securityState
     Write-Status -label 'NETWORK' -value ('{0} | GW {1} | DNS {2} | Net {3}' -f $scan.Network.IPv4, $scan.Network.Gateway, ($scan.Network.DnsServers -join ','), $scan.Network.Internet) -state $(if ($scan.Network.Internet) { 'OK' } else { 'Warning' })
     Write-Status -label 'HEALTH' -value ('BSOD7 {0} | Crit24 {1} | RebootPending {2}' -f $scan.Health.BsodRecentCount, $scan.Health.CriticalLast24Hours, $scan.Health.PendingReboot) -state $(if ($scan.Health.CriticalLast24Hours -eq 0 -and -not $scan.Health.PendingReboot) { 'OK' } else { 'Warning' })
+
+    # Extended dashboard lines
+    if ($scan.HardwareDetail) {
+        $cpuShort = if ($scan.HardwareDetail.CPU.Model -ne 'N/A') { ($scan.HardwareDetail.CPU.Model -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' ' } else { 'N/A' }
+        if ($cpuShort.Length -gt 30) { $cpuShort = $cpuShort.Substring(0, 30) }
+        $gpuShort = if ($scan.HardwareDetail.GPU.Count -gt 0) { $scan.HardwareDetail.GPU[0].Name } else { 'N/A' }
+        if ($gpuShort.Length -gt 25) { $gpuShort = $gpuShort.Substring(0, 25) }
+        $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'TPM N/A' }
+        $ramType = if ($scan.HardwareDetail.DIMMs.Count -gt 0) { $scan.HardwareDetail.DIMMs[0].Type } else { '' }
+        Write-Status -label 'DETAILS' -value ('{0} | {1} | {2} | {3}' -f $cpuShort, $gpuShort, $tpmLabel, $ramType) -state 'Info'
+    }
+    if ($scan.License) {
+        $licState = if ($scan.License.ActivationStatus -eq 'Activated') { 'OK' } else { 'Warning' }
+        Write-Status -label 'LICENSE' -value ('{0} | {1} | Key ...{2}' -f $scan.License.ActivationStatus, $scan.License.LicenseType, $scan.License.PartialProductKey) -state $licState
+    }
+    if ($scan.Drivers) {
+        $probCount = $scan.Drivers.Problematic.Count
+        $unsignedCount = $scan.Drivers.Unsigned.Count
+        $drvState = if ($probCount -gt 0) { 'Warning' } elseif ($unsignedCount -gt 5) { 'Warning' } else { 'OK' }
+        Write-Status -label 'DRIVERS' -value ('Problematic {0} | Unsigned {1} | Recent {2}' -f $probCount, $unsignedCount, $scan.Drivers.RecentlyChanged.Count) -state $drvState
+    }
+
     Write-Host ''
 
     if ($scan.Errors.Count -gt 0) {
@@ -820,6 +1600,38 @@ function Get-WinPulseTriageFindings {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Scan warnings present: {0}' -f $scan.Errors.Count) }
     }
 
+    # Extended triage findings
+    if ($scan.TPM -and -not $scan.TPM.Present) {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'TPM not detected (Win 11 incompatible).' }
+    }
+    elseif ($scan.TPM -and $scan.TPM.Present -and -not $scan.TPM.Win11Compatible) {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('TPM version {0} detected (Win 11 requires 2.0).' -f $scan.TPM.Version) }
+    }
+    if ($scan.Drivers -and $scan.Drivers.Problematic.Count -gt 0) {
+        $sev = if ($scan.Drivers.Problematic.Count -gt 3) { 'Critical' } else { 'Warning' }
+        $findings += [pscustomobject]@{ Severity = $sev; Message = ('Problematic device drivers: {0}' -f $scan.Drivers.Problematic.Count) }
+    }
+    if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 3) {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Failed auto-start services: {0}' -f $scan.Startup.FailedAutoServices.Count) }
+    }
+    if ($scan.License -and $scan.License.ActivationStatus -ne 'Activated') {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Windows license: {0}' -f $scan.License.ActivationStatus) }
+    }
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery.Present -and $scan.HardwareDetail.Battery.HealthPercent -and $scan.HardwareDetail.Battery.HealthPercent -lt 50) {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Battery health is low: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
+    }
+    if ($scan.Temperatures -and $scan.Temperatures.CPUTempCelsius) {
+        if ($scan.Temperatures.CPUTempCelsius -gt 85) {
+            $findings += [pscustomobject]@{ Severity = 'Critical'; Message = ('CPU temperature critical: {0} C' -f $scan.Temperatures.CPUTempCelsius) }
+        }
+        elseif ($scan.Temperatures.CPUTempCelsius -gt 70) {
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('CPU temperature elevated: {0} C' -f $scan.Temperatures.CPUTempCelsius) }
+        }
+    }
+    if ($scan.Printers -and $scan.Printers.StuckJobs.Count -gt 0) {
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Print jobs stuck in queue: {0}' -f $scan.Printers.StuckJobs.Count) }
+    }
+
     return @($findings)
 }
 
@@ -862,6 +1674,461 @@ function Show-WinPulseTriageSummary {
         Write-Host ('- [{0}] {1}' -f $item.Severity.ToUpperInvariant(), $item.Message) -ForegroundColor $color
     }
 }
+
+# ── HTML Report ──────────────────────────────────────────────────────────────
+
+function ConvertTo-WinPulseHtmlTable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Data,
+        [string[]]$Columns
+    )
+
+    if ($Data.Count -eq 0) { return '<p class="empty">No data available.</p>' }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('<table><thead><tr>')
+
+    $keys = if ($Columns) { $Columns } else { $Data[0].Keys }
+    foreach ($key in $keys) {
+        [void]$sb.Append('<th>{0}</th>' -f [System.Web.HttpUtility]::HtmlEncode($key))
+    }
+    [void]$sb.Append('</tr></thead><tbody>')
+
+    foreach ($row in $Data) {
+        [void]$sb.Append('<tr>')
+        foreach ($key in $keys) {
+            $val = if ($row -is [hashtable] -or $row -is [System.Collections.Specialized.OrderedDictionary]) { $row[$key] } else { $row.$key }
+            [void]$sb.Append('<td>{0}</td>' -f [System.Web.HttpUtility]::HtmlEncode([string]$val))
+        }
+        [void]$sb.Append('</tr>')
+    }
+    [void]$sb.Append('</tbody></table>')
+    return $sb.ToString()
+}
+
+function Get-WinPulseHtmlStateClass {
+    [CmdletBinding()]
+    param([string]$state)
+    switch ($state) {
+        'OK' { 'state-ok' }
+        'Warning' { 'state-warn' }
+        'Critical' { 'state-crit' }
+        default { 'state-info' }
+    }
+}
+
+function Export-WinPulseHtmlReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$scan
+    )
+
+    Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+    $e = [System.Web.HttpUtility]
+
+    $findings = @(Get-WinPulseTriageFindings -scan $scan)
+    $overall = 'OK'
+    if ($findings | Where-Object { $_.Severity -eq 'Critical' }) { $overall = 'CRITICAL' }
+    elseif ($findings.Count -gt 0) { $overall = 'WARNING' }
+    $overallClass = switch ($overall) { 'CRITICAL' { 'state-crit' }; 'WARNING' { 'state-warn' }; default { 'state-ok' } }
+
+    $sb = [System.Text.StringBuilder]::new()
+
+    # ── HTML Head ────────────────────────────────────────────────────────────
+    [void]$sb.Append(@'
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WinPulse Report</title>
+<style>
+:root{--bg:#1a1a2e;--card:#16213e;--border:#0f3460;--text:#e0e0e0;--ok:#2ecc71;--warn:#f39c12;--crit:#e74c3c;--info:#3498db;--muted:#7f8c8d}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Tahoma,Geneva,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;padding:20px}
+.container{max-width:1100px;margin:0 auto}
+header{text-align:center;padding:20px 0;border-bottom:2px solid var(--border);margin-bottom:20px}
+header h1{font-size:1.8em;color:var(--info)}
+header .subtitle{color:var(--muted);font-size:0.9em}
+.overall-badge{display:inline-block;padding:6px 20px;border-radius:4px;font-weight:bold;font-size:1.1em;margin:10px 0}
+.state-ok{color:var(--ok);border:1px solid var(--ok)}
+.state-warn{color:var(--warn);border:1px solid var(--warn)}
+.state-crit{color:var(--crit);border:1px solid var(--crit)}
+.state-info{color:var(--info);border:1px solid var(--info)}
+.bg-ok{background:rgba(46,204,113,0.1)} .bg-warn{background:rgba(243,156,18,0.1)} .bg-crit{background:rgba(231,76,60,0.1)}
+section{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px}
+section h2{color:var(--info);font-size:1.15em;margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:0.88em}
+th{background:var(--border);color:var(--text);text-align:left;padding:6px 10px;white-space:nowrap}
+td{padding:5px 10px;border-bottom:1px solid rgba(255,255,255,0.05)}
+tr:hover td{background:rgba(255,255,255,0.03)}
+.kv{display:grid;grid-template-columns:200px 1fr;gap:4px 16px;font-size:0.92em}
+.kv .k{color:var(--muted);font-weight:600} .kv .v{color:var(--text)}
+.findings-list{list-style:none;padding:0}
+.findings-list li{padding:4px 8px;margin:2px 0;border-radius:3px;font-size:0.92em}
+.empty{color:var(--muted);font-style:italic;font-size:0.9em}
+.notes-area{width:100%;min-height:80px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:4px;font-family:inherit;resize:vertical}
+details summary{cursor:pointer;color:var(--info);font-weight:600;padding:4px 0}
+footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;border-top:1px solid var(--border);margin-top:20px}
+@media print{
+  body{background:#fff;color:#000;padding:10px}
+  .container{max-width:100%}
+  section{border:1px solid #ccc;break-inside:avoid}
+  :root{--bg:#fff;--card:#fff;--border:#ccc;--text:#000;--muted:#666}
+  th{background:#eee;color:#000}
+  td{border-bottom:1px solid #ddd}
+  .notes-area{border:1px solid #ccc;background:#fafafa;color:#000}
+  .state-ok{color:#16a34a} .state-warn{color:#ca8a04} .state-crit{color:#dc2626} .state-info{color:#2563eb}
+  .bg-ok{background:#f0fdf4} .bg-warn{background:#fefce8} .bg-crit{background:#fef2f2}
+}
+</style>
+</head>
+<body>
+<div class="container">
+'@)
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    [void]$sb.Append(('<header><h1>WinPulse Diagnostic Report</h1><p class="subtitle">{0} | Generated: {1}</p>' -f $e::HtmlEncode($scan.System.Hostname), $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')))
+    [void]$sb.Append(('<div class="overall-badge {0}">Overall: {1}</div>' -f $overallClass, $overall))
+    [void]$sb.Append('</header>')
+
+    # ── Triage ───────────────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Triage Findings</h2>')
+    if ($findings.Count -eq 0) {
+        [void]$sb.Append('<p class="state-ok">No issues detected.</p>')
+    }
+    else {
+        [void]$sb.Append('<ul class="findings-list">')
+        foreach ($f in ($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })) {
+            $cls = if ($f.Severity -eq 'Critical') { 'bg-crit state-crit' } else { 'bg-warn state-warn' }
+            [void]$sb.Append(('<li class="{0}">[{1}] {2}</li>' -f $cls, $e::HtmlEncode($f.Severity.ToUpperInvariant()), $e::HtmlEncode($f.Message)))
+        }
+        [void]$sb.Append('</ul>')
+    }
+    [void]$sb.Append('</section>')
+
+    # ── Technician Notes ─────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Technician Notes</h2><textarea class="notes-area" placeholder="Add notes here before printing..."></textarea></section>')
+
+    # ── System Info ──────────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>System Information</h2><div class="kv">')
+    $sysFields = [ordered]@{
+        'Hostname' = $scan.System.Hostname; 'Model' = $scan.System.Model; 'Serial' = $scan.System.Serial
+        'Windows' = $scan.System.WindowsVersion; 'Uptime' = $scan.System.Uptime
+        'Domain' = ('{0} ({1})' -f $scan.System.Domain, $(if ($scan.System.DomainJoined) { 'Joined' } else { 'Workgroup' }))
+        'Firmware' = $scan.System.Firmware; 'SecureBoot' = $scan.Security.SecureBootState
+    }
+    foreach ($kv in $sysFields.GetEnumerator()) {
+        [void]$sb.Append(('<span class="k">{0}</span><span class="v">{1}</span>' -f $e::HtmlEncode($kv.Key), $e::HtmlEncode([string]$kv.Value)))
+    }
+    [void]$sb.Append('</div></section>')
+
+    # ── Hardware Details ─────────────────────────────────────────────────────
+    if ($scan.HardwareDetail) {
+        [void]$sb.Append('<section><h2>Hardware Details</h2>')
+
+        [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">CPU</h3><div class="kv">')
+        $c = $scan.HardwareDetail.CPU
+        foreach ($kv in ([ordered]@{ 'Model' = $c.Model; 'Cores / Threads' = ('{0} / {1}' -f $c.Cores, $c.Threads); 'Base Freq' = ('{0} MHz' -f $c.BaseFreqMHz); 'Architecture' = $c.Architecture }).GetEnumerator()) {
+            [void]$sb.Append(('<span class="k">{0}</span><span class="v">{1}</span>' -f $e::HtmlEncode($kv.Key), $e::HtmlEncode([string]$kv.Value)))
+        }
+        [void]$sb.Append('</div>')
+
+        if ($scan.HardwareDetail.GPU.Count -gt 0) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">GPU</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.HardwareDetail.GPU -Columns @('Name','DriverVersion','VRAM','Resolution')))
+        }
+
+        if ($scan.HardwareDetail.DIMMs.Count -gt 0) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Memory Modules</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.HardwareDetail.DIMMs -Columns @('Slot','Capacity','SpeedMHz','Type','Manufacturer')))
+        }
+
+        [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Motherboard</h3><div class="kv">')
+        $mb = $scan.HardwareDetail.Motherboard
+        foreach ($kv in ([ordered]@{ 'Manufacturer' = $mb.Manufacturer; 'Model' = $mb.Model; 'BIOS' = ('{0} ({1})' -f $mb.BIOSVersion, $mb.BIOSDate) }).GetEnumerator()) {
+            [void]$sb.Append(('<span class="k">{0}</span><span class="v">{1}</span>' -f $e::HtmlEncode($kv.Key), $e::HtmlEncode([string]$kv.Value)))
+        }
+        [void]$sb.Append('</div>')
+
+        if ($scan.HardwareDetail.Battery.Present) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Battery</h3><div class="kv">')
+            $bat = $scan.HardwareDetail.Battery
+            $batHealth = if ($bat.HealthPercent) { '{0}%' -f $bat.HealthPercent } else { 'N/A' }
+            $batClass = if ($bat.HealthPercent -and $bat.HealthPercent -lt 50) { 'state-crit' } elseif ($bat.HealthPercent -and $bat.HealthPercent -lt 80) { 'state-warn' } else { 'state-ok' }
+            [void]$sb.Append(('<span class="k">Health</span><span class="v {0}">{1}</span>' -f $batClass, $e::HtmlEncode($batHealth)))
+            [void]$sb.Append(('<span class="k">Cycle Count</span><span class="v">{0}</span>' -f $(if ($bat.CycleCount) { $bat.CycleCount } else { 'N/A' })))
+            [void]$sb.Append(('<span class="k">Design / Full Charge</span><span class="v">{0} Wh / {1} Wh</span>' -f $bat.DesignCapacityWh, $bat.FullChargeCapacityWh))
+            [void]$sb.Append('</div>')
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── RAM & Disk ───────────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Storage &amp; Memory</h2><div class="kv">')
+    $ram = $scan.Hardware.Ram
+    [void]$sb.Append(('<span class="k">RAM</span><span class="v">{0} used ({1}%) | {2} free | {3} total</span>' -f $ram.Used, $ram.UsedPercent, $ram.Free, $ram.Total))
+    [void]$sb.Append(('<span class="k">SMART</span><span class="v {0}">{1}</span>' -f $(if ($scan.Hardware.SmartHealthy) { 'state-ok' } else { 'state-crit' }), $(if ($scan.Hardware.SmartHealthy) { 'Healthy' } else { 'FAILURE PREDICTED' })))
+    [void]$sb.Append('</div>')
+    if ($scan.Hardware.Disks.Count -gt 0) {
+        $diskData = @($scan.Hardware.Disks | ForEach-Object { [ordered]@{ Drive = $_.Drive; Size = $_.Size; Free = $_.Free; 'Used%' = $_.UsedPercent } })
+        [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $diskData))
+    }
+    [void]$sb.Append('</section>')
+
+    # ── Temperatures ─────────────────────────────────────────────────────────
+    if ($scan.Temperatures) {
+        [void]$sb.Append('<section><h2>Temperatures</h2><div class="kv">')
+        $cpuT = if ($scan.Temperatures.CPUTempCelsius) { '{0} C' -f $scan.Temperatures.CPUTempCelsius } else { 'N/A' }
+        $cpuTClass = if ($scan.Temperatures.CPUTempCelsius -and $scan.Temperatures.CPUTempCelsius -gt 85) { 'state-crit' } elseif ($scan.Temperatures.CPUTempCelsius -and $scan.Temperatures.CPUTempCelsius -gt 70) { 'state-warn' } else { 'state-ok' }
+        [void]$sb.Append(('<span class="k">CPU Temperature</span><span class="v {0}">{1}</span>' -f $cpuTClass, $e::HtmlEncode($cpuT)))
+        [void]$sb.Append(('<span class="k">Source</span><span class="v">{0}</span>' -f $e::HtmlEncode($scan.Temperatures.CPUTempSource)))
+        [void]$sb.Append('</div>')
+        if ($scan.Temperatures.DiskTemps.Count -gt 0) {
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Temperatures.DiskTemps))
+        }
+        [void]$sb.Append(('<p class="empty">{0}</p>' -f $e::HtmlEncode($scan.Temperatures.Note)))
+        [void]$sb.Append('</section>')
+    }
+
+    # ── TPM ──────────────────────────────────────────────────────────────────
+    if ($scan.TPM) {
+        [void]$sb.Append('<section><h2>TPM Status</h2><div class="kv">')
+        $t = $scan.TPM
+        $tpmClass = if ($t.Win11Compatible) { 'state-ok' } elseif ($t.Present) { 'state-warn' } else { 'state-crit' }
+        [void]$sb.Append(('<span class="k">Present</span><span class="v">{0}</span>' -f $t.Present))
+        [void]$sb.Append(('<span class="k">Enabled</span><span class="v">{0}</span>' -f $t.Enabled))
+        [void]$sb.Append(('<span class="k">Version</span><span class="v {0}">{1}</span>' -f $tpmClass, $e::HtmlEncode($t.Version)))
+        [void]$sb.Append(('<span class="k">Manufacturer</span><span class="v">{0}</span>' -f $e::HtmlEncode($t.Manufacturer)))
+        [void]$sb.Append(('<span class="k">Win 11 Compatible</span><span class="v {0}">{1}</span>' -f $tpmClass, $t.Win11Compatible))
+        [void]$sb.Append('</div></section>')
+    }
+
+    # ── Security ─────────────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Security</h2><div class="kv">')
+    $avLabel = if ($scan.Security.Antivirus.Products.Count -gt 0) { ($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { $_ } | Sort-Object -Unique) -join ', ' } else { 'None detected' }
+    [void]$sb.Append(('<span class="k">Antivirus</span><span class="v">{0}</span>' -f $e::HtmlEncode($avLabel)))
+    [void]$sb.Append(('<span class="k">Real-time Protection</span><span class="v {0}">{1}</span>' -f $(if ($scan.Security.Antivirus.EffectiveRealtimeProtection) { 'state-ok' } else { 'state-crit' }), $scan.Security.Antivirus.EffectiveRealtimeProtection))
+    [void]$sb.Append(('<span class="k">Firewall</span><span class="v {0}">{1}</span>' -f $(if ($scan.Security.FirewallEnabled) { 'state-ok' } else { 'state-crit' }), $(if ($scan.Security.FirewallEnabled) { 'Enabled' } else { 'DISABLED' })))
+    $blOn = $false
+    if ($scan.Security.BitLocker -and $scan.Security.BitLocker.Count -gt 0) { $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0 }
+    [void]$sb.Append(('<span class="k">BitLocker</span><span class="v">{0}</span>' -f $(if ($blOn) { 'On' } else { 'Off' })))
+    [void]$sb.Append('</div></section>')
+
+    # ── License ──────────────────────────────────────────────────────────────
+    if ($scan.License) {
+        [void]$sb.Append('<section><h2>Windows License</h2><div class="kv">')
+        $l = $scan.License
+        $licClass = if ($l.ActivationStatus -eq 'Activated') { 'state-ok' } else { 'state-warn' }
+        [void]$sb.Append(('<span class="k">Status</span><span class="v {0}">{1}</span>' -f $licClass, $e::HtmlEncode($l.ActivationStatus)))
+        [void]$sb.Append(('<span class="k">Type</span><span class="v">{0}</span>' -f $e::HtmlEncode($l.LicenseType)))
+        [void]$sb.Append(('<span class="k">Product</span><span class="v">{0}</span>' -f $e::HtmlEncode($l.ProductName)))
+        [void]$sb.Append(('<span class="k">Partial Key</span><span class="v">...{0}</span>' -f $e::HtmlEncode($l.PartialProductKey)))
+        if ($l.ExpiryDate) { [void]$sb.Append(('<span class="k">Expiry</span><span class="v state-warn">{0}</span>' -f $e::HtmlEncode($l.ExpiryDate))) }
+        [void]$sb.Append('</div></section>')
+    }
+
+    # ── Health & Events ──────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Health &amp; Events</h2><div class="kv">')
+    $h = $scan.Health
+    [void]$sb.Append(('<span class="k">BSOD (7 days)</span><span class="v {0}">{1}</span>' -f $(if ($h.BsodRecentCount -gt 0) { 'state-crit' } else { 'state-ok' }), $h.BsodRecentCount))
+    [void]$sb.Append(('<span class="k">Critical Events (24h)</span><span class="v {0}">{1}</span>' -f $(if ($h.CriticalLast24Hours -gt 0) { 'state-crit' } else { 'state-ok' }), $h.CriticalLast24Hours))
+    [void]$sb.Append(('<span class="k">WU Errors (24h)</span><span class="v {0}">{1}</span>' -f $(if ($h.WindowsUpdateErrorCount24Hours -gt 0) { 'state-warn' } else { 'state-ok' }), $h.WindowsUpdateErrorCount24Hours))
+    [void]$sb.Append(('<span class="k">Pending Reboot</span><span class="v {0}">{1}</span>' -f $(if ($h.PendingReboot) { 'state-warn' } else { 'state-ok' }), $h.PendingReboot))
+    [void]$sb.Append('</div>')
+    if ($h.WindowsUpdateRecentErrors -and $h.WindowsUpdateRecentErrors.Count -gt 0) {
+        $wuData = @($h.WindowsUpdateRecentErrors | ForEach-Object { [ordered]@{ Time = $_.Time.ToString('MM-dd HH:mm'); Code = $_.Code; Category = $_.Category; Message = if ($_.Message.Length -gt 80) { $_.Message.Substring(0,80) + '...' } else { $_.Message } } })
+        [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $wuData))
+    }
+    [void]$sb.Append('</section>')
+
+    # ── Network ──────────────────────────────────────────────────────────────
+    [void]$sb.Append('<section><h2>Network</h2><div class="kv">')
+    [void]$sb.Append(('<span class="k">IPv4</span><span class="v">{0}</span>' -f $scan.Network.IPv4))
+    [void]$sb.Append(('<span class="k">Gateway</span><span class="v">{0}</span>' -f $scan.Network.Gateway))
+    [void]$sb.Append(('<span class="k">DNS</span><span class="v">{0}</span>' -f ($scan.Network.DnsServers -join ', ')))
+    [void]$sb.Append(('<span class="k">Internet</span><span class="v {0}">{1}</span>' -f $(if ($scan.Network.Internet) { 'state-ok' } else { 'state-crit' }), $scan.Network.Internet))
+    [void]$sb.Append('</div>')
+    if ($scan.NetworkDetail) {
+        if ($scan.NetworkDetail.Adapters.Count -gt 0) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Adapters</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.Adapters))
+        }
+        if ($scan.NetworkDetail.WiFi) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">WiFi</h3><div class="kv">')
+            $w = $scan.NetworkDetail.WiFi
+            [void]$sb.Append(('<span class="k">SSID</span><span class="v">{0}</span>' -f $e::HtmlEncode($w.SSID)))
+            [void]$sb.Append(('<span class="k">Signal</span><span class="v">{0}%</span>' -f $w.SignalPercent))
+            [void]$sb.Append(('<span class="k">Channel / Band</span><span class="v">{0} / {1}</span>' -f $w.Channel, $w.Band))
+            [void]$sb.Append('</div>')
+        }
+        if ($scan.NetworkDetail.ListeningPorts.Count -gt 0) {
+            [void]$sb.Append('<details><summary>Listening Ports ({0})</summary>' -f $scan.NetworkDetail.ListeningPorts.Count)
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.ListeningPorts))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.NetworkDetail.SMBShares.Count -gt 0) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">SMB Shares</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.SMBShares))
+        }
+        if ($scan.NetworkDetail.VPNProfiles.Count -gt 0) {
+            [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">VPN Profiles</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.VPNProfiles))
+        }
+    }
+    [void]$sb.Append('</section>')
+
+    # ── Drivers ──────────────────────────────────────────────────────────────
+    if ($scan.Drivers) {
+        [void]$sb.Append('<section><h2>Driver Analysis</h2>')
+        if ($scan.Drivers.Problematic.Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Problematic Drivers ({0})</h3>' -f $scan.Drivers.Problematic.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.Problematic))
+        }
+        else {
+            [void]$sb.Append('<p class="state-ok">No problematic drivers detected.</p>')
+        }
+        if ($scan.Drivers.Unsigned.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Unsigned Drivers ({0})</summary>' -f $scan.Drivers.Unsigned.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.Unsigned))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.Drivers.RecentlyChanged.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Recently Changed Drivers ({0})</summary>' -f $scan.Drivers.RecentlyChanged.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.RecentlyChanged))
+            [void]$sb.Append('</details>')
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── Startup ──────────────────────────────────────────────────────────────
+    if ($scan.Startup) {
+        [void]$sb.Append('<section><h2>Startup &amp; Boot</h2><div class="kv">')
+        [void]$sb.Append(('<span class="k">Last Boot</span><span class="v">{0}</span>' -f $(if ($scan.Startup.LastBootTime) { $scan.Startup.LastBootTime.ToString('yyyy-MM-dd HH:mm:ss') } else { 'N/A' })))
+        [void]$sb.Append(('<span class="k">Boot Duration</span><span class="v">{0}</span>' -f $(if ($scan.Startup.BootDurationMs) { '{0:N0} ms ({1:N1} s)' -f $scan.Startup.BootDurationMs, ($scan.Startup.BootDurationMs / 1000) } else { 'N/A' })))
+        [void]$sb.Append('</div>')
+        if ($scan.Startup.RunKeyItems.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Registry Run Keys ({0})</summary>' -f $scan.Startup.RunKeyItems.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.RunKeyItems))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.Startup.StartupFolderItems.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Startup Folder Items ({0})</summary>' -f $scan.Startup.StartupFolderItems.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.StartupFolderItems))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.Startup.FailedAutoServices.Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Auto-Start Services ({0})</h3>' -f $scan.Startup.FailedAutoServices.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.FailedAutoServices))
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── User Accounts ────────────────────────────────────────────────────────
+    if ($scan.UserAccounts) {
+        [void]$sb.Append('<section><h2>User Accounts</h2>')
+        [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">User profiles on disk: {0}</p>' -f $scan.UserAccounts.ProfileCount))
+        if ($scan.UserAccounts.Users.Count -gt 0) {
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.UserAccounts.Users))
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── Printers ─────────────────────────────────────────────────────────────
+    if ($scan.Printers) {
+        [void]$sb.Append('<section><h2>Printers</h2>')
+        [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">Default: {0}</p>' -f $e::HtmlEncode($scan.Printers.DefaultPrinter)))
+        if ($scan.Printers.Installed.Count -gt 0) {
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Printers.Installed))
+        }
+        else {
+            [void]$sb.Append('<p class="empty">No printers installed.</p>')
+        }
+        if ($scan.Printers.StuckJobs.Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Stuck Print Jobs ({0})</h3>' -f $scan.Printers.StuckJobs.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Printers.StuckJobs))
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── Software Inventory ───────────────────────────────────────────────────
+    if ($scan.Software) {
+        [void]$sb.Append(('<section><h2>Installed Software ({0})</h2>' -f $scan.Software.Count))
+        if ($scan.Software.Items.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Show all {0} programs</summary>' -f $scan.Software.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Software.Items))
+            [void]$sb.Append('</details>')
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── Scheduled Tasks ──────────────────────────────────────────────────────
+    if ($scan.ScheduledTasks) {
+        [void]$sb.Append('<section><h2>Scheduled Tasks</h2>')
+        if ($scan.ScheduledTasks.Failed.Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Tasks ({0})</h3>' -f $scan.ScheduledTasks.Failed.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.Failed))
+        }
+        if ($scan.ScheduledTasks.NonMicrosoft.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Non-Microsoft Tasks ({0})</summary>' -f $scan.ScheduledTasks.NonMicrosoft.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.NonMicrosoft))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.ScheduledTasks.RunAsSystem.Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Tasks Running as SYSTEM ({0})</summary>' -f $scan.ScheduledTasks.RunAsSystem.Count))
+            [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.RunAsSystem))
+            [void]$sb.Append('</details>')
+        }
+        if ($scan.ScheduledTasks.Failed.Count -eq 0 -and $scan.ScheduledTasks.NonMicrosoft.Count -eq 0) {
+            [void]$sb.Append('<p class="state-ok">No non-Microsoft or failed tasks detected.</p>')
+        }
+        [void]$sb.Append('</section>')
+    }
+
+    # ── Virtualization ───────────────────────────────────────────────────────
+    if ($scan.Virtualization) {
+        [void]$sb.Append('<section><h2>Virtualization</h2><div class="kv">')
+        $v = $scan.Virtualization
+        [void]$sb.Append(('<span class="k">Virtual Machine</span><span class="v">{0}</span>' -f $(if ($v.IsVM) { 'Yes ({0})' -f $v.VMPlatform } else { 'No (Physical)' })))
+        [void]$sb.Append(('<span class="k">Hyper-V</span><span class="v">{0}</span>' -f $(if ($v.HyperVEnabled -eq $true) { 'Enabled' } elseif ($v.HyperVEnabled -eq $false) { 'Disabled' } else { 'N/A' })))
+        if ($v.WSLDistributions.Count -gt 0) {
+            [void]$sb.Append(('<span class="k">WSL Distributions</span><span class="v">{0}</span>' -f ($v.WSLDistributions -join ', ')))
+        }
+        else {
+            [void]$sb.Append('<span class="k">WSL</span><span class="v">None</span>')
+        }
+        [void]$sb.Append('</div></section>')
+    }
+
+    # ── Scan Warnings ────────────────────────────────────────────────────────
+    if ($scan.Errors.Count -gt 0) {
+        [void]$sb.Append('<section><h2>Scan Warnings</h2><ul class="findings-list">')
+        foreach ($err in $scan.Errors) {
+            [void]$sb.Append(('<li class="bg-warn state-warn">{0}</li>' -f $e::HtmlEncode($err)))
+        }
+        [void]$sb.Append('</ul></section>')
+    }
+
+    # ── Footer ───────────────────────────────────────────────────────────────
+    [void]$sb.Append(('<footer>Generated by WinPulse v1.0 | {0} | {1}</footer>' -f $scan.System.Hostname, $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')))
+    [void]$sb.Append('</div></body></html>')
+
+    # Write file
+    $target = Join-Path $script:WinPulsePaths.Exports ('report-{0}.html' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $sb.ToString() | Set-Content -Path $target -Encoding UTF8
+    Write-Host ("HTML report exported: {0}" -f $target) -ForegroundColor Green
+
+    try { Start-Process $target }
+    catch { Write-Host 'Could not open report in browser. File saved.' -ForegroundColor Yellow }
+
+    return $target
+}
+
+# ── End HTML Report ──────────────────────────────────────────────────────────
 
 function Show-WindowsUpdateErrorDetails {
     [CmdletBinding()]
@@ -3687,6 +4954,37 @@ function Invoke-WinPulseExitCleanupPrompt {
     }
 }
 
+function Show-WinPulseExportMenu {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$scan
+    )
+
+    while ($true) {
+        Write-WinPulseHeader -title 'Export'
+        Write-Host '  1. [J] Export Scan JSON' -ForegroundColor White
+        Write-Host '  2. [H] Export HTML Report' -ForegroundColor White
+        Write-Host '  0. [B] Back' -ForegroundColor DarkGray
+
+        $choice = (Read-Host 'Select an option').Trim().ToUpperInvariant()
+        switch ($choice) {
+            { $_ -in @('1', 'J') } {
+                $target = Join-Path $script:WinPulsePaths.Exports ('scan-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                $scan | ConvertTo-Json -Depth 6 | Set-Content -Path $target -Encoding UTF8
+                Write-Host ("Exported: {0}" -f $target) -ForegroundColor Green
+                Read-Host 'Press Enter to continue' | Out-Null
+            }
+            { $_ -in @('2', 'H') } {
+                Export-WinPulseHtmlReport -scan $scan
+                Read-Host 'Press Enter to continue' | Out-Null
+            }
+            { $_ -in @('0', 'B') } { return }
+            default { Write-Host 'Invalid option.' -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Show-WinPulseMainMenu {
     [CmdletBinding()]
     param(
@@ -3703,7 +5001,7 @@ function Show-WinPulseMainMenu {
         Write-Host '  4. [T] External Tools' -ForegroundColor White
         Write-Host '  5. [W] Tweaks' -ForegroundColor White
         Write-Host '  6. [C] Cleanup' -ForegroundColor White
-        Write-Host '  7. [X] Export Scan JSON' -ForegroundColor White
+        Write-Host '  7. [X] Export' -ForegroundColor White
         Write-Host '  0. [E] Exit' -ForegroundColor DarkGray
 
         $choice = (Read-Host 'Select an option').Trim().ToUpperInvariant()
@@ -3719,10 +5017,7 @@ function Show-WinPulseMainMenu {
             { $_ -in @('5', 'W') } { Show-WinPulseTweaksMenu }
             { $_ -in @('6', 'C') } { Show-WinPulseCleanupMenu }
             { $_ -in @('7', 'X') } {
-                $target = Join-Path $script:WinPulsePaths.Exports ('scan-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-                $scan | ConvertTo-Json -Depth 6 | Set-Content -Path $target -Encoding UTF8
-                Write-Host ("Exported: {0}" -f $target) -ForegroundColor Green
-                Read-Host 'Press Enter to continue' | Out-Null
+                Show-WinPulseExportMenu -scan $scan
             }
             { $_ -in @('0', 'E') } {
                 Invoke-WinPulseExitCleanupPrompt
