@@ -4969,9 +4969,6 @@ function Invoke-WinPulseRepairs {
             }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             default { return $scan }
-            default {
-                Write-Host 'Invalid option.' -ForegroundColor Yellow
-            }
         }
     }
 }
