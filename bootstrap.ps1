@@ -3636,17 +3636,12 @@ function Get-WinPulseOfficeCatalog {
     param()
 
     return @(
-        [pscustomobject]@{ Name = 'Office 2019 Home and Business (CZ)'; ProductId = 'HomeBusiness2019Retail'; Channel = $null; Version = '2019'; Edition = 'HomeBusiness' }
-        [pscustomobject]@{ Name = 'Office 2019 Home (CZ)'; ProductId = 'HomeStudent2019Retail'; Channel = $null; Version = '2019'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Office 2019 Standard Volume (CZ)'; ProductId = 'Standard2019Volume'; Channel = 'PerpetualVL2019'; Version = '2019'; Edition = 'StandardVolume' }
-        [pscustomobject]@{ Name = 'Office 2021 Home and Business (CZ)'; ProductId = 'HomeBusiness2021Retail'; Channel = $null; Version = '2021'; Edition = 'HomeBusiness' }
-        [pscustomobject]@{ Name = 'Office 2021 Home (CZ)'; ProductId = 'HomeStudent2021Retail'; Channel = $null; Version = '2021'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Office 2021 Standard Volume (CZ)'; ProductId = 'Standard2021Volume'; Channel = 'PerpetualVL2021'; Version = '2021'; Edition = 'StandardVolume' }
-        [pscustomobject]@{ Name = 'Office 2024 Home and Business (CZ)'; ProductId = 'HomeBusiness2024Retail'; Channel = $null; Version = '2024'; Edition = 'HomeBusiness' }
-        [pscustomobject]@{ Name = 'Office 2024 Home (CZ)'; ProductId = 'HomeStudent2024Retail'; Channel = $null; Version = '2024'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Office 2024 Standard Volume (CZ)'; ProductId = 'Standard2024Volume'; Channel = 'PerpetualVL2024'; Version = '2024'; Edition = 'StandardVolume' }
-        [pscustomobject]@{ Name = 'Microsoft 365 Home (CZ)'; ProductId = 'O365HomePremRetail'; Channel = 'Current'; Version = '365'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Microsoft 365 Business (CZ)'; ProductId = 'O365BusinessRetail'; Channel = 'Current'; Version = '365'; Edition = 'Business' }
+        [pscustomobject]@{ Name = 'Office 2021 Home and Business (CZ)'; ProductId = 'HomeBusiness2021Retail'; Channel = $null;      Version = '2021'; Edition = 'HomeBusiness' }
+        [pscustomobject]@{ Name = 'Office 2021 Home (CZ)';               ProductId = 'HomeStudent2021Retail';  Channel = $null;      Version = '2021'; Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Office 2024 Home and Business (CZ)'; ProductId = 'HomeBusiness2024Retail'; Channel = $null;      Version = '2024'; Edition = 'HomeBusiness' }
+        [pscustomobject]@{ Name = 'Office 2024 Home (CZ)';               ProductId = 'HomeStudent2024Retail';  Channel = $null;      Version = '2024'; Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Microsoft 365 Home (CZ)';             ProductId = 'O365HomePremRetail';     Channel = 'Current';  Version = '365';  Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Microsoft 365 Business (CZ)';         ProductId = 'O365BusinessRetail';     Channel = 'Current';  Version = '365';  Edition = 'Business' }
     )
 }
 
@@ -3717,36 +3712,41 @@ function Install-WinPulseOffice {
     $catalog = @(Get-WinPulseOfficeCatalog)
 
     $yearChoice = Select-WinPulseMenuItem -Title 'Office Install — Version' -Items @(
-        @{ Label = 'Office 2019'; Key = '9'; Hint = 'Perpetual' },
-        @{ Label = 'Office 2021'; Key = '1'; Hint = 'Perpetual' },
-        @{ Label = 'Office 2024'; Key = '4'; Hint = 'Perpetual' },
-        @{ Label = 'Microsoft 365'; Key = '3'; Hint = 'Subscription' },
+        @{ Label = 'Office 2021';     Key = '1'; Hint = 'Perpetual' },
+        @{ Label = 'Office 2024';     Key = '4'; Hint = 'Perpetual' },
+        @{ Label = 'Microsoft 365';   Key = '3'; Hint = 'Subscription' },
         @{ Separator = $true },
         @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
     )
     if ($yearChoice -eq 'B' -or -not $yearChoice) { return }
 
-    $yearMap = @{ '9' = '2019'; '1' = '2021'; '4' = '2024'; '3' = '365' }
+    $yearMap = @{ '1' = '2021'; '4' = '2024'; '3' = '365' }
     $selectedYear = $yearMap[$yearChoice]
     $filtered = @($catalog | Where-Object { $_.Version -eq $selectedYear })
 
     $editionItems = @(foreach ($item in $filtered) {
         $key = switch ($item.Edition) {
-            'HomeBusiness'   { 'H' }
-            'Home'           { 'S' }
-            'StandardVolume' { 'V' }
-            default          { $item.Edition[0] }
+            'HomeBusiness' { 'H' }
+            'Home'         { 'S' }
+            'Business'     { 'B' }
+            default        { $item.Edition[0] }
         }
-        @{ Label = $item.Name; Key = $key; Hint = $item.Edition }
+        $hint = switch ($item.Edition) {
+            'HomeBusiness' { 'Word/Excel/Outlook/PP' }
+            'Home'         { 'Word/Excel/PP' }
+            'Business'     { 'Word/Excel/Outlook/PP/Teams' }
+            default        { $item.Edition }
+        }
+        @{ Label = $item.Name; Key = $key; Hint = $hint }
     })
     $editionItems += @{ Separator = $true }
-    $editionItems += @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+    $editionItems += @{ Label = 'Back'; Key = 'Q'; Color = 'DarkGray' }
 
     $edKey = Select-WinPulseMenuItem -Title ('Office {0} — Edition' -f $selectedYear) -Items $editionItems
-    if ($edKey -eq 'B' -or -not $edKey) { return }
+    if ($edKey -eq 'Q' -or -not $edKey) { return }
 
     $selection = $filtered | Where-Object {
-        $k = switch ($_.Edition) { 'HomeBusiness' { 'H' } 'Home' { 'S' } 'StandardVolume' { 'V' } default { $_.Edition[0] } }
+        $k = switch ($_.Edition) { 'HomeBusiness' { 'H' } 'Home' { 'S' } 'Business' { 'B' } default { $_.Edition[0] } }
         $k -eq $edKey
     } | Select-Object -First 1
     if (-not $selection) { return }
