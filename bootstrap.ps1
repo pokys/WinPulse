@@ -1771,9 +1771,7 @@ function Get-WinPulseTriageFindings {
     if ($scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' -and $_.UsedPercent -ge 90 }) {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'System drive C: usage is above 90%.' }
     }
-    if ($scan.Errors.Count -gt 0) {
-        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Scan warnings present: {0}' -f $scan.Errors.Count) }
-    }
+
 
     # Extended triage findings
     if ($scan.TPM -and -not $scan.TPM.Present) {
@@ -5168,37 +5166,79 @@ function Show-WinPulseFindingsDetail {
     Clear-Host
     Write-WinPulseHeader -title 'Findings & Details'
 
-    # All findings
-    $findings = @(Get-WinPulseTriageFindings -scan $scan)
-    if ($findings.Count -eq 0) {
-        Write-Host '  No issues detected.' -ForegroundColor Green
-    } else {
-        Write-Host '  Findings:' -ForegroundColor DarkCyan
-        $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } elseif ($_.Severity -eq 'Warning') { 1 } else { 2 } } })
-        foreach ($f in $ordered) {
-            $color = if ($f.Severity -eq 'Critical') { 'Red' } elseif ($f.Severity -eq 'Warning') { 'Yellow' } else { 'White' }
-            $badge = if ($f.Severity -eq 'Critical') { '!!' } else { ' !' }
-            Write-Host ('  {0} [{1}] {2}' -f $badge, $f.Severity.ToUpperInvariant(), $f.Message) -ForegroundColor $color
+    # ── Problematic drivers ──────────────────────────────────────────────────
+    if ($scan.Drivers -and $scan.Drivers.Problematic.Count -gt 0) {
+        Write-Host '  Problematic drivers:' -ForegroundColor DarkCyan
+        foreach ($d in $scan.Drivers.Problematic) {
+            Write-Host ('    {0}  [{1}]' -f $d['DeviceName'], $d['ErrorDescription']) -ForegroundColor Yellow
         }
+        Write-Host ''
     }
 
-    # System details
-    Write-Host ''
-    Write-Host '  System Details:' -ForegroundColor DarkCyan
-    Write-Host ('  Hostname   : {0}' -f $scan.System.Hostname) -ForegroundColor White
-    Write-Host ('  OS         : {0}' -f $scan.System.WindowsVersion) -ForegroundColor White
-    Write-Host ('  Uptime     : {0}' -f $scan.System.Uptime) -ForegroundColor White
+    # ── Failed auto-start services ───────────────────────────────────────────
+    if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 0) {
+        Write-Host '  Failed auto-start services:' -ForegroundColor DarkCyan
+        foreach ($s in $scan.Startup.FailedAutoServices) {
+            Write-Host ('    {0}  ({1})' -f $s['DisplayName'], $s['Name']) -ForegroundColor Yellow
+        }
+        Write-Host ''
+    }
 
+    # ── Stuck print jobs ─────────────────────────────────────────────────────
+    if ($scan.Printers -and $scan.Printers.StuckJobs.Count -gt 0) {
+        Write-Host '  Stuck print jobs:' -ForegroundColor DarkCyan
+        foreach ($j in $scan.Printers.StuckJobs) {
+            Write-Host ('    {0}  doc: {1}  status: {2}  submitted: {3}' -f $j['PrinterName'], $j['DocumentName'], $j['JobStatus'], $j['SubmittedTime']) -ForegroundColor Yellow
+        }
+        Write-Host ''
+    }
+
+    # ── Other findings ───────────────────────────────────────────────────────
+    $otherFindings = @(Get-WinPulseTriageFindings -scan $scan | Where-Object {
+        $msg = $_.Message
+        -not ($msg -match '^Problematic device drivers') -and
+        -not ($msg -match '^Failed auto-start services') -and
+        -not ($msg -match '^Print jobs stuck')
+    })
+    if ($otherFindings.Count -gt 0) {
+        Write-Host '  Other findings:' -ForegroundColor DarkCyan
+        foreach ($f in $otherFindings) {
+            $color = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
+            Write-Host ('    [{0}] {1}' -f $f.Severity.ToUpperInvariant(), $f.Message) -ForegroundColor $color
+        }
+        Write-Host ''
+    }
+
+    if ($scan.Drivers.Problematic.Count -eq 0 -and $scan.Startup.FailedAutoServices.Count -eq 0 -and
+        $scan.Printers.StuckJobs.Count -eq 0 -and $otherFindings.Count -eq 0) {
+        Write-Host '  No issues detected.' -ForegroundColor Green
+        Write-Host ''
+    }
+
+    # ── Scan errors ──────────────────────────────────────────────────────────
+    if ($scan.Errors.Count -gt 0) {
+        Write-Host '  Scan errors:' -ForegroundColor DarkCyan
+        foreach ($e in $scan.Errors) {
+            Write-Host ('    {0}' -f $e) -ForegroundColor DarkYellow
+        }
+        Write-Host ''
+    }
+
+    # ── System details ───────────────────────────────────────────────────────
+    Write-Host '  System Details:' -ForegroundColor DarkCyan
+    Write-Host ('    Hostname : {0}' -f $scan.System.Hostname) -ForegroundColor White
+    Write-Host ('    OS       : {0}' -f $scan.System.WindowsVersion) -ForegroundColor White
+    Write-Host ('    Uptime   : {0}' -f $scan.System.Uptime) -ForegroundColor White
     if ($scan.HardwareDetail) {
-        $cpuShort = if ($scan.HardwareDetail.CPU.Model -ne 'N/A') { ($scan.HardwareDetail.CPU.Model -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' ' } else { 'N/A' }
-        $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'TPM N/A' }
+        $cpuFull = if ($scan.HardwareDetail.CPU.Model -ne 'N/A') { ($scan.HardwareDetail.CPU.Model -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' ' } else { 'N/A' }
+        $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'N/A' }
         $ramType = if ($scan.HardwareDetail.DIMMs.Count -gt 0) { $scan.HardwareDetail.DIMMs[0].Type } else { 'N/A' }
-        Write-Host ('  CPU        : {0}' -f $cpuShort) -ForegroundColor White
-        Write-Host ('  RAM type   : {0}' -f $ramType) -ForegroundColor White
-        Write-Host ('  TPM        : {0}' -f $tpmLabel) -ForegroundColor White
+        Write-Host ('    CPU      : {0}' -f $cpuFull) -ForegroundColor White
+        Write-Host ('    RAM type : {0}' -f $ramType) -ForegroundColor White
+        Write-Host ('    TPM      : {0}' -f $tpmLabel) -ForegroundColor White
         if ($scan.HardwareDetail.Battery.Present) {
             $batColor = if ($scan.HardwareDetail.Battery.HealthPercent -lt 50) { 'Yellow' } else { 'White' }
-            Write-Host ('  Battery    : {0}% health' -f $scan.HardwareDetail.Battery.HealthPercent) -ForegroundColor $batColor
+            Write-Host ('    Battery  : {0}% health' -f $scan.HardwareDetail.Battery.HealthPercent) -ForegroundColor $batColor
         }
     }
 
