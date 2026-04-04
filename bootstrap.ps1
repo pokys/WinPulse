@@ -1647,7 +1647,6 @@ function Show-WinPulseDashboard {
     $vLine = [char]0x2502
 
     # Top header
-    Write-Host ''
     Write-Host ('  {0}{1} WinPulse {2}{3}' -f ([char]0x250C), ([string][char]0x2500 * 2), ([string][char]0x2500 * ($w - 13)), ([char]0x2510)) -ForegroundColor DarkCyan
 
     # System line
@@ -1666,15 +1665,6 @@ function Show-WinPulseDashboard {
     $cDiskText = if ($cDisk) { 'C:{0}% {1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C:N/A' }
     $smartLabel = if ($scan.Hardware.SmartHealthy) { 'S:OK' } else { 'S:FAIL' }
     Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskText, $smartLabel) -State $ramState
-
-    # Details (CPU/GPU/TPM)
-    if ($scan.HardwareDetail) {
-        $cpuShort = if ($scan.HardwareDetail.CPU.Model -ne 'N/A') { ($scan.HardwareDetail.CPU.Model -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' ' } else { 'N/A' }
-        if ($cpuShort.Length -gt 22) { $cpuShort = $cpuShort.Substring(0, 22) }
-        $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'TPM N/A' }
-        $ramType = if ($scan.HardwareDetail.DIMMs.Count -gt 0) { $scan.HardwareDetail.DIMMs[0].Type } else { '' }
-        Write-WinPulseDashboardLine -Label 'Details' -Value ('{0} | {1} | {2}' -f $cpuShort, $tpmLabel, $ramType) -State 'Info'
-    }
 
     # Security
     $avNames = @()
@@ -1725,7 +1715,7 @@ function Show-WinPulseDashboard {
         Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
     }
     else {
-        $top = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } } | Select-Object -First 2)
+        $top = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } } | Select-Object -First 3)
         foreach ($f in $top) {
             $fColor = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
             $fBadge = if ($f.Severity -eq 'Critical') { '!!' } else { '! ' }
@@ -1735,8 +1725,8 @@ function Show-WinPulseDashboard {
             Write-Host -NoNewline ($fText.PadRight($w - 4)) -ForegroundColor $fColor
             Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
         }
-        if ($findings.Count -gt 2) {
-            $moreText = ' ... +{0} more findings' -f ($findings.Count - 2)
+        if ($findings.Count -gt 3) {
+            $moreText = ' ... +{0} more findings' -f ($findings.Count - 3)
             Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkCyan
             Write-Host -NoNewline ($moreText.PadRight($w - 4)) -ForegroundColor DarkYellow
             Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
@@ -1746,12 +1736,6 @@ function Show-WinPulseDashboard {
     # Bottom border
     Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
     Write-Host ('  Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor DarkGray
-
-    if ($scan.Errors.Count -gt 0) {
-        Write-Host ''
-        Write-Host ('  Scan warnings: {0}' -f $scan.Errors.Count) -ForegroundColor Yellow
-    }
-    Write-Host ''
 }
 
 function Get-WinPulseTriageFindings {
@@ -5183,7 +5167,6 @@ function Show-WinPulseTriageMenu {
 
     while ($true) {
         Show-WinPulseDashboard -scan $scan
-        Show-WinPulseTriageSummary -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
             @{ Label = 'Re-scan';         Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';    Key = 'L'; Hint = 'Last 24h' },
