@@ -3391,28 +3391,144 @@ function Invoke-WinGetInstall {
     & winget install --id $id --accept-source-agreements --accept-package-agreements --silent
 }
 
+function Select-WinPulsePackageManager {
+    # Returns 'winget', 'choco', 'ninite', or $null (cancelled)
+    [CmdletBinding()]
+    param()
+    return Select-WinPulseMenuItem -Title 'Package Manager' -Items @(
+        @{ Label = 'winget';      Key = 'W'; Hint = 'Windows Package Manager' },
+        @{ Label = 'Chocolatey';  Key = 'C'; Hint = 'Community repo' },
+        @{ Label = 'Ninite';      Key = 'N'; Hint = 'Web installer (browser)' },
+        @{ Separator = $true },
+        @{ Label = 'Back';        Key = 'B'; Color = 'DarkGray' }
+    )
+}
+
+function Invoke-WinPulseInstallInWindow {
+    # Installs packages via winget in a separate PowerShell window
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$packages,
+        [switch]$dryrun
+    )
+    if ($dryrun) {
+        foreach ($pkg in $packages) { Write-Host ('[DRY RUN] winget install --id {0}' -f $pkg.Id) -ForegroundColor Cyan }
+        return
+    }
+    $lines = @("Write-Host 'WinPulse — winget install' -ForegroundColor Cyan; Write-Host ''")
+    foreach ($pkg in $packages) {
+        $locale = if ($pkg.Locale) { " --locale $($pkg.Locale)" } else { '' }
+        $lines += "Write-Host 'Installing $($pkg.Name)...' -ForegroundColor White"
+        $lines += "winget install --id '$($pkg.Id)' --accept-source-agreements --accept-package-agreements$locale"
+    }
+    $lines += "Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', ($lines -join '; ')) -Wait
+}
+
+function Invoke-WinPulseChocoInstallInWindow {
+    # Installs packages via Chocolatey in a separate PowerShell window
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$packages,
+        [switch]$dryrun
+    )
+    $pkgs = @($packages | Where-Object { $_.ChocoId })
+    if ($pkgs.Count -eq 0) { Write-Host '  No Chocolatey IDs defined for selected packages.' -ForegroundColor Yellow; return }
+    if ($dryrun) {
+        foreach ($pkg in $pkgs) { Write-Host ('[DRY RUN] choco install {0} -y' -f $pkg.ChocoId) -ForegroundColor Cyan }
+        return
+    }
+    $idList = ($pkgs.ChocoId) -join ' '
+    $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
+}
+
+function Invoke-WinPulseNinite {
+    # Opens Ninite in browser with pre-selected available apps
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$packages
+    )
+    $slugs = @($packages | Where-Object { $_.NiniteSlug } | ForEach-Object { $_.NiniteSlug })
+    if ($slugs.Count -eq 0) {
+        Write-Host '  None of the selected packages are available on Ninite.' -ForegroundColor Yellow
+        Start-Process 'https://ninite.com'
+        return
+    }
+    $url = 'https://ninite.com/{0}/' -f ($slugs -join '-')
+    Write-Host ('  Opening Ninite: {0}' -f $url) -ForegroundColor DarkCyan
+    Start-Process $url
+    $missing = @($packages | Where-Object { -not $_.NiniteSlug } | ForEach-Object { $_.Name })
+    if ($missing.Count -gt 0) {
+        Write-Host ('  Not available on Ninite: {0}' -f ($missing -join ', ')) -ForegroundColor Yellow
+    }
+}
+
 function Test-WinGetAvailable {
     [CmdletBinding()]
     param()
+    if (-not (Get-Command -Name winget -ErrorAction SilentlyContinue)) { return $false }
+    # Verify EULA accepted and winget is functional
+    try {
+        $null = & winget list --accept-source-agreements 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
 
-    return [bool](Get-Command -Name winget -ErrorAction SilentlyContinue)
+function Ensure-WinGet {
+    # Returns $true if winget is ready to use
+    [CmdletBinding()]
+    param()
+    if (Test-WinGetAvailable) { return $true }
+    if (-not (Get-Command -Name winget -ErrorAction SilentlyContinue)) {
+        Write-Host '  winget not found. Install App Installer from the Microsoft Store.' -ForegroundColor Yellow
+    } else {
+        Write-Host '  winget found but not functional (EULA not accepted?).' -ForegroundColor Yellow
+        Write-Host '  Run: winget list --accept-source-agreements' -ForegroundColor DarkGray
+    }
+    return $false
+}
+
+function Test-ChocolateyAvailable {
+    [CmdletBinding()]
+    param()
+    return [bool](Get-Command -Name choco -ErrorAction SilentlyContinue)
+}
+
+function Ensure-Chocolatey {
+    # Returns $true if choco is ready. Offers to install if missing.
+    [CmdletBinding()]
+    param()
+    if (Test-ChocolateyAvailable) { return $true }
+    $install = Select-WinPulseMenuItem -Title 'Chocolatey not installed' -Items @(
+        @{ Label = 'Install Chocolatey now'; Key = 'I'; Hint = 'Opens new window' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($install -ne 'I') { return $false }
+    $cmd = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')); Write-Host ''; Write-Host 'Chocolatey installed. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
+    return (Test-ChocolateyAvailable)
 }
 
 function Get-WinPulsePackageCatalog {
     [CmdletBinding()]
     param()
 
+    # Id = winget package ID; ChocoId = chocolatey ID; NiniteSlug = ninite.com slug (empty = not in Ninite)
     return @(
-        [pscustomobject]@{ Name = '7-Zip'; Id = '7zip.7zip'; Category = 'Tools'; InBasicSet = $true }
-        [pscustomobject]@{ Name = 'Google Chrome'; Id = 'Google.Chrome'; Category = 'Browser'; InBasicSet = $true }
-        [pscustomobject]@{ Name = 'Notepad++'; Id = 'Notepad++.Notepad++'; Category = 'Tools'; InBasicSet = $false }
-        [pscustomobject]@{ Name = 'VLC'; Id = 'VideoLAN.VLC'; Category = 'Media'; InBasicSet = $true }
-        [pscustomobject]@{ Name = 'PowerToys'; Id = 'Microsoft.PowerToys'; Category = 'Tools'; InBasicSet = $false }
-        [pscustomobject]@{ Name = 'LibreOffice'; Id = 'TheDocumentFoundation.LibreOffice'; Category = 'Office'; InBasicSet = $false }
-        [pscustomobject]@{ Name = 'Microsoft 365 Apps'; Id = 'Microsoft.Office'; Category = 'Office'; InBasicSet = $false }
-        [pscustomobject]@{ Name = 'Firefox'; Id = 'Mozilla.Firefox'; Category = 'Browser'; InBasicSet = $false }
-        [pscustomobject]@{ Name = 'Adobe Acrobat Reader'; Id = 'Adobe.Acrobat.Reader.64-bit'; Category = 'PDF'; InBasicSet = $true }
-        [pscustomobject]@{ Name = 'TeamViewer'; Id = 'TeamViewer.TeamViewer'; Category = 'Remote'; InBasicSet = $false }
+        [pscustomobject]@{ Name = '7-Zip';                Id = '7zip.7zip';                    ChocoId = '7zip';          NiniteSlug = '7zip';        Locale = $null;    Category = 'Tools';    InBasicSet = $true  }
+        [pscustomobject]@{ Name = 'Google Chrome';         Id = 'Google.Chrome';                ChocoId = 'googlechrome';  NiniteSlug = 'chrome';      Locale = $null;    Category = 'Browser';  InBasicSet = $true  }
+        [pscustomobject]@{ Name = 'Firefox (CZ)';          Id = 'Mozilla.Firefox';              ChocoId = 'firefox';       NiniteSlug = 'firefox';     Locale = 'cs-CZ';  Category = 'Browser';  InBasicSet = $false }
+        [pscustomobject]@{ Name = 'VLC';                   Id = 'VideoLAN.VLC';                 ChocoId = 'vlc';           NiniteSlug = 'vlc';         Locale = $null;    Category = 'Media';    InBasicSet = $true  }
+        [pscustomobject]@{ Name = 'Adobe Acrobat Reader';  Id = 'Adobe.Acrobat.Reader.64-bit';  ChocoId = 'adobereader';   NiniteSlug = 'reader';      Locale = $null;    Category = 'PDF';      InBasicSet = $true  }
+        [pscustomobject]@{ Name = 'LibreOffice';           Id = 'TheDocumentFoundation.LibreOffice'; ChocoId = 'libreoffice'; NiniteSlug = 'libreoffice'; Locale = $null; Category = 'Office';   InBasicSet = $false }
+        [pscustomobject]@{ Name = 'Microsoft Teams';       Id = 'Microsoft.Teams';              ChocoId = 'microsoft-teams'; NiniteSlug = '';           Locale = $null;    Category = 'Comm';     InBasicSet = $true  }
+        [pscustomobject]@{ Name = 'TeamViewer';            Id = 'TeamViewer.TeamViewer';        ChocoId = 'teamviewer';    NiniteSlug = 'teamviewer';  Locale = $null;    Category = 'Remote';   InBasicSet = $false }
+        [pscustomobject]@{ Name = 'Notepad++';             Id = 'Notepad++.Notepad++';          ChocoId = 'notepadplusplus'; NiniteSlug = 'notepadplusplus'; Locale = $null; Category = 'Tools'; InBasicSet = $false }
     )
 }
 
@@ -3474,22 +3590,31 @@ function Read-WinPulseSelection {
 }
 
 function Invoke-WinPulsePackageInstall {
+    # Prompts for package manager then installs in separate window
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [array]$packages,
-
         [switch]$dryrun
     )
 
-    foreach ($pkg in $packages) {
-        if ($dryrun) {
-            Write-Host ('[DRY RUN] Install {0} ({1})' -f $pkg.Name, $pkg.Id) -ForegroundColor Cyan
-            continue
-        }
+    if ($dryrun) {
+        foreach ($pkg in $packages) { Write-Host ('[DRY RUN] {0} ({1})' -f $pkg.Name, $pkg.Id) -ForegroundColor Cyan }
+        return
+    }
 
-        Write-Host ('Installing {0} ({1})' -f $pkg.Name, $pkg.Id) -ForegroundColor White
-        Invoke-WinGetInstall -id $pkg.Id
+    $pm = Select-WinPulsePackageManager
+    switch ($pm) {
+        'W' {
+            if (-not (Ensure-WinGet)) { Read-Host '  Press Enter to continue' | Out-Null; return }
+            Invoke-WinPulseInstallInWindow -packages $packages
+        }
+        'C' {
+            if (-not (Ensure-Chocolatey)) { Read-Host '  Press Enter to continue' | Out-Null; return }
+            Invoke-WinPulseChocoInstallInWindow -packages $packages
+        }
+        'N' { Invoke-WinPulseNinite -packages $packages; Read-Host '  Press Enter to continue' | Out-Null }
+        default { Write-Host '  Cancelled.' -ForegroundColor Yellow }
     }
 }
 
@@ -3529,11 +3654,12 @@ function Install-BasicITSet {
         return
     }
 
-    $confirm = Read-Host 'Install all packages above? (y/n)'
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-        Write-Host 'Cancelled.' -ForegroundColor Yellow
-        return
-    }
+    $confirm = Select-WinPulseMenuItem -Title 'Install Basic IT Set?' -Items @(
+        @{ Label = 'Install';  Key = 'I'; Hint = 'Select package manager' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel';   Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'I') { return }
 
     Invoke-WinPulsePackageInstall -packages $packages
 }
@@ -3560,11 +3686,12 @@ function Invoke-WinPulseCustomInstall {
     Write-Host ''
 
     if (-not $dryrun) {
-        $confirm = Read-Host 'Continue? (y/n)'
-        if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-            Write-Host 'Cancelled.' -ForegroundColor Yellow
-            return
-        }
+        $confirm = Select-WinPulseMenuItem -Title 'Confirm install?' -Items @(
+            @{ Label = 'Install';  Key = 'I'; Hint = 'Select package manager' },
+            @{ Separator = $true },
+            @{ Label = 'Cancel';   Key = 'C'; Color = 'DarkGray' }
+        )
+        if ($confirm -ne 'I') { return }
     }
 
     Invoke-WinPulsePackageInstall -packages $selected -dryrun:$dryrun
@@ -3604,11 +3731,20 @@ function Invoke-WinPulseCustomUninstall {
     Write-Host ''
 
     if (-not $dryrun) {
-        $confirm = Read-Host 'Continue? (y/n)'
-        if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-            Write-Host 'Cancelled.' -ForegroundColor Yellow
-            return
+        $confirm = Select-WinPulseMenuItem -Title 'Confirm uninstall?' -Items @(
+            @{ Label = 'Uninstall (winget)'; Key = 'U'; Hint = 'Opens new window' },
+            @{ Separator = $true },
+            @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+        )
+        if ($confirm -ne 'U') { return }
+        $idList = ($selected | ForEach-Object { "--id '$($_.Id)'" }) -join ' '
+        $cmd = "Write-Host 'WinPulse — winget uninstall' -ForegroundColor Cyan; Write-Host ''"
+        foreach ($pkg in $selected) {
+            $cmd += "; Write-Host 'Uninstalling $($pkg.Name)...' -ForegroundColor White; winget uninstall --id '$($pkg.Id)' --silent"
         }
+        $cmd += "; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+        Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Wait
+        return
     }
 
     Invoke-WinPulsePackageUninstall -packages $selected -dryrun:$dryrun
@@ -3636,12 +3772,14 @@ function Get-WinPulseOfficeCatalog {
     param()
 
     return @(
-        [pscustomobject]@{ Name = 'Office 2021 Home and Business (CZ)'; ProductId = 'HomeBusiness2021Retail'; Channel = $null;      Version = '2021'; Edition = 'HomeBusiness' }
-        [pscustomobject]@{ Name = 'Office 2021 Home (CZ)';               ProductId = 'HomeStudent2021Retail';  Channel = $null;      Version = '2021'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Office 2024 Home and Business (CZ)'; ProductId = 'HomeBusiness2024Retail'; Channel = $null;      Version = '2024'; Edition = 'HomeBusiness' }
-        [pscustomobject]@{ Name = 'Office 2024 Home (CZ)';               ProductId = 'HomeStudent2024Retail';  Channel = $null;      Version = '2024'; Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Microsoft 365 Home (CZ)';             ProductId = 'O365HomePremRetail';     Channel = 'Current';  Version = '365';  Edition = 'Home' }
-        [pscustomobject]@{ Name = 'Microsoft 365 Business (CZ)';         ProductId = 'O365BusinessRetail';     Channel = 'Current';  Version = '365';  Edition = 'Business' }
+        [pscustomobject]@{ Name = 'Office 2021 Home and Business (CZ)'; ProductId = 'HomeBusiness2021Retail'; Channel = $null;           Version = '2021'; Edition = 'HomeBusiness' }
+        [pscustomobject]@{ Name = 'Office 2021 Home (CZ)';               ProductId = 'HomeStudent2021Retail';  Channel = $null;           Version = '2021'; Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Office 2021 Standard Volume (CZ)';    ProductId = 'Standard2021Volume';     Channel = 'PerpetualVL2021'; Version = '2021'; Edition = 'StandardVolume' }
+        [pscustomobject]@{ Name = 'Office 2024 Home and Business (CZ)'; ProductId = 'HomeBusiness2024Retail'; Channel = $null;           Version = '2024'; Edition = 'HomeBusiness' }
+        [pscustomobject]@{ Name = 'Office 2024 Home (CZ)';               ProductId = 'HomeStudent2024Retail';  Channel = $null;           Version = '2024'; Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Office 2024 Standard Volume (CZ)';    ProductId = 'Standard2024Volume';     Channel = 'PerpetualVL2024'; Version = '2024'; Edition = 'StandardVolume' }
+        [pscustomobject]@{ Name = 'Microsoft 365 Home (CZ)';             ProductId = 'O365HomePremRetail';     Channel = 'Current';       Version = '365';  Edition = 'Home' }
+        [pscustomobject]@{ Name = 'Microsoft 365 Business (CZ)';         ProductId = 'O365BusinessRetail';     Channel = 'Current';       Version = '365';  Edition = 'Business' }
     )
 }
 
@@ -3724,20 +3862,15 @@ function Install-WinPulseOffice {
     $selectedYear = $yearMap[$yearChoice]
     $filtered = @($catalog | Where-Object { $_.Version -eq $selectedYear })
 
+    $editionKeyMap = @{
+        'HomeBusiness'   = @{ Key = 'H'; Hint = 'Word/Excel/Outlook/PP' }
+        'Home'           = @{ Key = 'S'; Hint = 'Word/Excel/PP' }
+        'StandardVolume' = @{ Key = 'V'; Hint = 'Volume license' }
+        'Business'       = @{ Key = 'B'; Hint = 'Word/Excel/Outlook/PP/Teams' }
+    }
     $editionItems = @(foreach ($item in $filtered) {
-        $key = switch ($item.Edition) {
-            'HomeBusiness' { 'H' }
-            'Home'         { 'S' }
-            'Business'     { 'B' }
-            default        { $item.Edition[0] }
-        }
-        $hint = switch ($item.Edition) {
-            'HomeBusiness' { 'Word/Excel/Outlook/PP' }
-            'Home'         { 'Word/Excel/PP' }
-            'Business'     { 'Word/Excel/Outlook/PP/Teams' }
-            default        { $item.Edition }
-        }
-        @{ Label = $item.Name; Key = $key; Hint = $hint }
+        $map = if ($editionKeyMap.ContainsKey($item.Edition)) { $editionKeyMap[$item.Edition] } else { @{ Key = $item.Edition[0]; Hint = $item.Edition } }
+        @{ Label = $item.Name; Key = $map['Key']; Hint = $map['Hint'] }
     })
     $editionItems += @{ Separator = $true }
     $editionItems += @{ Label = 'Back'; Key = 'Q'; Color = 'DarkGray' }
@@ -3746,8 +3879,8 @@ function Install-WinPulseOffice {
     if ($edKey -eq 'Q' -or -not $edKey) { return }
 
     $selection = $filtered | Where-Object {
-        $k = switch ($_.Edition) { 'HomeBusiness' { 'H' } 'Home' { 'S' } 'Business' { 'B' } default { $_.Edition[0] } }
-        $k -eq $edKey
+        $map = if ($editionKeyMap.ContainsKey($_.Edition)) { $editionKeyMap[$_.Edition] } else { @{ Key = $_.Edition[0] } }
+        $map['Key'] -eq $edKey
     } | Select-Object -First 1
     if (-not $selection) { return }
 
