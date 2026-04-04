@@ -1483,7 +1483,7 @@ function Write-WinPulseHeader {
         [string]$title
     )
 
-    $w = 100
+    $w = 88
     Write-Host ''
     Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkCyan
     Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkCyan
@@ -1513,7 +1513,7 @@ function Select-WinPulseMenuItem {
     $interactive = $true
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
-    $w = 100
+    $w = 88
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
@@ -1610,7 +1610,7 @@ function Write-WinPulseDashboardLine {
         [string]$Label,
         [string]$Value,
         [string]$State = 'Info',
-        [int]$BoxWidth = 100
+        [int]$BoxWidth = 88
     )
 
     $badge = switch ($State) {
@@ -1642,7 +1642,7 @@ function Show-WinPulseDashboard {
     )
 
     Clear-Host
-    $w = 100
+    $w = 88
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
