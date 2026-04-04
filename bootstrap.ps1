@@ -1513,7 +1513,7 @@ function Select-WinPulseMenuItem {
     $interactive = $true
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
-    $w = 62
+    $w = 78
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
@@ -1521,7 +1521,7 @@ function Select-WinPulseMenuItem {
         Write-WinPulseHeader -title $Title
         for ($i = 0; $i -lt $Items.Count; $i++) {
             if ($Items[$i]['Separator']) { Write-Host ''; continue }
-            Write-Host ('  [{0}] {1}' -f $Items[$i].Key, $Items[$i].Label) -ForegroundColor White
+            Write-Host ('  [{0}] {1}' -f $Items[$i]['Key'], $Items[$i]['Label']) -ForegroundColor White
         }
         $ch = (Read-Host '  Select').Trim().ToUpperInvariant()
         return $ch
@@ -1550,11 +1550,11 @@ function Select-WinPulseMenuItem {
 
                 $isSelected = ($selectableIdx[$sel] -eq $i)
                 $pointer = if ($isSelected) { [char]0x25BA } else { ' ' }
-                $keyTag = if ($item.Key) { '[{0}]' -f $item.Key } else { '   ' }
-                $hint = if ($item.Hint) { $item.Hint } else { '' }
-                $color = if ($item.Color) { $item.Color } else { 'White' }
+                $keyTag = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
+                $hint = if ($item['Hint']) { $item['Hint'] } else { '' }
+                $color = if ($item['Color']) { $item['Color'] } else { 'White' }
 
-                $left = ' {0} {1} {2}' -f $pointer, $keyTag, $item.Label
+                $left = ' {0} {1} {2}' -f $pointer, $keyTag, $item['Label']
                 $avail = $w - 4
                 $rightSpace = $avail - $left.Length
                 if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
@@ -1586,7 +1586,7 @@ function Select-WinPulseMenuItem {
             switch ($k.VirtualKeyCode) {
                 38 { $sel = if ($sel -gt 0) { $sel - 1 } else { $selectableIdx.Count - 1 } }
                 40 { $sel = if ($sel -lt $selectableIdx.Count - 1) { $sel + 1 } else { 0 } }
-                13 { return $Items[$selectableIdx[$sel]].Key }
+                13 { return $Items[$selectableIdx[$sel]]['Key'] }
                 27 { return $null }
                 default {
                     $ch = [string]$k.Character
@@ -1610,7 +1610,7 @@ function Write-WinPulseDashboardLine {
         [string]$Label,
         [string]$Value,
         [string]$State = 'Info',
-        [int]$BoxWidth = 62
+        [int]$BoxWidth = 78
     )
 
     $badge = switch ($State) {
@@ -1642,7 +1642,7 @@ function Show-WinPulseDashboard {
     )
 
     Clear-Host
-    $w = 62
+    $w = 78
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
