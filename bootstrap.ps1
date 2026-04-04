@@ -1505,7 +1505,7 @@ function Select-WinPulseMenuItem {
 
     $selectableIdx = @()
     for ($i = 0; $i -lt $Items.Count; $i++) {
-        if (-not $Items[$i].Separator) { $selectableIdx += $i }
+        if (-not $Items[$i]['Separator']) { $selectableIdx += $i }
     }
     if ($selectableIdx.Count -eq 0) { return $null }
 
@@ -1520,7 +1520,7 @@ function Select-WinPulseMenuItem {
     if (-not $interactive) {
         Write-WinPulseHeader -title $Title
         for ($i = 0; $i -lt $Items.Count; $i++) {
-            if ($Items[$i].Separator) { Write-Host ''; continue }
+            if ($Items[$i]['Separator']) { Write-Host ''; continue }
             Write-Host ('  [{0}] {1}' -f $Items[$i].Key, $Items[$i].Label) -ForegroundColor White
         }
         $ch = (Read-Host '  Select').Trim().ToUpperInvariant()
@@ -1543,7 +1543,7 @@ function Select-WinPulseMenuItem {
             for ($i = 0; $i -lt $Items.Count; $i++) {
                 $item = $Items[$i]
 
-                if ($item.Separator) {
+                if ($item['Separator']) {
                     Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
                     continue
                 }
@@ -1592,7 +1592,7 @@ function Select-WinPulseMenuItem {
                     $ch = [string]$k.Character
                     if ($ch) {
                         $ch = $ch.ToUpperInvariant()
-                        $match = $Items | Where-Object { $_.Key -and $_.Key.ToUpperInvariant() -eq $ch -and -not $_.Separator }
+                        $match = $Items | Where-Object { $_['Key'] -and $_['Key'].ToUpperInvariant() -eq $ch -and -not $_['Separator'] }
                         if ($match) { return $ch.ToUpperInvariant() }
                     }
                 }
@@ -1663,8 +1663,9 @@ function Show-WinPulseDashboard {
     # Hardware
     $ramState = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
     $cDisk = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
-    $cDiskText = if ($cDisk) { 'C: {0}% free:{1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C: N/A' }
-    Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | SMART {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskText, $(if ($scan.Hardware.SmartHealthy) { 'OK' } else { 'FAIL' })) -State $ramState
+    $cDiskText = if ($cDisk) { 'C:{0}% {1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C:N/A' }
+    $smartLabel = if ($scan.Hardware.SmartHealthy) { 'S:OK' } else { 'S:FAIL' }
+    Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskText, $smartLabel) -State $ramState
 
     # Details (CPU/GPU/TPM)
     if ($scan.HardwareDetail) {
