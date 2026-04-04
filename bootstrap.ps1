@@ -1513,7 +1513,7 @@ function Select-WinPulseMenuItem {
     $interactive = $true
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
-    $w = 78
+    $w = 120
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
@@ -1610,7 +1610,7 @@ function Write-WinPulseDashboardLine {
         [string]$Label,
         [string]$Value,
         [string]$State = 'Info',
-        [int]$BoxWidth = 78
+        [int]$BoxWidth = 120
     )
 
     $badge = switch ($State) {
@@ -1642,7 +1642,7 @@ function Show-WinPulseDashboard {
     )
 
     Clear-Host
-    $w = 78
+    $w = 120
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
