@@ -5158,6 +5158,54 @@ function Show-WinPulseMainMenu {
     }
 }
 
+function Show-WinPulseFindingsDetail {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$scan
+    )
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Findings & Details'
+
+    # All findings
+    $findings = @(Get-WinPulseTriageFindings -scan $scan)
+    if ($findings.Count -eq 0) {
+        Write-Host '  No issues detected.' -ForegroundColor Green
+    } else {
+        Write-Host '  Findings:' -ForegroundColor DarkCyan
+        $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } elseif ($_.Severity -eq 'Warning') { 1 } else { 2 } } })
+        foreach ($f in $ordered) {
+            $color = if ($f.Severity -eq 'Critical') { 'Red' } elseif ($f.Severity -eq 'Warning') { 'Yellow' } else { 'White' }
+            $badge = if ($f.Severity -eq 'Critical') { '!!' } else { ' !' }
+            Write-Host ('  {0} [{1}] {2}' -f $badge, $f.Severity.ToUpperInvariant(), $f.Message) -ForegroundColor $color
+        }
+    }
+
+    # System details
+    Write-Host ''
+    Write-Host '  System Details:' -ForegroundColor DarkCyan
+    Write-Host ('  Hostname   : {0}' -f $scan.System.Hostname) -ForegroundColor White
+    Write-Host ('  OS         : {0}' -f $scan.System.WindowsVersion) -ForegroundColor White
+    Write-Host ('  Uptime     : {0}' -f $scan.System.Uptime) -ForegroundColor White
+
+    if ($scan.HardwareDetail) {
+        $cpuShort = if ($scan.HardwareDetail.CPU.Model -ne 'N/A') { ($scan.HardwareDetail.CPU.Model -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' ' } else { 'N/A' }
+        $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'TPM N/A' }
+        $ramType = if ($scan.HardwareDetail.DIMMs.Count -gt 0) { $scan.HardwareDetail.DIMMs[0].Type } else { 'N/A' }
+        Write-Host ('  CPU        : {0}' -f $cpuShort) -ForegroundColor White
+        Write-Host ('  RAM type   : {0}' -f $ramType) -ForegroundColor White
+        Write-Host ('  TPM        : {0}' -f $tpmLabel) -ForegroundColor White
+        if ($scan.HardwareDetail.Battery.Present) {
+            $batColor = if ($scan.HardwareDetail.Battery.HealthPercent -lt 50) { 'Yellow' } else { 'White' }
+            Write-Host ('  Battery    : {0}% health' -f $scan.HardwareDetail.Battery.HealthPercent) -ForegroundColor $batColor
+        }
+    }
+
+    Write-Host ''
+    Read-Host '  Press Enter to return' | Out-Null
+}
+
 function Show-WinPulseTriageMenu {
     [CmdletBinding()]
     param(
@@ -5168,15 +5216,17 @@ function Show-WinPulseTriageMenu {
     while ($true) {
         Show-WinPulseDashboard -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
-            @{ Label = 'Re-scan';         Key = 'R'; Hint = 'Refresh data' },
-            @{ Label = 'Inspect logs';    Key = 'L'; Hint = 'Last 24h' },
-            @{ Label = 'Safe actions';    Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
-            @{ Label = 'Full menu';       Key = 'M'; Hint = 'All options' },
+            @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
+            @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
+            @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
+            @{ Label = 'Safe actions';       Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
+            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
             @{ Separator = $true },
-            @{ Label = 'Exit';            Key = 'E'; Color = 'DarkGray' }
+            @{ Label = 'Exit';               Key = 'E'; Color = 'DarkGray' }
         )
         switch ($choice) {
             'R' { $scan = Invoke-CoreScan }
+            'F' { Show-WinPulseFindingsDetail -scan $scan }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Read-Host '  Press Enter to return' | Out-Null }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
