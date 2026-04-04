@@ -3483,6 +3483,13 @@ function Repair-SystemFiles {
     Write-Host 'SFC + DISM finished.' -ForegroundColor Green
 }
 
+function Wait-WinPulseKey {
+    param([string]$Message = '  Press any key to continue')
+    Write-Host $Message -ForegroundColor DarkGray -NoNewline
+    try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { $null = Read-Host }
+    Write-Host ''
+}
+
 function Invoke-WinGetInstall {
     [CmdletBinding()]
     param(
@@ -3548,7 +3555,7 @@ function Invoke-WinPulseChocoInstallInWindow {
 }
 
 function Invoke-WinPulseNinite {
-    # Opens Ninite in browser with pre-selected available apps
+    # Downloads and runs Ninite installer for selected packages
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -3557,15 +3564,25 @@ function Invoke-WinPulseNinite {
     $slugs = @($packages | Where-Object { $_.NiniteSlug } | ForEach-Object { $_.NiniteSlug })
     if ($slugs.Count -eq 0) {
         Write-Host '  None of the selected packages are available on Ninite.' -ForegroundColor Yellow
-        Start-Process 'https://ninite.com'
         return
     }
-    $url = 'https://ninite.com/{0}/' -f ($slugs -join '-')
-    Write-Host ('  Opening Ninite: {0}' -f $url) -ForegroundColor DarkCyan
-    Start-Process $url
+
     $missing = @($packages | Where-Object { -not $_.NiniteSlug } | ForEach-Object { $_.Name })
     if ($missing.Count -gt 0) {
-        Write-Host ('  Not available on Ninite: {0}' -f ($missing -join ', ')) -ForegroundColor Yellow
+        Write-Host ('  Skipped (not in Ninite): {0}' -f ($missing -join ', ')) -ForegroundColor Yellow
+    }
+
+    $url = 'https://ninite.com/{0}/ninite.exe' -f ($slugs -join '-')
+    $dest = Join-Path $script:WinPulsePaths.Bin 'ninite-install.exe'
+    Write-Host ('  Downloading Ninite installer ({0} apps)...' -f $slugs.Count) -ForegroundColor DarkCyan
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        Write-Host '  Running Ninite installer...' -ForegroundColor DarkCyan
+        Start-Process -FilePath $dest -Wait
+        Write-Host '  Ninite install complete.' -ForegroundColor Green
+    } catch {
+        Write-Host ('  Ninite download failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
     }
 }
 
@@ -3708,14 +3725,14 @@ function Invoke-WinPulsePackageInstall {
     $pm = Select-WinPulsePackageManager
     switch ($pm) {
         'W' {
-            if (-not (Ensure-WinGet)) { Read-Host '  Press Enter to continue' | Out-Null; return }
+            if (-not (Ensure-WinGet)) { Wait-WinPulseKey; return }
             Invoke-WinPulseInstallInWindow -packages $packages
         }
         'C' {
-            if (-not (Ensure-Chocolatey)) { Read-Host '  Press Enter to continue' | Out-Null; return }
+            if (-not (Ensure-Chocolatey)) { Wait-WinPulseKey; return }
             Invoke-WinPulseChocoInstallInWindow -packages $packages
         }
-        'N' { Invoke-WinPulseNinite -packages $packages; Read-Host '  Press Enter to continue' | Out-Null }
+        'N' { Invoke-WinPulseNinite -packages $packages }
         default { Write-Host '  Cancelled.' -ForegroundColor Yellow }
     }
 }
@@ -3959,10 +3976,12 @@ function Install-WinPulseOffice {
     if ($selection.Channel) {
         Write-Host ('Channel: {0}' -f $selection.Channel)
     }
-    $confirm = Read-Host 'Continue with Office install? (y/n)'
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-        Write-Host 'Cancelled.' -ForegroundColor Yellow
-        return
+    $confirm = Select-WinPulseMenuItem -Title 'Start Office install?' -Items @(
+        @{ Label = 'Yes, install'; Key = 'Y'; Hint = 'Opens installer' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') { return
     }
 
     Invoke-WinPulseOfficeConfiguration -xmlcontent $xml -description ('Office install - {0}' -f $selection.Name)
@@ -3981,10 +4000,12 @@ function Uninstall-WinPulseOffice {
 "@
 
     Write-Host 'This will uninstall Office products managed by Click-to-Run.' -ForegroundColor Yellow
-    $confirm = Read-Host 'Continue with Office uninstall? (y/n)'
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-        Write-Host 'Cancelled.' -ForegroundColor Yellow
-        return
+    $confirm = Select-WinPulseMenuItem -Title 'Uninstall Office?' -Items @(
+        @{ Label = 'Yes, uninstall'; Key = 'Y'; Hint = 'Removes all Office' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') { return
     }
 
     Invoke-WinPulseOfficeConfiguration -xmlcontent $xml -description 'Office uninstall'
@@ -4028,9 +4049,9 @@ function Show-WinPulseOfficeMenu {
             @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' }
         )
         switch ($choice) {
-            'I' { try { Install-WinPulseOffice } catch { Write-Host ("  Office install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Read-Host '  Press Enter' | Out-Null }
-            'U' { try { Uninstall-WinPulseOffice } catch { Write-Host ("  Office uninstall failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Read-Host '  Press Enter' | Out-Null }
-            'R' { try { Repair-WinPulseOffice } catch { Write-Host ("  Office repair failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Read-Host '  Press Enter' | Out-Null }
+            'I' { try { Install-WinPulseOffice } catch { Write-Host ("  Office install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
+            'U' { try { Uninstall-WinPulseOffice } catch { Write-Host ("  Office uninstall failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
+            'R' { try { Repair-WinPulseOffice } catch { Write-Host ("  Office repair failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
             default { return }
         }
     }
@@ -4236,8 +4257,12 @@ function Remove-WinPulseCompletely {
     [CmdletBinding()]
     param()
 
-    $confirm = Read-Host 'Type YES to fully remove C:\ProgramData\WinPulse'
-    if ($confirm -ne 'YES') {
+    $confirm = Select-WinPulseMenuItem -Title '!! Remove WinPulse folder completely !!' -Items @(
+        @{ Label = 'YES — delete C:\ProgramData\WinPulse'; Key = 'Y'; Hint = 'Irreversible'; Color = 'Red' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') {
         Write-Host 'Cancelled.' -ForegroundColor Yellow
         return
     }
@@ -4394,9 +4419,12 @@ function Start-WinPulseMemoryDiagnostic {
     param()
 
     Write-Host 'Windows Memory Diagnostic requires reboot.' -ForegroundColor Yellow
-    $confirm = Read-Host 'Open memory diagnostic tool now? (y/n)'
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-        return
+    $confirm = Select-WinPulseMenuItem -Title 'Memory Diagnostic (reboot required)' -Items @(
+        @{ Label = 'Yes, reboot now'; Key = 'Y'; Hint = 'Runs on next boot' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') { return
     }
 
     Start-Process -FilePath 'mdsched.exe'
@@ -4407,9 +4435,12 @@ function Start-WinPulseFurMarkAdvanced {
     param()
 
     Write-Host 'Warning: FurMark is aggressive GPU stress. Use only on non-production tests.' -ForegroundColor Yellow
-    $confirm = Read-Host 'Continue and try to launch FurMark? (y/n)'
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
-        return
+    $confirm = Select-WinPulseMenuItem -Title 'Launch FurMark?' -Items @(
+        @{ Label = 'Yes, launch'; Key = 'Y'; Hint = 'GPU stress test' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') { return
     }
 
     if (-not (Test-WinGetAvailable)) {
@@ -4558,8 +4589,7 @@ function Start-WinPulseFurMarkAdvanced {
         }
 
         if ($launchedNeedsManualWait) {
-            Write-Host 'Close FurMark when done, then press Enter to continue cleanup.' -ForegroundColor DarkYellow
-            [void](Read-Host)
+            Wait-WinPulseKey 'Close FurMark when done, then press any key to continue cleanup'
         }
 
         Write-Host 'FurMark test flow complete.' -ForegroundColor Green
@@ -4644,7 +4674,7 @@ function Show-WinPulseStressMenu {
             'F' { Start-WinPulseFurMarkAdvanced }
             default { return }
         }
-        Write-Host ''; Read-Host '  Press Enter to continue' | Out-Null
+        Write-Host ''; Wait-WinPulseKey
     }
 }
 
@@ -5054,7 +5084,7 @@ function Invoke-WinPulseDiagnostics {
     Clear-Host
     Invoke-WinPulseUnifiedDiagnostics
     Write-Host ''
-    Read-Host 'Press Enter to continue' | Out-Null
+    Wait-WinPulseKey
 }
 
 function Show-WinPulseToolsMenu {
@@ -5087,7 +5117,7 @@ function Show-WinPulseToolsMenu {
             'I' { Start-WinPulseSysinternalsSuite }
             default { return }
         }
-        Write-Host ''; Read-Host '  Press Enter to continue' | Out-Null
+        Write-Host ''; Wait-WinPulseKey
     }
 }
 
@@ -5111,13 +5141,13 @@ function Invoke-WinPulseRepairs {
                 $latestScan = Invoke-CoreScan
                 Show-WindowsUpdateErrorDetails -scan $latestScan
                 $scan = $latestScan
-                Read-Host '  Press Enter to continue' | Out-Null
+                Wait-WinPulseKey
             }
             'P' {
                 $plans = @(Get-WinPulseRepairPlans -scan $scan)
                 if ($plans.Count -eq 0) {
                     Write-Host '  No repair plans detected for current state.' -ForegroundColor Green
-                    Read-Host '  Press Enter to continue' | Out-Null
+                    Wait-WinPulseKey
                     continue
                 }
 
@@ -5167,15 +5197,15 @@ function Show-WinPulseInstallMenu {
         )
         if (-not $choice) { return }
         switch ($choice) {
-            'P' { $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet }); Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Read-Host '  Press Enter to continue' | Out-Null }
-            'B' { Install-BasicITSet; Read-Host '  Press Enter to continue' | Out-Null }
-            'C' { Invoke-WinPulseCustomInstall; Read-Host '  Press Enter to continue' | Out-Null }
-            'U' { Invoke-WinPulseCustomUninstall; Read-Host '  Press Enter to continue' | Out-Null }
-            'A' { Update-AllApplications; Read-Host '  Press Enter to continue' | Out-Null }
+            'P' { $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet }); Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Wait-WinPulseKey }
+            'B' { Install-BasicITSet }
+            'C' { Invoke-WinPulseCustomInstall }
+            'U' { Invoke-WinPulseCustomUninstall }
+            'A' { Update-AllApplications }
             'O' { Show-WinPulseOfficeMenu }
-            'D' { Install-BasicITSet -dryrun; Read-Host '  Press Enter to continue' | Out-Null }
-            'I' { Invoke-WinPulseCustomInstall -dryrun; Read-Host '  Press Enter to continue' | Out-Null }
-            'N' { Invoke-WinPulseCustomUninstall -dryrun; Read-Host '  Press Enter to continue' | Out-Null }
+            'D' { Install-BasicITSet -dryrun; Wait-WinPulseKey }
+            'I' { Invoke-WinPulseCustomInstall -dryrun; Wait-WinPulseKey }
+            'N' { Invoke-WinPulseCustomUninstall -dryrun; Wait-WinPulseKey }
             default { return }
         }
     }
@@ -5190,7 +5220,7 @@ function Show-WinPulseTweaksMenu {
     Write-Host '  Tweaks are intentionally disabled for now.' -ForegroundColor Yellow
     Write-Host '  Planned: curated safe tweaks with clear revert support.' -ForegroundColor DarkYellow
     Write-Host ''
-    Read-Host '  Press Enter to return' | Out-Null
+    Wait-WinPulseKey
 }
 
 function Show-WinPulseNetworkMenu {
@@ -5246,9 +5276,9 @@ function Show-WinPulseCleanupMenu {
         )
         if (-not $choice) { return }
         switch ($choice) {
-            'A' { Invoke-WinPulseFullArtifactCleanup; Read-Host '  Press Enter to continue' | Out-Null }
-            'L' { Invoke-WinPulseLightCleanup; Read-Host '  Press Enter to continue' | Out-Null }
-            'F' { Remove-WinPulseCompletely; Read-Host '  Press Enter to continue' | Out-Null }
+            'A' { Invoke-WinPulseFullArtifactCleanup; Wait-WinPulseKey }
+            'L' { Invoke-WinPulseLightCleanup; Wait-WinPulseKey }
+            'F' { Remove-WinPulseCompletely; Wait-WinPulseKey }
             default { return }
         }
     }
@@ -5290,11 +5320,11 @@ function Show-WinPulseExportMenu {
                 $target = Join-Path $script:WinPulsePaths.Exports ('scan-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
                 $scan | ConvertTo-Json -Depth 6 | Set-Content -Path $target -Encoding UTF8
                 Write-Host ("  Exported: {0}" -f $target) -ForegroundColor Green
-                Read-Host '  Press Enter to continue' | Out-Null
+                Wait-WinPulseKey
             }
             'H' {
                 Export-WinPulseHtmlReport -scan $scan
-                Read-Host '  Press Enter to continue' | Out-Null
+                Wait-WinPulseKey
             }
             default { return }
         }
@@ -5322,7 +5352,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Exit';              Key = 'E'; Color = 'DarkGray' }
         )
         switch ($choice) {
-            'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Read-Host '  Press Enter to continue' | Out-Null }
+            'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Wait-WinPulseKey }
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
@@ -5422,7 +5452,7 @@ function Show-WinPulseFindingsDetail {
     }
 
     Write-Host ''
-    Read-Host '  Press Enter to return' | Out-Null
+    Wait-WinPulseKey
 }
 
 function Show-WinPulseTriageMenu {
@@ -5446,7 +5476,7 @@ function Show-WinPulseTriageMenu {
         switch ($choice) {
             'R' { $scan = Invoke-CoreScan }
             'F' { Show-WinPulseFindingsDetail -scan $scan }
-            'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Read-Host '  Press Enter to return' | Out-Null }
+            'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
             'E' { Invoke-WinPulseExitCleanupPrompt; return }
@@ -5472,10 +5502,10 @@ function Show-WinPulseSafeActions {
         )
         if (-not $choice) { return $scan }
         switch ($choice) {
-            'S' { Repair-SystemFiles; $scan = Invoke-CoreScan; Read-Host '  Press Enter to continue' | Out-Null }
-            'C' { Start-Process -FilePath 'chkdsk.exe' -ArgumentList 'C:', '/scan' -Wait -NoNewWindow; $scan = Invoke-CoreScan; Read-Host '  Press Enter to continue' | Out-Null }
-            'W' { Restart-WindowsUpdateServices; $scan = Invoke-CoreScan; Read-Host '  Press Enter to continue' | Out-Null }
-            'R' { $scan = Invoke-CoreScan; Read-Host '  Re-scan complete. Press Enter' | Out-Null }
+            'S' { Repair-SystemFiles; $scan = Invoke-CoreScan; Wait-WinPulseKey }
+            'C' { Start-Process -FilePath 'chkdsk.exe' -ArgumentList 'C:', '/scan' -Wait -NoNewWindow; $scan = Invoke-CoreScan; Wait-WinPulseKey }
+            'W' { Restart-WindowsUpdateServices; $scan = Invoke-CoreScan; Wait-WinPulseKey }
+            'R' { $scan = Invoke-CoreScan; Wait-WinPulseKey '  Re-scan complete. Press any key' }
             default { return $scan }
         }
     }
