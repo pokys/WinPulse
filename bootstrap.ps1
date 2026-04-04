@@ -3660,15 +3660,15 @@ function Show-WinPulseNiniteMenu {
     param()
 
     $catalog = @(Get-WinPulseNiniteCatalog)
-    $categories = @($catalog | Select-Object -ExpandProperty Category -Unique)
+    $categories = @($catalog | ForEach-Object { $_['Category'] } | Select-Object -Unique)
 
     # Build multi-select items with category separators
     $menuItems = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($cat in $categories) {
         $menuItems.Add(@{ Separator = $true; Label = $cat })
-        $appsInCat = @($catalog | Where-Object { $_.Category -eq $cat })
+        $appsInCat = @($catalog | Where-Object { $_['Category'] -eq $cat })
         foreach ($app in $appsInCat) {
-            $menuItems.Add(@{ Label = $app.Label; Key = $app.Slug; Hint = $app.Slug })
+            $menuItems.Add(@{ Label = $app['Label']; Key = $app['Slug']; Hint = $app['Slug'] })
         }
     }
 
