@@ -1604,6 +1604,108 @@ function Select-WinPulseMenuItem {
     }
 }
 
+function Select-WinPulseMultiMenuItem {
+    # Arrow-key multi-select menu. Space toggles, Enter confirms, Esc cancels.
+    # Returns array of selected Keys (empty array = cancelled/none).
+    [CmdletBinding()]
+    param(
+        [string]$Title = 'Select',
+        [Parameter(Mandatory = $true)]
+        [array]$Items
+    )
+
+    $selectableIdx = @()
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        if (-not $Items[$i]['Separator']) { $selectableIdx += $i }
+    }
+    if ($selectableIdx.Count -eq 0) { return @() }
+
+    $checked = @{}
+    $interactive = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
+
+    if (-not $interactive) {
+        Write-WinPulseHeader -title $Title
+        for ($i = 0; $i -lt $Items.Count; $i++) {
+            if ($Items[$i]['Separator']) { continue }
+            Write-Host ('  [{0}] {1}' -f ($i + 1), $Items[$i]['Label'])
+        }
+        $result = @()
+        foreach ($part in ((Read-Host '  Select (e.g. 1,3)') -split ',')) {
+            $n = 0
+            if ([int]::TryParse($part.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Items.Count) {
+                $result += $Items[$n - 1]['Key']
+            }
+        }
+        return $result
+    }
+
+    $w = 88
+    $hLine = [string][char]0x2500 * ($w - 2)
+    $vLine = [char]0x2502
+    $sel = 0
+
+    [Console]::CursorVisible = $false
+    try {
+        $startY = [Console]::CursorTop
+        $firstDraw = $true
+
+        while ($true) {
+            if (-not $firstDraw) { [Console]::SetCursorPosition(0, $startY) }
+            $firstDraw = $false
+
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 5)), ([char]0x2510)) -ForegroundColor DarkCyan
+
+            for ($i = 0; $i -lt $Items.Count; $i++) {
+                $item = $Items[$i]
+                if ($item['Separator']) {
+                    Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
+                    continue
+                }
+
+                $isActive  = ($selectableIdx[$sel] -eq $i)
+                $isChecked = $checked.ContainsKey($i)
+                $pointer   = if ($isActive) { [char]0x25BA } else { ' ' }
+                $box       = if ($isChecked) { '[x]' } else { '[ ]' }
+                $hint      = if ($item['Hint']) { $item['Hint'] } else { '' }
+                $color     = if ($isChecked) { 'Cyan' } else { 'White' }
+
+                $left = ' {0} {1} {2}' -f $pointer, $box, $item['Label']
+                $avail = $w - 4
+                $rightSpace = $avail - $left.Length
+                if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
+                $line = if ($hint -and $rightSpace -gt ($hint.Length + 2)) {
+                    $left + (' ' * ($rightSpace - $hint.Length)) + $hint
+                } else { $left + (' ' * $rightSpace) }
+
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkCyan
+                if ($isActive) {
+                    Write-Host -NoNewline $line -ForegroundColor White -BackgroundColor DarkBlue
+                } else {
+                    Write-Host -NoNewline $line -ForegroundColor $color
+                }
+                Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
+            }
+
+            Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
+            $helpText = '  {0}/{1} Navigate  Space Toggle  Enter Confirm  Esc Cancel    {2} selected' -f ([char]0x2191), ([char]0x2193), $checked.Count
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+
+            $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            switch ($k.VirtualKeyCode) {
+                38 { $sel = if ($sel -gt 0) { $sel - 1 } else { $selectableIdx.Count - 1 } }
+                40 { $sel = if ($sel -lt $selectableIdx.Count - 1) { $sel + 1 } else { 0 } }
+                32 { if ($checked.ContainsKey($selectableIdx[$sel])) { $checked.Remove($selectableIdx[$sel]) } else { $checked[$selectableIdx[$sel]] = $true } }
+                13 { return @($checked.Keys | Sort-Object | ForEach-Object { $Items[$_]['Key'] }) }
+                27 { return @() }
+            }
+        }
+    }
+    finally {
+        [Console]::CursorVisible = $true
+    }
+}
+
 function Write-WinPulseDashboardLine {
     [CmdletBinding()]
     param(
@@ -3666,95 +3768,54 @@ function Install-BasicITSet {
 
 function Invoke-WinPulseCustomInstall {
     [CmdletBinding()]
-    param(
-        [switch]$dryrun
-    )
+    param([switch]$dryrun)
 
     $catalog = @(Get-WinPulsePackageCatalog)
-    Write-WinPulseHeader -title 'Custom Install'
-    Show-WinPulsePackageTable -packages $catalog
-    $selectedIndexes = @(Read-WinPulseSelection -max $catalog.Count)
-    if ($selectedIndexes.Count -eq 0) {
-        Write-Host 'No valid selection.' -ForegroundColor Yellow
-        return
-    }
+    $menuItems = @($catalog | ForEach-Object { @{ Label = $_.Name; Key = $_.Id; Hint = $_.Category } })
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Install — Space to toggle, Enter to confirm' -Items $menuItems)
+    if ($selectedKeys.Count -eq 0) { return }
 
-    $selected = foreach ($index in $selectedIndexes) { $catalog[$index - 1] }
-    Write-Host ''
-    Write-Host 'Selected for install:' -ForegroundColor Cyan
-    foreach ($pkg in $selected) { Write-Host ('- {0} ({1})' -f $pkg.Name, $pkg.Id) }
-    Write-Host ''
-
-    if (-not $dryrun) {
-        $confirm = Select-WinPulseMenuItem -Title 'Confirm install?' -Items @(
-            @{ Label = 'Install';  Key = 'I'; Hint = 'Select package manager' },
-            @{ Separator = $true },
-            @{ Label = 'Cancel';   Key = 'C'; Color = 'DarkGray' }
-        )
-        if ($confirm -ne 'I') { return }
-    }
-
+    $selected = @($catalog | Where-Object { $selectedKeys -contains $_.Id })
     Invoke-WinPulsePackageInstall -packages $selected -dryrun:$dryrun
 }
 
 function Invoke-WinPulseCustomUninstall {
     [CmdletBinding()]
-    param(
-        [switch]$dryrun
-    )
+    param([switch]$dryrun)
 
     $catalog = @(Get-WinPulsePackageCatalog)
-    $installed = @()
-    foreach ($pkg in $catalog) {
-        if (Test-WinPulsePackageInstalled -id $pkg.Id) {
-            $installed += $pkg
-        }
-    }
+    Write-Host '  Checking installed packages...' -ForegroundColor DarkGray
+    $installed = @($catalog | Where-Object { Test-WinPulsePackageInstalled -id $_.Id })
 
     if ($installed.Count -eq 0) {
-        Write-Host 'No catalog packages currently installed.' -ForegroundColor Yellow
+        Write-Host '  No catalog packages currently installed.' -ForegroundColor Yellow
         return
     }
 
-    Write-WinPulseHeader -title 'Custom Uninstall'
-    Show-WinPulsePackageTable -packages $installed
-    $selectedIndexes = @(Read-WinPulseSelection -max $installed.Count)
-    if ($selectedIndexes.Count -eq 0) {
-        Write-Host 'No valid selection.' -ForegroundColor Yellow
-        return
-    }
+    $menuItems = @($installed | ForEach-Object { @{ Label = $_.Name; Key = $_.Id; Hint = $_.Category } })
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Uninstall — Space to toggle, Enter to confirm' -Items $menuItems)
+    if ($selectedKeys.Count -eq 0) { return }
 
-    $selected = foreach ($index in $selectedIndexes) { $installed[$index - 1] }
-    Write-Host ''
-    Write-Host 'Selected for uninstall:' -ForegroundColor Cyan
-    foreach ($pkg in $selected) { Write-Host ('- {0} ({1})' -f $pkg.Name, $pkg.Id) }
-    Write-Host ''
+    $selected = @($installed | Where-Object { $selectedKeys -contains $_.Id })
 
     if (-not $dryrun) {
-        $confirm = Select-WinPulseMenuItem -Title 'Confirm uninstall?' -Items @(
-            @{ Label = 'Uninstall (winget)'; Key = 'U'; Hint = 'Opens new window' },
-            @{ Separator = $true },
-            @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
-        )
-        if ($confirm -ne 'U') { return }
-        $idList = ($selected | ForEach-Object { "--id '$($_.Id)'" }) -join ' '
         $cmd = "Write-Host 'WinPulse — winget uninstall' -ForegroundColor Cyan; Write-Host ''"
         foreach ($pkg in $selected) {
             $cmd += "; Write-Host 'Uninstalling $($pkg.Name)...' -ForegroundColor White; winget uninstall --id '$($pkg.Id)' --silent"
         }
         $cmd += "; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
         Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Wait
-        return
+    } else {
+        foreach ($pkg in $selected) { Write-Host ('[DRY RUN] Uninstall {0} ({1})' -f $pkg.Name, $pkg.Id) -ForegroundColor Cyan }
     }
-
-    Invoke-WinPulsePackageUninstall -packages $selected -dryrun:$dryrun
 }
 
 function Update-AllApplications {
     [CmdletBinding()]
     param()
 
-    & winget upgrade --all --accept-source-agreements --accept-package-agreements --silent
+    $cmd = "Write-Host 'WinPulse — winget upgrade --all' -ForegroundColor Cyan; Write-Host ''; winget upgrade --all --accept-source-agreements --accept-package-agreements; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Wait
 }
 
 function Uninstall-Application {
@@ -3852,11 +3913,9 @@ function Install-WinPulseOffice {
     $yearChoice = Select-WinPulseMenuItem -Title 'Office Install — Version' -Items @(
         @{ Label = 'Office 2021';     Key = '1'; Hint = 'Perpetual' },
         @{ Label = 'Office 2024';     Key = '4'; Hint = 'Perpetual' },
-        @{ Label = 'Microsoft 365';   Key = '3'; Hint = 'Subscription' },
-        @{ Separator = $true },
-        @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+        @{ Label = 'Microsoft 365';   Key = '3'; Hint = 'Subscription' }
     )
-    if ($yearChoice -eq 'B' -or -not $yearChoice) { return }
+    if (-not $yearChoice) { return }
 
     $yearMap = @{ '1' = '2021'; '4' = '2024'; '3' = '365' }
     $selectedYear = $yearMap[$yearChoice]
@@ -3872,11 +3931,8 @@ function Install-WinPulseOffice {
         $map = if ($editionKeyMap.ContainsKey($item.Edition)) { $editionKeyMap[$item.Edition] } else { @{ Key = $item.Edition[0]; Hint = $item.Edition } }
         @{ Label = $item.Name; Key = $map['Key']; Hint = $map['Hint'] }
     })
-    $editionItems += @{ Separator = $true }
-    $editionItems += @{ Label = 'Back'; Key = 'Q'; Color = 'DarkGray' }
-
     $edKey = Select-WinPulseMenuItem -Title ('Office {0} — Edition' -f $selectedYear) -Items $editionItems
-    if ($edKey -eq 'Q' -or -not $edKey) { return }
+    if (-not $edKey) { return }
 
     $selection = $filtered | Where-Object {
         $map = if ($editionKeyMap.ContainsKey($_.Edition)) { $editionKeyMap[$_.Edition] } else { @{ Key = $_.Edition[0] } }
@@ -3969,9 +4025,7 @@ function Show-WinPulseOfficeMenu {
         $choice = Select-WinPulseMenuItem -Title 'Office' -Items @(
             @{ Label = 'Install Office';    Key = 'I'; Hint = 'Version/CZ' },
             @{ Label = 'Uninstall Office';  Key = 'U'; Hint = 'Remove' },
-            @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' },
-            @{ Separator = $true },
-            @{ Label = 'Back';              Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' }
         )
         switch ($choice) {
             'I' { try { Install-WinPulseOffice } catch { Write-Host ("  Office install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Read-Host '  Press Enter' | Out-Null }
@@ -4578,10 +4632,9 @@ function Show-WinPulseStressMenu {
             @{ Label = 'RAM quick test';           Key = 'R'; Hint = '20 seconds' },
             @{ Label = 'Memory Diagnostic';        Key = 'M'; Hint = 'Reboot req.' },
             @{ Label = 'StressMyPC';               Key = 'S'; Hint = 'Portable' },
-            @{ Label = 'FurMark';                  Key = 'F'; Hint = 'GPU stress' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                     Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'FurMark';                  Key = 'F'; Hint = 'GPU stress' }
         )
+        if (-not $choice) { return }
         switch ($choice) {
             'C' { Invoke-WinPulseCpuStressTest -durationseconds 60 }
             'D' { Invoke-WinPulseDiskStressTest -sizemb 512 }
@@ -5019,10 +5072,9 @@ function Show-WinPulseToolsMenu {
             @{ Label = 'FurMark';               Key = 'F'; Hint = 'GPU stress' },
             @{ Label = 'TechToolStore';         Key = 'T'; Hint = 'Tool suite' },
             @{ Label = 'O&O ShutUp10++';        Key = 'O'; Hint = 'Privacy' },
-            @{ Label = 'Process Explorer';      Key = 'I'; Hint = 'Sysinternals' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                  Key = 'Q'; Color = 'DarkGray' }
+            @{ Label = 'Process Explorer';      Key = 'I'; Hint = 'Sysinternals' }
         )
+        if (-not $choice) { return }
         switch ($choice) {
             'A' { Start-WinPulseAutoruns }
             'H' { Start-WinPulseOpenHardwareMonitor }
@@ -5051,10 +5103,9 @@ function Invoke-WinPulseRepairs {
         $choice = Select-WinPulseMenuItem -Title 'Repairs (Guided)' -Items @(
             @{ Label = 'Windows Update errors';  Key = 'W'; Hint = 'Last 24h' },
             @{ Label = 'Detected repair plans';   Key = 'P'; Hint = 'Auto-detect' },
-            @{ Label = 'Safe actions';             Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                     Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Safe actions';             Key = 'S'; Hint = 'DISM/SFC/CHKDSK' }
         )
+        if (-not $choice) { return $scan }
         switch ($choice) {
             'W' {
                 $latestScan = Invoke-CoreScan
@@ -5074,10 +5125,8 @@ function Invoke-WinPulseRepairs {
                 $planItems = @(for ($i = 0; $i -lt [math]::Min($plans.Count, $keys.Length); $i++) {
                     @{ Label = $plans[$i].Label; Key = [string]$keys[$i]; Hint = $plans[$i].Reason }
                 })
-                $planItems += @{ Separator = $true }
-                $planItems += @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
                 $planKey = Select-WinPulseMenuItem -Title 'Detected Repair Plans' -Items $planItems
-                if ($planKey -eq 'B' -or -not $planKey) { continue }
+                if (-not $planKey) { continue }
 
                 $planIndex = $keys.IndexOf($planKey)
                 $selected = if ($planIndex -ge 0) { $plans | Select-Object -Index $planIndex -ErrorAction SilentlyContinue } else { $null }
@@ -5114,10 +5163,9 @@ function Show-WinPulseInstallMenu {
             @{ Separator = $true },
             @{ Label = 'Dry run: Basic IT';       Key = 'D'; Hint = 'Preview only'; Color = 'DarkGray' },
             @{ Label = 'Dry run: Install';        Key = 'I'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Label = 'Dry run: Uninstall';      Key = 'N'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                    Key = 'Q'; Color = 'DarkGray' }
+            @{ Label = 'Dry run: Uninstall';      Key = 'N'; Hint = 'Preview only'; Color = 'DarkGray' }
         )
+        if (-not $choice) { return }
         switch ($choice) {
             'P' { $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet }); Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Read-Host '  Press Enter to continue' | Out-Null }
             'B' { Install-BasicITSet; Read-Host '  Press Enter to continue' | Out-Null }
@@ -5155,9 +5203,7 @@ function Show-WinPulseNetworkMenu {
         @{ Label = 'Reset TCP/IP';         Key = 'T'; Hint = 'Stack reset' },
         @{ Label = 'Reset Winsock';        Key = 'W'; Hint = 'Socket reset' },
         @{ Label = 'Restart adapters';     Key = 'A'; Hint = 'Re-enable' },
-        @{ Label = 'Repair network';       Key = 'R'; Hint = 'Auto-fix' },
-        @{ Separator = $true },
-        @{ Label = 'Back';                 Key = 'B'; Color = 'DarkGray' }
+        @{ Label = 'Repair network';       Key = 'R'; Hint = 'Auto-fix' }
     )
     switch ($choice) {
         'D' { Invoke-NetworkDiagnostic | Format-List | Out-Host }
@@ -5177,9 +5223,7 @@ function Show-WinPulseSecurityMenu {
     $choice = Select-WinPulseMenuItem -Title 'Security' -Items @(
         @{ Label = 'Security assessment';     Key = 'A'; Hint = 'Full check' },
         @{ Label = 'Weak service configs';    Key = 'W'; Hint = 'Permissions' },
-        @{ Label = 'BitLocker status';        Key = 'B'; Hint = 'Encryption' },
-        @{ Separator = $true },
-        @{ Label = 'Back';                    Key = 'Q'; Color = 'DarkGray' }
+        @{ Label = 'BitLocker status';        Key = 'B'; Hint = 'Encryption' }
     )
     switch ($choice) {
         'A' { Get-WinPulseSecurityAssessment | Format-List | Out-Host }
@@ -5198,10 +5242,9 @@ function Show-WinPulseCleanupMenu {
         $choice = Select-WinPulseMenuItem -Title 'Cleanup' -Items @(
             @{ Label = 'Full artifact cleanup';   Key = 'A'; Hint = 'Data/cache' },
             @{ Label = 'Light cleanup';            Key = 'L'; Hint = 'Exports only' },
-            @{ Label = 'Remove WinPulse folder';   Key = 'F'; Hint = 'Complete'; Color = 'DarkYellow' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                     Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Remove WinPulse folder';   Key = 'F'; Hint = 'Complete'; Color = 'DarkYellow' }
         )
+        if (-not $choice) { return }
         switch ($choice) {
             'A' { Invoke-WinPulseFullArtifactCleanup; Read-Host '  Press Enter to continue' | Out-Null }
             'L' { Invoke-WinPulseLightCleanup; Read-Host '  Press Enter to continue' | Out-Null }
@@ -5239,10 +5282,9 @@ function Show-WinPulseExportMenu {
     while ($true) {
         $choice = Select-WinPulseMenuItem -Title 'Export' -Items @(
             @{ Label = 'Export Scan JSON';    Key = 'J'; Hint = '.json' },
-            @{ Label = 'Export HTML Report';  Key = 'H'; Hint = '.html' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Export HTML Report';  Key = 'H'; Hint = '.html' }
         )
+        if (-not $choice) { return }
         switch ($choice) {
             'J' {
                 $target = Join-Path $script:WinPulsePaths.Exports ('scan-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -5393,11 +5435,11 @@ function Show-WinPulseTriageMenu {
     while ($true) {
         Show-WinPulseDashboard -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
-            @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
+            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
+            @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
             @{ Label = 'Safe actions';       Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
-            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
             @{ Separator = $true },
             @{ Label = 'Exit';               Key = 'E'; Color = 'DarkGray' }
         )
@@ -5426,10 +5468,9 @@ function Show-WinPulseSafeActions {
             @{ Label = 'Run DISM + SFC';          Key = 'S'; Hint = 'Repair files' },
             @{ Label = 'Run CHKDSK C: /scan';     Key = 'C'; Hint = 'Disk check' },
             @{ Label = 'Restart WU services';      Key = 'W'; Hint = 'Update svc' },
-            @{ Label = 'Re-scan now';              Key = 'R'; Hint = 'Refresh' },
-            @{ Separator = $true },
-            @{ Label = 'Back';                     Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Re-scan now';              Key = 'R'; Hint = 'Refresh' }
         )
+        if (-not $choice) { return $scan }
         switch ($choice) {
             'S' { Repair-SystemFiles; $scan = Invoke-CoreScan; Read-Host '  Press Enter to continue' | Out-Null }
             'C' { Start-Process -FilePath 'chkdsk.exe' -ArgumentList 'C:', '/scan' -Wait -NoNewWindow; $scan = Invoke-CoreScan; Read-Host '  Press Enter to continue' | Out-Null }
