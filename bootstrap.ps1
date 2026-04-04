@@ -1659,7 +1659,16 @@ function Select-WinPulseMultiMenuItem {
             for ($i = 0; $i -lt $Items.Count; $i++) {
                 $item = $Items[$i]
                 if ($item['Separator']) {
-                    Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
+                    if ($item['Label']) {
+                        $catLabel = '  ' + $item['Label']
+                        $catPad = $w - 2 - $catLabel.Length
+                        if ($catPad -lt 0) { $catPad = 0 }
+                        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor DarkCyan
+                        Write-Host -NoNewline ($catLabel + (' ' * $catPad)) -ForegroundColor DarkYellow
+                        Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
+                    } else {
+                        Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
+                    }
                     continue
                 }
 
@@ -3400,7 +3409,10 @@ function Invoke-WinPulseRepairPlan {
 
     switch ($planid) {
         'pending_reboot' {
-            Write-Host 'Reboot is required. Save work and restart the device.' -ForegroundColor Yellow
+            Write-Host '  Scheduling reboot in 30 seconds. Save your work now.' -ForegroundColor Yellow
+            & shutdown.exe /r /t 30 /c "WinPulse: Executing pending reboot"
+            Write-Host '  Reboot scheduled. The system will restart in 30 seconds.' -ForegroundColor Cyan
+            Write-Host '  Run ''shutdown /a'' to abort.' -ForegroundColor DarkGray
         }
         'wu_services' {
             Restart-WindowsUpdateServices
@@ -3467,6 +3479,10 @@ function Invoke-WinPulseGuidedRepair {
     }
 
     Invoke-WinPulseRepairPlan -planid $plan.Id
+    if ($plan.Id -eq 'pending_reboot') {
+        Wait-WinPulseKey '  Press any key to return to menu'
+        return $scan
+    }
     $after = Invoke-CoreScan
     Show-WinPulseRepairDelta -before $scan -after $after
     Show-WinPulseDashboard -scan $after
@@ -3552,6 +3568,130 @@ function Invoke-WinPulseChocoInstallInWindow {
     $idList = ($pkgs.ChocoId) -join ' '
     $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
+}
+
+function Get-WinPulseNiniteCatalog {
+    # Full Ninite app catalog organized by categories (matching ninite.com)
+    return @(
+        # --- Browsers ---
+        @{ Category = 'Browsers';     Label = 'Chrome';           Slug = 'chrome' },
+        @{ Category = 'Browsers';     Label = 'Firefox';          Slug = 'firefox' },
+        @{ Category = 'Browsers';     Label = 'Firefox ESR';      Slug = 'firefoxesr' },
+        @{ Category = 'Browsers';     Label = 'Opera';            Slug = 'opera' },
+        @{ Category = 'Browsers';     Label = 'Brave';            Slug = 'brave' },
+        # --- Messaging ---
+        @{ Category = 'Messaging';    Label = 'Zoom';             Slug = 'zoom' },
+        @{ Category = 'Messaging';    Label = 'Teams';            Slug = 'teams' },
+        @{ Category = 'Messaging';    Label = 'Discord';          Slug = 'discord' },
+        @{ Category = 'Messaging';    Label = 'Skype';            Slug = 'skype' },
+        @{ Category = 'Messaging';    Label = 'Telegram';         Slug = 'telegram' },
+        @{ Category = 'Messaging';    Label = 'Signal';           Slug = 'signal' },
+        # --- Media ---
+        @{ Category = 'Media';        Label = 'VLC';              Slug = 'vlc' },
+        @{ Category = 'Media';        Label = 'MPC-HC';           Slug = 'mpc' },
+        @{ Category = 'Media';        Label = 'Spotify';          Slug = 'spotify' },
+        @{ Category = 'Media';        Label = 'iTunes';           Slug = 'itunes' },
+        @{ Category = 'Media';        Label = 'Kodi';             Slug = 'kodi' },
+        @{ Category = 'Media';        Label = 'HandBrake';        Slug = 'handbrake' },
+        @{ Category = 'Media';        Label = 'Audacity';         Slug = 'audacity' },
+        @{ Category = 'Media';        Label = 'K-Lite Codecs';    Slug = 'klitecodecs' },
+        @{ Category = 'Media';        Label = 'foobar2000';       Slug = 'foobar' },
+        @{ Category = 'Media';        Label = 'AIMP';             Slug = 'aimp' },
+        # --- Imaging ---
+        @{ Category = 'Imaging';      Label = 'Paint.NET';        Slug = 'paint.net' },
+        @{ Category = 'Imaging';      Label = 'GIMP';             Slug = 'gimp' },
+        @{ Category = 'Imaging';      Label = 'IrfanView';        Slug = 'irfanview' },
+        @{ Category = 'Imaging';      Label = 'IrfanView Plugins';Slug = 'irfanviewplugins' },
+        @{ Category = 'Imaging';      Label = 'Krita';            Slug = 'krita' },
+        @{ Category = 'Imaging';      Label = 'XnView';           Slug = 'xnview' },
+        @{ Category = 'Imaging';      Label = 'Inkscape';         Slug = 'inkscape' },
+        @{ Category = 'Imaging';      Label = 'ShareX';           Slug = 'sharex' },
+        # --- Documents ---
+        @{ Category = 'Documents';    Label = 'Adobe Reader DC';  Slug = 'reader' },
+        @{ Category = 'Documents';    Label = 'SumatraPDF';       Slug = 'sumatrapdf' },
+        @{ Category = 'Documents';    Label = 'LibreOffice';      Slug = 'libreoffice' },
+        @{ Category = 'Documents';    Label = 'FoxitReader';      Slug = 'foxit' },
+        @{ Category = 'Documents';    Label = 'Notepad++';        Slug = 'notepadplusplus' },
+        # --- Security ---
+        @{ Category = 'Security';     Label = 'Malwarebytes';     Slug = 'malwarebytes' },
+        @{ Category = 'Security';     Label = 'Avast';            Slug = 'avast' },
+        @{ Category = 'Security';     Label = 'AVG';              Slug = 'avg' },
+        @{ Category = 'Security';     Label = 'Avira';            Slug = 'avira' },
+        @{ Category = 'Security';     Label = 'Bitdefender Free'; Slug = 'bitdefender' },
+        # --- Compression ---
+        @{ Category = 'Compression';  Label = '7-Zip';            Slug = '7zip' },
+        @{ Category = 'Compression';  Label = 'PeaZip';           Slug = 'peazip' },
+        @{ Category = 'Compression';  Label = 'WinRAR';           Slug = 'winrar' },
+        # --- Developer ---
+        @{ Category = 'Developer';    Label = 'Python 3';         Slug = 'python' },
+        @{ Category = 'Developer';    Label = 'Node.js';          Slug = 'nodejs' },
+        @{ Category = 'Developer';    Label = 'VS Code';          Slug = 'vscode' },
+        @{ Category = 'Developer';    Label = 'Git';              Slug = 'git' },
+        @{ Category = 'Developer';    Label = 'Java (Adoptium)';  Slug = 'adoptopenjdk8' },
+        @{ Category = 'Developer';    Label = 'Java 11';          Slug = 'adoptopenjdk11' },
+        @{ Category = 'Developer';    Label = 'Java 17';          Slug = 'adoptopenjdk17' },
+        @{ Category = 'Developer';    Label = 'PuTTY';            Slug = 'putty' },
+        @{ Category = 'Developer';    Label = 'WinSCP';           Slug = 'winscp' },
+        @{ Category = 'Developer';    Label = 'FileZilla';        Slug = 'filezilla' },
+        # --- Utilities ---
+        @{ Category = 'Utilities';    Label = 'TeamViewer';       Slug = 'teamviewer' },
+        @{ Category = 'Utilities';    Label = 'AnyDesk';          Slug = 'anydesk' },
+        @{ Category = 'Utilities';    Label = 'Greenshot';        Slug = 'greenshot' },
+        @{ Category = 'Utilities';    Label = 'Everything';       Slug = 'everything' },
+        @{ Category = 'Utilities';    Label = 'CrystalDiskInfo';  Slug = 'crystaldiskinfo' },
+        @{ Category = 'Utilities';    Label = 'HWMonitor';        Slug = 'hwmonitor' },
+        @{ Category = 'Utilities';    Label = 'Process Hacker';   Slug = 'processhacker' },
+        @{ Category = 'Utilities';    Label = 'Speccy';           Slug = 'speccy' },
+        @{ Category = 'Utilities';    Label = 'Recuva';           Slug = 'recuva' },
+        @{ Category = 'Utilities';    Label = 'CCleaner';         Slug = 'ccleaner' },
+        @{ Category = 'Utilities';    Label = 'Revo Uninstaller';  Slug = 'revo' },
+        # --- Storage ---
+        @{ Category = 'Storage';      Label = 'Dropbox';          Slug = 'dropbox' },
+        @{ Category = 'Storage';      Label = 'Google Drive';     Slug = 'googledrive' },
+        @{ Category = 'Storage';      Label = 'OneDrive';         Slug = 'onedrive' },
+        # --- Remote ---
+        @{ Category = 'Remote';       Label = 'LogMeIn';          Slug = 'logmein' },
+        @{ Category = 'Remote';       Label = 'GoToMeeting';      Slug = 'gotomeeting' }
+    )
+}
+
+function Show-WinPulseNiniteMenu {
+    [CmdletBinding()]
+    param()
+
+    $catalog = @(Get-WinPulseNiniteCatalog)
+    $categories = @($catalog | Select-Object -ExpandProperty Category -Unique)
+
+    # Build multi-select items with category separators
+    $menuItems = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($cat in $categories) {
+        $menuItems.Add(@{ Separator = $true; Label = $cat })
+        $appsInCat = @($catalog | Where-Object { $_.Category -eq $cat })
+        foreach ($app in $appsInCat) {
+            $menuItems.Add(@{ Label = $app.Label; Key = $app.Slug; Hint = $app.Slug })
+        }
+    }
+
+    $selectedSlugs = @(Select-WinPulseMultiMenuItem -Title 'Ninite — Select apps to install' -Items $menuItems.ToArray())
+    if ($selectedSlugs.Count -eq 0) { return }
+
+    $slugStr = $selectedSlugs -join '-'
+    $url = 'https://ninite.com/{0}/ninite.exe' -f $slugStr
+    $dest = Join-Path $script:WinPulsePaths.Bin 'ninite-install.exe'
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Ninite Install'
+    Write-Host ('  Downloading Ninite installer ({0} apps)...' -f $selectedSlugs.Count) -ForegroundColor DarkCyan
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        Write-Host '  Running Ninite installer...' -ForegroundColor DarkCyan
+        Start-Process -FilePath $dest -Wait
+        Write-Host '  Ninite install complete.' -ForegroundColor Green
+    } catch {
+        Write-Host ('  Ninite download failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
+    }
+    Wait-WinPulseKey
 }
 
 function Invoke-WinPulseNinite {
@@ -5176,14 +5316,10 @@ function Show-WinPulseInstallMenu {
     [CmdletBinding()]
     param()
 
-    if (-not (Test-WinGetAvailable)) {
-        Write-Host '  Winget is not available on this system.' -ForegroundColor Red
-        return
-    }
-
     while ($true) {
         Clear-Host
         $choice = Select-WinPulseMenuItem -Title 'Install / Apps' -Items @(
+            @{ Label = 'Ninite catalog';          Key = 'N'; Hint = 'Direct download' },
             @{ Label = 'Preview Basic IT Set';    Key = 'P'; Hint = 'Show list' },
             @{ Label = 'Install Basic IT Set';    Key = 'B'; Hint = 'Auto-install' },
             @{ Label = 'Custom install';          Key = 'C'; Hint = 'Multi-select' },
@@ -5193,19 +5329,45 @@ function Show-WinPulseInstallMenu {
             @{ Separator = $true },
             @{ Label = 'Dry run: Basic IT';       Key = 'D'; Hint = 'Preview only'; Color = 'DarkGray' },
             @{ Label = 'Dry run: Install';        Key = 'I'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Label = 'Dry run: Uninstall';      Key = 'N'; Hint = 'Preview only'; Color = 'DarkGray' }
+            @{ Label = 'Dry run: Uninstall';      Key = 'X'; Hint = 'Preview only'; Color = 'DarkGray' }
         )
         if (-not $choice) { return }
         switch ($choice) {
-            'P' { $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet }); Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Wait-WinPulseKey }
-            'B' { Install-BasicITSet }
-            'C' { Invoke-WinPulseCustomInstall }
-            'U' { Invoke-WinPulseCustomUninstall }
-            'A' { Update-AllApplications }
+            'N' { Show-WinPulseNiniteMenu }
+            'P' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet })
+                Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Wait-WinPulseKey
+            }
+            'B' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Install-BasicITSet
+            }
+            'C' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Invoke-WinPulseCustomInstall
+            }
+            'U' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Invoke-WinPulseCustomUninstall
+            }
+            'A' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Update-AllApplications
+            }
             'O' { Show-WinPulseOfficeMenu }
-            'D' { Install-BasicITSet -dryrun; Wait-WinPulseKey }
-            'I' { Invoke-WinPulseCustomInstall -dryrun; Wait-WinPulseKey }
-            'N' { Invoke-WinPulseCustomUninstall -dryrun; Wait-WinPulseKey }
+            'D' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Install-BasicITSet -dryrun; Wait-WinPulseKey
+            }
+            'I' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Invoke-WinPulseCustomInstall -dryrun; Wait-WinPulseKey
+            }
+            'X' {
+                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                Invoke-WinPulseCustomUninstall -dryrun; Wait-WinPulseKey
+            }
             default { return }
         }
     }
