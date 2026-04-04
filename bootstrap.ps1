@@ -3340,27 +3340,26 @@ function Invoke-WinPulseGuidedRepair {
     }
 
     Show-WinPulseRepairPlan -plan $plan
-    Write-Host '[1] Dry Run (show plan only)'
-    Write-Host '[2] Execute repair now'
-    Write-Host '[0] Cancel'
-    $mode = Read-Host 'Select mode'
-    if ($mode -eq '0') {
-        return $scan
-    }
+    $mode = Select-WinPulseMenuItem -Title ('Repair: {0}' -f $plan.Label) -Items @(
+        @{ Label = 'Dry Run';      Key = 'D'; Hint = 'Show plan only' },
+        @{ Label = 'Execute now';  Key = 'E'; Hint = 'Apply changes' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel';       Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($mode -eq 'C' -or -not $mode) { return $scan }
 
-    if ($mode -eq '1') {
+    if ($mode -eq 'D') {
         Invoke-WinPulseRepairPlan -planid $plan.Id -dryrun
         Write-Host 'Dry run complete. No changes were made.' -ForegroundColor Green
         return $scan
     }
 
-    if ($mode -ne '2') {
-        Write-Host 'Invalid mode.' -ForegroundColor Yellow
-        return $scan
-    }
-
-    $confirm = Read-Host ('Execute "{0}" now? (y/n)' -f $plan.Label)
-    if ($confirm -notin @('y', 'Y', 'yes', 'YES')) {
+    $confirm = Select-WinPulseMenuItem -Title ('Execute: {0}?' -f $plan.Label) -Items @(
+        @{ Label = 'Yes, execute'; Key = 'Y'; Hint = 'Apply now' },
+        @{ Separator = $true },
+        @{ Label = 'No, cancel';   Key = 'N'; Color = 'DarkGray' }
+    )
+    if ($confirm -ne 'Y') {
         Write-Host 'Repair cancelled.' -ForegroundColor Yellow
         return $scan
     }
@@ -3716,28 +3715,41 @@ function Install-WinPulseOffice {
     param()
 
     $catalog = @(Get-WinPulseOfficeCatalog)
-    Write-WinPulseHeader -title 'Office Install'
-    for ($i = 0; $i -lt $catalog.Count; $i++) {
-        Write-Host ('[{0}] {1}' -f ($i + 1), $catalog[$i].Name)
-    }
-    Write-Host '[0] Back'
 
-    $choice = Read-Host 'Select Office edition'
-    if ($choice -eq '0') {
-        return
-    }
+    $yearChoice = Select-WinPulseMenuItem -Title 'Office Install — Version' -Items @(
+        @{ Label = 'Office 2019'; Key = '9'; Hint = 'Perpetual' },
+        @{ Label = 'Office 2021'; Key = '1'; Hint = 'Perpetual' },
+        @{ Label = 'Office 2024'; Key = '4'; Hint = 'Perpetual' },
+        @{ Label = 'Microsoft 365'; Key = '3'; Hint = 'Subscription' },
+        @{ Separator = $true },
+        @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+    )
+    if ($yearChoice -eq 'B' -or -not $yearChoice) { return }
 
-    $index = 0
-    if (-not [int]::TryParse($choice, [ref]$index)) {
-        Write-Host 'Invalid selection.' -ForegroundColor Yellow
-        return
-    }
+    $yearMap = @{ '9' = '2019'; '1' = '2021'; '4' = '2024'; '3' = '365' }
+    $selectedYear = $yearMap[$yearChoice]
+    $filtered = @($catalog | Where-Object { $_.Version -eq $selectedYear })
 
-    $selection = $catalog | Select-Object -Index ($index - 1) -ErrorAction SilentlyContinue
-    if (-not $selection) {
-        Write-Host 'Invalid selection.' -ForegroundColor Yellow
-        return
-    }
+    $editionItems = @(foreach ($item in $filtered) {
+        $key = switch ($item.Edition) {
+            'HomeBusiness'   { 'H' }
+            'Home'           { 'S' }
+            'StandardVolume' { 'V' }
+            default          { $item.Edition[0] }
+        }
+        @{ Label = $item.Name; Key = $key; Hint = $item.Edition }
+    })
+    $editionItems += @{ Separator = $true }
+    $editionItems += @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+
+    $edKey = Select-WinPulseMenuItem -Title ('Office {0} — Edition' -f $selectedYear) -Items $editionItems
+    if ($edKey -eq 'B' -or -not $edKey) { return }
+
+    $selection = $filtered | Where-Object {
+        $k = switch ($_.Edition) { 'HomeBusiness' { 'H' } 'Home' { 'S' } 'StandardVolume' { 'V' } default { $_.Edition[0] } }
+        $k -eq $edKey
+    } | Select-Object -First 1
+    if (-not $selection) { return }
 
     $channelAttribute = if ($selection.Channel) { (' Channel="{0}"' -f $selection.Channel) } else { '' }
     $xml = @"
@@ -4925,26 +4937,18 @@ function Invoke-WinPulseRepairs {
                     continue
                 }
 
-                Write-Host '  Detected plans:' -ForegroundColor Cyan
-                for ($i = 0; $i -lt $plans.Count; $i++) {
-                    $number = $i + 1
-                    Write-Host ('  [{0}] {1} - {2}' -f $number, $plans[$i].Label, $plans[$i].Reason)
-                }
-                Write-Host '  [0] Back'
-                $planChoice = (Read-Host '  Select plan').Trim()
-                if ($planChoice -eq '0') { continue }
+                $keys = '1234567890ABCDEFGHIJ'
+                $planItems = @(for ($i = 0; $i -lt [math]::Min($plans.Count, $keys.Length); $i++) {
+                    @{ Label = $plans[$i].Label; Key = [string]$keys[$i]; Hint = $plans[$i].Reason }
+                })
+                $planItems += @{ Separator = $true }
+                $planItems += @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+                $planKey = Select-WinPulseMenuItem -Title 'Detected Repair Plans' -Items $planItems
+                if ($planKey -eq 'B' -or -not $planKey) { continue }
 
-                $index = 0
-                if (-not [int]::TryParse($planChoice, [ref]$index)) {
-                    Write-Host '  Invalid plan choice.' -ForegroundColor Yellow
-                    Read-Host '  Press Enter to continue' | Out-Null
-                    continue
-                }
-
-                $selected = $plans | Select-Object -Index ($index - 1) -ErrorAction SilentlyContinue
+                $planIndex = $keys.IndexOf($planKey)
+                $selected = if ($planIndex -ge 0) { $plans | Select-Object -Index $planIndex -ErrorAction SilentlyContinue } else { $null }
                 if (-not $selected) {
-                    Write-Host '  Invalid plan choice.' -ForegroundColor Yellow
-                    Read-Host '  Press Enter to continue' | Out-Null
                     continue
                 }
 
