@@ -1483,7 +1483,7 @@ function Write-WinPulseHeader {
         [string]$title
     )
 
-    $w = 62
+    $w = 120
     Write-Host ''
     Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkCyan
     Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkCyan
