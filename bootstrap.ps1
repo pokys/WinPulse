@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.3-20250405'
+$script:WinPulseVersion = '0.6.4-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1554,7 +1554,7 @@ function Select-WinPulseMenuItem {
             $drawnLines = 0
 
             # Top border
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 5)), ([char]0x2510)) -ForegroundColor DarkCyan
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2510)) -ForegroundColor DarkCyan
             $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -1567,7 +1567,7 @@ function Select-WinPulseMenuItem {
                 }
 
                 $isSelected = ($selectableIdx[$sel] -eq $i)
-                $pointer = if ($isSelected) { [char]0x25BA } else { ' ' }
+                $pointer = if ($isSelected) { '>' } else { ' ' }
                 $keyTag = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
                 $hint = if ($item['Hint']) { $item['Hint'] } else { '' }
                 $color = if ($item['Color']) { $item['Color'] } else { 'White' }
@@ -1690,7 +1690,7 @@ function Select-WinPulseMultiMenuItem {
             }
             $drawnLines = 0
 
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 5)), ([char]0x2510)) -ForegroundColor DarkCyan
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2510)) -ForegroundColor DarkCyan
             $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -1712,7 +1712,7 @@ function Select-WinPulseMultiMenuItem {
 
                 $isActive  = ($selectableIdx[$sel] -eq $i)
                 $isChecked = $checked.ContainsKey($i)
-                $pointer   = if ($isActive) { [char]0x25BA } else { ' ' }
+                $pointer   = if ($isActive) { '>' } else { ' ' }
                 $box       = if ($isChecked) { '[x]' } else { '[ ]' }
                 $hint      = if ($item['Hint']) { $item['Hint'] } else { '' }
                 $color     = if ($isChecked) { 'Cyan' } else { 'White' }
@@ -3899,9 +3899,7 @@ function Show-WinPulseChocoMenu {
             continue
         }
 
-        Clear-Host
-        Write-WinPulseHeader -title ('Chocolatey — výsledky: {0}' -f $term)
-        $selected = @(Select-WinPulseMultiMenuItem -Title ('Výsledky pro: {0}' -f $term) -Items $pkgItems)
+        $selected = @(Select-WinPulseMultiMenuItem -Title ('Chocolatey — výsledky: {0}' -f $term) -Items $pkgItems)
         if ($selected.Count -eq 0) { continue }
 
         $idList = $selected -join ' '
