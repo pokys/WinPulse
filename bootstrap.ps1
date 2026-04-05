@@ -3886,8 +3886,8 @@ function Show-WinPulseChocoMenu {
             continue
         }
 
-        $pkgItems = @(foreach ($line in $searchOutput) {
-            $parts = $line -split '\|'
+        $pkgItems = @($searchOutput | ForEach-Object {
+            $parts = $_ -split '\|'
             if ($parts.Count -ge 2) {
                 @{ Label = $parts[0]; Key = $parts[0]; Hint = $parts[1] }
             }
@@ -5851,13 +5851,7 @@ Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $boot
 Initialize-WinPulse
 
 Clear-Host
-$w = 88
-Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkCyan
-Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkCyan
-Write-Host -NoNewline ('WinPulse'.PadRight(20)) -ForegroundColor Cyan
-Write-Host -NoNewline ('v{0}' -f $script:WinPulseVersion) -ForegroundColor DarkYellow
-Write-Host (' ' * ($w - 4 - 20 - ('v' + $script:WinPulseVersion).Length) + (' {0}' -f ([char]0x2502))) -ForegroundColor DarkCyan
-Write-Host ('  {0}{1}{2}' -f ([char]0x2514), ([string][char]0x2500 * ($w - 2)), ([char]0x2518)) -ForegroundColor DarkCyan
+Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '  Načítám systémové informace...' -ForegroundColor DarkGray
 
