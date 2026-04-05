@@ -1529,22 +1529,38 @@ function Select-WinPulseMenuItem {
 
     [Console]::CursorVisible = $false
     $sel = 0
+    # Required frame height: top border + items + bottom border + help line
+    $frameHeight = $Items.Count + 3
     try {
         $startY = [Console]::CursorTop
-        $firstDraw = $true
+        # Scroll safeguard: if frame doesn't fit below current cursor, clear screen
+        if (($startY + $frameHeight) -ge ([Console]::BufferHeight - 1)) {
+            Clear-Host
+            $startY = 0
+        }
+        $lastLineCount = 0
 
         while ($true) {
-            if (-not $firstDraw) { [Console]::SetCursorPosition(0, $startY) }
-            $firstDraw = $false
+            if ($lastLineCount -gt 0) {
+                [Console]::SetCursorPosition(0, $startY)
+                $blankWidth = [math]::Min($w + 4, [Console]::BufferWidth - 1)
+                if ($blankWidth -lt 1) { $blankWidth = 1 }
+                $blank = ' ' * $blankWidth
+                for ($c = 0; $c -lt $lastLineCount; $c++) { Write-Host $blank }
+                [Console]::SetCursorPosition(0, $startY)
+            }
+            $drawnLines = 0
 
             # Top border
             Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 5)), ([char]0x2510)) -ForegroundColor DarkCyan
+            $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
                 $item = $Items[$i]
 
                 if ($item['Separator']) {
                     Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
+                    $drawnLines++
                     continue
                 }
 
@@ -1573,13 +1589,18 @@ function Select-WinPulseMenuItem {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
                 Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
+                $drawnLines++
             }
 
             # Bottom border
             Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
+            $drawnLines++
             # Help bar
             $helpText = '  {0}/{1} Navigate  Enter Select  Esc Back' -f ([char]0x2191), ([char]0x2193)
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            $drawnLines++
+
+            $lastLineCount = $drawnLines
 
             $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 
@@ -1646,15 +1667,29 @@ function Select-WinPulseMultiMenuItem {
     $sel = 0
 
     [Console]::CursorVisible = $false
+    # Required frame height: top border + items + bottom border + help line
+    $frameHeight = $Items.Count + 3
     try {
         $startY = [Console]::CursorTop
-        $firstDraw = $true
+        if (($startY + $frameHeight) -ge ([Console]::BufferHeight - 1)) {
+            Clear-Host
+            $startY = 0
+        }
+        $lastLineCount = 0
 
         while ($true) {
-            if (-not $firstDraw) { [Console]::SetCursorPosition(0, $startY) }
-            $firstDraw = $false
+            if ($lastLineCount -gt 0) {
+                [Console]::SetCursorPosition(0, $startY)
+                $blankWidth = [math]::Min($w + 4, [Console]::BufferWidth - 1)
+                if ($blankWidth -lt 1) { $blankWidth = 1 }
+                $blank = ' ' * $blankWidth
+                for ($c = 0; $c -lt $lastLineCount; $c++) { Write-Host $blank }
+                [Console]::SetCursorPosition(0, $startY)
+            }
+            $drawnLines = 0
 
             Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 5)), ([char]0x2510)) -ForegroundColor DarkCyan
+            $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
                 $item = $Items[$i]
@@ -1669,6 +1704,7 @@ function Select-WinPulseMultiMenuItem {
                     } else {
                         Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
                     }
+                    $drawnLines++
                     continue
                 }
 
@@ -1694,11 +1730,16 @@ function Select-WinPulseMultiMenuItem {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
                 Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
+                $drawnLines++
             }
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
+            $drawnLines++
             $helpText = '  {0}/{1} Navigate  Space Toggle  Enter Confirm  Esc Cancel    {2} selected' -f ([char]0x2191), ([char]0x2193), $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            $drawnLines++
+
+            $lastLineCount = $drawnLines
 
             $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
             switch ($k.VirtualKeyCode) {
@@ -3662,17 +3703,33 @@ function Show-WinPulseNiniteMenu {
     $catalog = @(Get-WinPulseNiniteCatalog)
     $categories = @($catalog | ForEach-Object { $_['Category'] } | Select-Object -Unique)
 
-    # Build multi-select items with category separators
-    $menuItems = [System.Collections.Generic.List[hashtable]]::new()
-    foreach ($cat in $categories) {
-        $menuItems.Add(@{ Separator = $true; Label = $cat })
+    # Step 1: pick categories to browse
+    Clear-Host
+    Write-WinPulseHeader -title 'Ninite — Categories'
+    $categoryItems = @(foreach ($cat in $categories) {
+        $count = @($catalog | Where-Object { $_['Category'] -eq $cat }).Count
+        @{ Label = $cat; Key = $cat; Hint = ('{0} apps' -f $count) }
+    })
+    $pickedCategories = @(Select-WinPulseMultiMenuItem -Title 'Ninite — Select categories' -Items $categoryItems)
+    if ($pickedCategories.Count -eq 0) { return }
+
+    # Step 2: for each picked category, pick apps
+    $selectedSlugs = @()
+    foreach ($cat in $pickedCategories) {
         $appsInCat = @($catalog | Where-Object { $_['Category'] -eq $cat })
-        foreach ($app in $appsInCat) {
-            $menuItems.Add(@{ Label = $app['Label']; Key = $app['Slug']; Hint = $app['Slug'] })
+        if ($appsInCat.Count -eq 0) { continue }
+        $appItems = @(foreach ($app in $appsInCat) {
+            @{ Label = $app['Label']; Key = $app['Slug']; Hint = $app['Slug'] }
+        })
+        Clear-Host
+        Write-WinPulseHeader -title ('Ninite — {0}' -f $cat)
+        $picked = @(Select-WinPulseMultiMenuItem -Title ('{0} — Select apps' -f $cat) -Items $appItems)
+        if ($picked.Count -gt 0) {
+            $selectedSlugs += $picked
         }
     }
 
-    $selectedSlugs = @(Select-WinPulseMultiMenuItem -Title 'Ninite — Select apps to install' -Items $menuItems.ToArray())
+    $selectedSlugs = @($selectedSlugs | Select-Object -Unique)
     if ($selectedSlugs.Count -eq 0) { return }
 
     $slugStr = $selectedSlugs -join '-'
@@ -4005,18 +4062,10 @@ function Get-WinPulseOfficeSetupPath {
     [CmdletBinding()]
     param()
 
-    $candidates = @(
-        (Join-Path $script:WinPulsePaths.Bin 'OfficeODT\setup.exe'),
-        (Join-Path $env:ProgramFiles 'Microsoft Office\root\Office16\setup.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Office\root\Office16\setup.exe')
-    )
-
-    foreach ($path in $candidates) {
-        if ($path -and (Test-Path -Path $path)) {
-            return $path
-        }
+    $path = Join-Path $script:WinPulsePaths.Bin 'OfficeODT\setup.exe'
+    if (Test-Path -Path $path) {
+        return $path
     }
-
     return $null
 }
 
@@ -4029,16 +4078,49 @@ function Ensure-WinPulseOfficeSetup {
         return $setupPath
     }
 
-    if (-not (Test-WinGetAvailable)) {
-        throw 'Office setup.exe not found and winget is unavailable for Office Deployment Tool installation.'
+    $odtDir = Join-Path $script:WinPulsePaths.Bin 'OfficeODT'
+    if (-not (Test-Path -Path $odtDir)) {
+        New-Item -ItemType Directory -Path $odtDir -Force | Out-Null
     }
 
-    Write-Log -level 'INFO' -message 'Installing Microsoft Office Deployment Tool via winget.'
-    & winget install --id Microsoft.OfficeDeploymentTool --accept-source-agreements --accept-package-agreements --silent
+    $extractor = Join-Path $script:WinPulsePaths.Bin 'officedeploymenttool.exe'
+    # aka.ms/officedeploymenttool is a permanent FWLink redirect to the latest ODT self-extractor.
+    $downloadUrl = 'https://aka.ms/officedeploymenttool'
+
+    Write-Host '  Downloading Office Deployment Tool...' -ForegroundColor DarkCyan
+    Write-Log -level 'INFO' -message ('Downloading Office Deployment Tool from {0}' -f $downloadUrl)
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $extractor -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
+    }
+    catch {
+        throw ('Failed to download Office Deployment Tool: {0}' -f $_.Exception.Message)
+    }
+
+    if (-not (Test-Path -Path $extractor)) {
+        throw 'Office Deployment Tool download did not produce a file.'
+    }
+
+    Write-Host '  Extracting Office Deployment Tool...' -ForegroundColor DarkCyan
+    Write-Log -level 'INFO' -message ('Extracting Office Deployment Tool to {0}' -f $odtDir)
+    $extractArgs = @('/quiet', '/extract:{0}' -f $odtDir)
+    try {
+        $proc = Start-Process -FilePath $extractor -ArgumentList $extractArgs -Wait -PassThru -ErrorAction Stop
+        if ($proc.ExitCode -ne 0) {
+            throw ('Office Deployment Tool self-extractor returned exit code {0}.' -f $proc.ExitCode)
+        }
+    }
+    catch {
+        throw ('Failed to extract Office Deployment Tool: {0}' -f $_.Exception.Message)
+    }
+    finally {
+        if (Test-Path -Path $extractor) {
+            Remove-Item -Path $extractor -Force -ErrorAction SilentlyContinue
+        }
+    }
 
     $setupPath = Get-WinPulseOfficeSetupPath
     if (-not $setupPath) {
-        throw 'Office Deployment Tool setup.exe not found after installation.'
+        throw ('Office Deployment Tool setup.exe not found after extraction to {0}.' -f $odtDir)
     }
 
     return $setupPath
@@ -4067,6 +4149,8 @@ function Install-WinPulseOffice {
 
     $catalog = @(Get-WinPulseOfficeCatalog)
 
+    Clear-Host
+    Write-WinPulseHeader -title 'Office Install'
     $yearChoice = Select-WinPulseMenuItem -Title 'Office Install — Version' -Items @(
         @{ Label = 'Office 2021';     Key = '1'; Hint = 'Perpetual' },
         @{ Label = 'Office 2024';     Key = '4'; Hint = 'Perpetual' },
@@ -4088,6 +4172,8 @@ function Install-WinPulseOffice {
         $map = if ($editionKeyMap.ContainsKey($item.Edition)) { $editionKeyMap[$item.Edition] } else { @{ Key = $item.Edition[0]; Hint = $item.Edition } }
         @{ Label = $item.Name; Key = $map['Key']; Hint = $map['Hint'] }
     })
+    Clear-Host
+    Write-WinPulseHeader -title 'Office Install'
     $edKey = Select-WinPulseMenuItem -Title ('Office {0} — Edition' -f $selectedYear) -Items $editionItems
     if (-not $edKey) { return }
 
@@ -4110,12 +4196,14 @@ function Install-WinPulseOffice {
 </Configuration>
 "@
 
-    Write-Host ''
-    Write-Host ('Selected: {0}' -f $selection.Name) -ForegroundColor Cyan
-    Write-Host ('Product ID: {0}' -f $selection.ProductId)
+    Clear-Host
+    Write-WinPulseHeader -title 'Office Install'
+    Write-Host ('  Selected: {0}' -f $selection.Name) -ForegroundColor Cyan
+    Write-Host ('  Product ID: {0}' -f $selection.ProductId)
     if ($selection.Channel) {
-        Write-Host ('Channel: {0}' -f $selection.Channel)
+        Write-Host ('  Channel: {0}' -f $selection.Channel)
     }
+    Write-Host ''
     $confirm = Select-WinPulseMenuItem -Title 'Start Office install?' -Items @(
         @{ Label = 'Yes, install'; Key = 'Y'; Hint = 'Opens installer' },
         @{ Separator = $true },
@@ -4139,7 +4227,10 @@ function Uninstall-WinPulseOffice {
 </Configuration>
 "@
 
-    Write-Host 'This will uninstall Office products managed by Click-to-Run.' -ForegroundColor Yellow
+    Clear-Host
+    Write-WinPulseHeader -title 'Office Uninstall'
+    Write-Host '  This will uninstall Office products managed by Click-to-Run.' -ForegroundColor Yellow
+    Write-Host ''
     $confirm = Select-WinPulseMenuItem -Title 'Uninstall Office?' -Items @(
         @{ Label = 'Yes, uninstall'; Key = 'Y'; Hint = 'Removes all Office' },
         @{ Separator = $true },
@@ -4155,6 +4246,8 @@ function Repair-WinPulseOffice {
     [CmdletBinding()]
     param()
 
+    Clear-Host
+    Write-WinPulseHeader -title 'Office Repair'
     $c2rCandidates = @(
         (Join-Path $env:ProgramFiles 'Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe')
@@ -4183,6 +4276,8 @@ function Show-WinPulseOfficeMenu {
     param()
 
     while ($true) {
+        Clear-Host
+        Write-WinPulseHeader -title 'Office'
         $choice = Select-WinPulseMenuItem -Title 'Office' -Items @(
             @{ Label = 'Install Office';    Key = 'I'; Hint = 'Version/CZ' },
             @{ Label = 'Uninstall Office';  Key = 'U'; Hint = 'Remove' },
