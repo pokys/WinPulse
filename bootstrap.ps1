@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.6-20250405'
+$script:WinPulseVersion = '0.6.7-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1671,19 +1671,25 @@ function Select-WinPulseMultiMenuItem {
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
     $sel = 0
+    $viewTop = 0   # first visible item index in $Items
 
     [Console]::CursorVisible = $false
-    # Required frame height: top border + items + bottom border + help line
-    $frameHeight = $Items.Count + 3
     try {
-        $startY = [Console]::CursorTop
-        if (($startY + $frameHeight) -ge ([Console]::BufferHeight - 1)) {
-            Clear-Host
-            $startY = 0
-        }
+        Clear-Host
+        $startY = 0
         $lastLineCount = 0
 
         while ($true) {
+            # Available lines for items: terminal height minus top-border, bottom-border, help, one spare
+            $maxViewport = [math]::Max(1, [Console]::WindowHeight - 4)
+
+            # Keep active item visible: find its position among all items
+            $activeItemIdx = $selectableIdx[$sel]
+            # Scroll viewTop so activeItemIdx stays within [viewTop, viewTop+maxViewport)
+            if ($activeItemIdx -lt $viewTop) { $viewTop = $activeItemIdx }
+            if ($activeItemIdx -ge ($viewTop + $maxViewport)) { $viewTop = $activeItemIdx - $maxViewport + 1 }
+
+            # Clear previous frame
             if ($lastLineCount -gt 0) {
                 [Console]::SetCursorPosition(0, $startY)
                 $blankWidth = [math]::Min($w + 4, [Console]::BufferWidth - 1)
@@ -1694,11 +1700,19 @@ function Select-WinPulseMultiMenuItem {
             }
             $drawnLines = 0
 
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2510)) -ForegroundColor DarkCyan
+            # Top border + scroll indicator
+            $scrollInfo = if ($Items.Count -gt $maxViewport) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
+            $titleFull = if ($scrollInfo) { '{0}  {1}' -f $Title, $scrollInfo } else { $Title }
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleFull, ([string][char]0x2500 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2510)) -ForegroundColor DarkCyan
             $drawnLines++
 
+            # Render only items in viewport window
+            $rendered = 0
             for ($i = 0; $i -lt $Items.Count; $i++) {
+                if ($rendered -ge $maxViewport) { break }
+                if ($i -lt $viewTop) { continue }
                 $item = $Items[$i]
+
                 if ($item['Separator']) {
                     if ($item['Label']) {
                         $catLabel = '  ' + $item['Label']
@@ -1711,6 +1725,7 @@ function Select-WinPulseMultiMenuItem {
                         Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor DarkCyan
                     }
                     $drawnLines++
+                    $rendered++
                     continue
                 }
 
@@ -1737,6 +1752,7 @@ function Select-WinPulseMultiMenuItem {
                 }
                 Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
                 $drawnLines++
+                $rendered++
             }
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
