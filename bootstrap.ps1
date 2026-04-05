@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.0-20250405'
+$script:WinPulseVersion = '0.6.1-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
