@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.5-20250405'
+$script:WinPulseVersion = '0.6.6-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -898,15 +898,19 @@ function Get-WinPulseSoftwareInventory {
     foreach ($rp in $regPaths) {
         $entries = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
         foreach ($entry in $entries) {
-            if (-not $entry.DisplayName) { continue }
-            $key = '{0}|{1}' -f $entry.DisplayName, $entry.DisplayVersion
+            $dn = if ($entry.PSObject.Properties['DisplayName']) { $entry.PSObject.Properties['DisplayName'].Value } else { $null }
+            if (-not $dn) { continue }
+            $dv = if ($entry.PSObject.Properties['DisplayVersion']) { $entry.PSObject.Properties['DisplayVersion'].Value } else { $null }
+            $pub = if ($entry.PSObject.Properties['Publisher']) { $entry.PSObject.Properties['Publisher'].Value } else { $null }
+            $id = if ($entry.PSObject.Properties['InstallDate']) { $entry.PSObject.Properties['InstallDate'].Value } else { $null }
+            $key = '{0}|{1}' -f $dn, $dv
             if ($seen.ContainsKey($key)) { continue }
             $seen[$key] = $true
             $items += [ordered]@{
-                Name        = $entry.DisplayName
-                Version     = if ($entry.DisplayVersion) { $entry.DisplayVersion } else { 'N/A' }
-                Publisher   = if ($entry.Publisher) { $entry.Publisher } else { 'N/A' }
-                InstallDate = if ($entry.InstallDate) { $entry.InstallDate } else { 'N/A' }
+                Name        = $dn
+                Version     = if ($dv) { $dv } else { 'N/A' }
+                Publisher   = if ($pub) { $pub } else { 'N/A' }
+                InstallDate = if ($id) { $id } else { 'N/A' }
             }
         }
     }
