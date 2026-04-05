@@ -2,6 +2,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:WinPulseVersion = '0.6.0-20250405'
+
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
     param()
@@ -5848,6 +5850,17 @@ if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.PSOb
 Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
 Initialize-WinPulse
 
-Write-Log -level 'INFO' -message 'Starting WinPulse core scan.'
+Clear-Host
+$w = 88
+Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkCyan
+Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkCyan
+Write-Host -NoNewline ('WinPulse'.PadRight(20)) -ForegroundColor Cyan
+Write-Host -NoNewline ('v{0}' -f $script:WinPulseVersion) -ForegroundColor DarkYellow
+Write-Host (' ' * ($w - 4 - 20 - ('v' + $script:WinPulseVersion).Length) + (' {0}' -f ([char]0x2502))) -ForegroundColor DarkCyan
+Write-Host ('  {0}{1}{2}' -f ([char]0x2514), ([string][char]0x2500 * ($w - 2)), ([char]0x2518)) -ForegroundColor DarkCyan
+Write-Host ''
+Write-Host '  Načítám systémové informace...' -ForegroundColor DarkGray
+
+Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
 $scan = Invoke-CoreScan
 Show-WinPulseTriageMenu -scan $scan
