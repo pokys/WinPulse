@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.4-20250405'
+$script:WinPulseVersion = '0.6.5-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1775,7 +1775,7 @@ function Write-WinPulseDashboardLine {
     }
     $vLine = [char]0x2502
 
-    $inner = $BoxWidth - 4
+    $inner = $BoxWidth - 3
     $content = ' [{0}] {1,-10} {2}' -f $badge.Text, $Label, $Value
     if ($content.Length -gt $inner) { $content = $content.Substring(0, $inner) }
     $content = $content.PadRight($inner)
@@ -1801,7 +1801,7 @@ function Show-WinPulseDashboard {
     $vLine = [char]0x2502
 
     # Top header
-    Write-Host ('  {0}{1} WinPulse {2}{3}' -f ([char]0x250C), ([string][char]0x2500 * 2), ([string][char]0x2500 * ($w - 13)), ([char]0x2510)) -ForegroundColor DarkCyan
+    Write-Host ('  {0}{1} WinPulse {2}{3}' -f ([char]0x250C), ([string][char]0x2500 * 2), ([string][char]0x2500 * ($w - 14)), ([char]0x2510)) -ForegroundColor DarkCyan
 
     # System line
     $sysLine = ' {0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime
