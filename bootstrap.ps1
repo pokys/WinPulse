@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.2-20250405'
+$script:WinPulseVersion = '0.6.3-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -4281,55 +4281,24 @@ function Uninstall-WinPulseOffice {
 
     $xml = @"
 <Configuration>
-  <Remove All="TRUE" />
-  <Display Level="Full" AcceptEULA="TRUE" />
-  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+  <Remove All="TRUE"/>
+  <Display Level="None" AcceptEULA="TRUE"/>
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/>
 </Configuration>
 "@
 
     Clear-Host
     Write-WinPulseHeader -title 'Office Uninstall'
-    Write-Host '  This will uninstall Office products managed by Click-to-Run.' -ForegroundColor Yellow
+    Write-Host '  Odstraní všechny produkty Office (Click-to-Run). Tiché odstranění.' -ForegroundColor Yellow
     Write-Host ''
     $confirm = Select-WinPulseMenuItem -Title 'Uninstall Office?' -Items @(
         @{ Label = 'Yes, uninstall'; Key = 'Y'; Hint = 'Removes all Office' },
         @{ Separator = $true },
         @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
     )
-    if ($confirm -ne 'Y') { return
-    }
-
-    Invoke-WinPulseOfficeConfiguration -xmlcontent $xml -description 'Office uninstall'
-}
-
-function Uninstall-WinPulseOfficeAll {
-    [CmdletBinding()]
-    param()
-
-    $xml = @"
-<Configuration>
-  <Remove All="TRUE"/>
-  <Display Level="None" AcceptEULA="TRUE"/>
-  <Property Name="AUTOACTIVATE" Value="0"/>
-  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE"/>
-  <Property Name="SharedComputerLicensing" Value="0"/>
-  <Property Name="PinIconsToTaskbar" Value="FALSE"/>
-</Configuration>
-"@
-
-    Clear-Host
-    Write-WinPulseHeader -title 'Office Uninstall All'
-    Write-Host '  Odstraní VŠECHNY produkty Office (Click-to-Run) bez dialogu.' -ForegroundColor Yellow
-    Write-Host '  Tichá odinstalace — žádné potvrzovací okno Microsoftu.' -ForegroundColor DarkYellow
-    Write-Host ''
-    $confirm = Select-WinPulseMenuItem -Title 'Odinstalovat vše?' -Items @(
-        @{ Label = 'Ano, odinstalovat vše'; Key = 'Y'; Hint = 'Tiché odstranění' },
-        @{ Separator = $true },
-        @{ Label = 'Zrušit'; Key = 'C'; Color = 'DarkGray' }
-    )
     if ($confirm -ne 'Y') { return }
 
-    Invoke-WinPulseOfficeConfiguration -xmlcontent $xml -description 'Office uninstall all (silent)'
+    Invoke-WinPulseOfficeConfiguration -xmlcontent $xml -description 'Office uninstall'
 }
 
 function Repair-WinPulseOffice {
@@ -4369,15 +4338,13 @@ function Show-WinPulseOfficeMenu {
         Clear-Host
         Write-WinPulseHeader -title 'Office'
         $choice = Select-WinPulseMenuItem -Title 'Office' -Items @(
-            @{ Label = 'Install Office';        Key = 'I'; Hint = 'Version/CZ' },
-            @{ Label = 'Uninstall Office';      Key = 'U'; Hint = 'Remove (s dialogem)' },
-            @{ Label = 'Uninstall All (silent)'; Key = 'A'; Hint = 'Tiché odstranění'; Color = 'DarkYellow' },
-            @{ Label = 'Repair Office';         Key = 'R'; Hint = 'Fix install' }
+            @{ Label = 'Install Office';    Key = 'I'; Hint = 'Version/CZ' },
+            @{ Label = 'Uninstall Office';  Key = 'U'; Hint = 'Silent remove' },
+            @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' }
         )
         switch ($choice) {
             'I' { try { Install-WinPulseOffice } catch { Write-Host ("  Office install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
             'U' { try { Uninstall-WinPulseOffice } catch { Write-Host ("  Office uninstall failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
-            'A' { try { Uninstall-WinPulseOfficeAll } catch { Write-Host ("  Office uninstall failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
             'R' { try { Repair-WinPulseOffice } catch { Write-Host ("  Office repair failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
             default { return }
         }
