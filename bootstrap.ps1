@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.7-20250405'
+$script:WinPulseVersion = '0.6.8-20250405'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -3629,7 +3629,7 @@ function Invoke-WinPulseChocoInstallInWindow {
         return
     }
     $idList = ($pkgs.ChocoId) -join ' '
-    $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
 }
 
@@ -3923,7 +3923,7 @@ function Show-WinPulseChocoMenu {
         if ($selected.Count -eq 0) { continue }
 
         $idList = $selected -join ' '
-        $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y; Write-Host ''; Write-Host 'Hotovo. Stiskni Enter pro zavření.' -ForegroundColor Green; Read-Host"
+        $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Hotovo. Stiskni Enter pro zavření.' -ForegroundColor Green; Read-Host"
         Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
         return
     }
