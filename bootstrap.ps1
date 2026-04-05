@@ -3811,6 +3811,16 @@ function Ensure-WinGet {
 function Test-ChocolateyAvailable {
     [CmdletBinding()]
     param()
+    # Check executable directly — Get-Command only sees PATH of current session
+    $chocoBin = Join-Path $env:ProgramData 'chocolatey\bin'
+    $chocoExe = Join-Path $chocoBin 'choco.exe'
+    if (Test-Path -Path $chocoExe) {
+        # Make sure it's in PATH for this session so subsequent choco calls work
+        if ($env:PATH -notmatch [regex]::Escape($chocoBin)) {
+            $env:PATH = $env:PATH + ';' + $chocoBin
+        }
+        return $true
+    }
     return [bool](Get-Command -Name choco -ErrorAction SilentlyContinue)
 }
 
@@ -3827,7 +3837,76 @@ function Ensure-Chocolatey {
     if ($install -ne 'I') { return $false }
     $cmd = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')); Write-Host ''; Write-Host 'Chocolatey installed. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
+    # Refresh PATH in current session after install
     return (Test-ChocolateyAvailable)
+}
+
+function Show-WinPulseChocoMenu {
+    # Chocolatey search → select → install flow
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Chocolatey'
+    if (-not (Ensure-Chocolatey)) {
+        Write-Host '  Chocolatey not available.' -ForegroundColor Red
+        Wait-WinPulseKey
+        return
+    }
+
+    while ($true) {
+        Clear-Host
+        Write-WinPulseHeader -title 'Chocolatey'
+        Write-Host '  Zadej název balíčku (prázdné = zpět):' -ForegroundColor DarkCyan
+        Write-Host -NoNewline '  > '
+        [Console]::CursorVisible = $true
+        $term = (Read-Host).Trim()
+        [Console]::CursorVisible = $false
+        if ($term -eq '') { return }
+
+        Clear-Host
+        Write-WinPulseHeader -title ('Chocolatey — hledám: {0}' -f $term)
+        Write-Host '  Vyhledávám...' -ForegroundColor DarkGray
+
+        $searchOutput = @()
+        try {
+            $searchOutput = @(& choco search $term --limit-output 2>&1 | Where-Object { $_ -match '^\S+\|' })
+        }
+        catch {
+            Write-Host ('  Chyba při vyhledávání: {0}' -f $_.Exception.Message) -ForegroundColor Red
+            Wait-WinPulseKey
+            continue
+        }
+
+        if ($searchOutput.Count -eq 0) {
+            Write-Host '  Žádné výsledky.' -ForegroundColor Yellow
+            Wait-WinPulseKey
+            continue
+        }
+
+        $pkgItems = @(foreach ($line in $searchOutput) {
+            $parts = $line -split '\|'
+            if ($parts.Count -ge 2) {
+                @{ Label = $parts[0]; Key = $parts[0]; Hint = $parts[1] }
+            }
+        } | Where-Object { $_ })
+
+        if ($pkgItems.Count -eq 0) {
+            Write-Host '  Žádné výsledky.' -ForegroundColor Yellow
+            Wait-WinPulseKey
+            continue
+        }
+
+        Clear-Host
+        Write-WinPulseHeader -title ('Chocolatey — výsledky: {0}' -f $term)
+        $selected = @(Select-WinPulseMultiMenuItem -Title ('Výsledky pro: {0}' -f $term) -Items $pkgItems)
+        if ($selected.Count -eq 0) { continue }
+
+        $idList = $selected -join ' '
+        $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y; Write-Host ''; Write-Host 'Hotovo. Stiskni Enter pro zavření.' -ForegroundColor Green; Read-Host"
+        Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
+        return
+    }
 }
 
 function Get-WinPulsePackageCatalog {
@@ -4083,44 +4162,23 @@ function Ensure-WinPulseOfficeSetup {
         New-Item -ItemType Directory -Path $odtDir -Force | Out-Null
     }
 
-    $extractor = Join-Path $script:WinPulsePaths.Bin 'officedeploymenttool.exe'
-    # aka.ms/officedeploymenttool is a permanent FWLink redirect to the latest ODT self-extractor.
-    $downloadUrl = 'https://aka.ms/officedeploymenttool'
+    # officecdn.microsoft.com/pr/wsus/setup.exe is the ODT setup.exe served directly (no redirect).
+    $downloadUrl = 'https://officecdn.microsoft.com/pr/wsus/setup.exe'
+    $dest = Join-Path $odtDir 'setup.exe'
 
     Write-Host '  Downloading Office Deployment Tool...' -ForegroundColor DarkCyan
-    Write-Log -level 'INFO' -message ('Downloading Office Deployment Tool from {0}' -f $downloadUrl)
+    Write-Log -level 'INFO' -message ('Downloading ODT setup.exe from {0}' -f $downloadUrl)
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $extractor -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $dest -UseBasicParsing -ErrorAction Stop
     }
     catch {
         throw ('Failed to download Office Deployment Tool: {0}' -f $_.Exception.Message)
     }
 
-    if (-not (Test-Path -Path $extractor)) {
-        throw 'Office Deployment Tool download did not produce a file.'
-    }
-
-    Write-Host '  Extracting Office Deployment Tool...' -ForegroundColor DarkCyan
-    Write-Log -level 'INFO' -message ('Extracting Office Deployment Tool to {0}' -f $odtDir)
-    $extractArgs = @('/quiet', '/extract:{0}' -f $odtDir)
-    try {
-        $proc = Start-Process -FilePath $extractor -ArgumentList $extractArgs -Wait -PassThru -ErrorAction Stop
-        if ($proc.ExitCode -ne 0) {
-            throw ('Office Deployment Tool self-extractor returned exit code {0}.' -f $proc.ExitCode)
-        }
-    }
-    catch {
-        throw ('Failed to extract Office Deployment Tool: {0}' -f $_.Exception.Message)
-    }
-    finally {
-        if (Test-Path -Path $extractor) {
-            Remove-Item -Path $extractor -Force -ErrorAction SilentlyContinue
-        }
-    }
-
     $setupPath = Get-WinPulseOfficeSetupPath
     if (-not $setupPath) {
-        throw ('Office Deployment Tool setup.exe not found after extraction to {0}.' -f $odtDir)
+        throw ('Office Deployment Tool setup.exe not found after download to {0}.' -f $odtDir)
     }
 
     return $setupPath
@@ -5415,6 +5473,7 @@ function Show-WinPulseInstallMenu {
         Clear-Host
         $choice = Select-WinPulseMenuItem -Title 'Install / Apps' -Items @(
             @{ Label = 'Ninite catalog';          Key = 'N'; Hint = 'Direct download' },
+            @{ Label = 'Chocolatey catalog';      Key = 'H'; Hint = 'Search & install' },
             @{ Label = 'Preview Basic IT Set';    Key = 'P'; Hint = 'Show list' },
             @{ Label = 'Install Basic IT Set';    Key = 'B'; Hint = 'Auto-install' },
             @{ Label = 'Custom install';          Key = 'C'; Hint = 'Multi-select' },
@@ -5429,6 +5488,7 @@ function Show-WinPulseInstallMenu {
         if (-not $choice) { return }
         switch ($choice) {
             'N' { Show-WinPulseNiniteMenu }
+            'H' { Show-WinPulseChocoMenu }
             'P' {
                 if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
                 $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet })
