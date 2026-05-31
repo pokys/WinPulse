@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('MigrationPreflight', 'W11Readiness', 'ExportBundle')]
+    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'W11Readiness', 'ExportBundle')]
     [string]$Mode = 'MigrationPreflight',
 
     [string]$BootstrapPath = $null

@@ -68,6 +68,12 @@ PowerShell-first.
 - `Set-StrictMode -Version Latest` is enabled.
 - Use bracket notation for hashtable and ordered dictionary access, for example
   `$item['Key']`.
+- Under StrictMode, indexing an empty array throws (`@(...)[0]` on a filter that
+  matched nothing is an IndexOutOfRange). Use `... | Select-Object -First 1`,
+  which yields `$null` instead, for "first match or none" lookups.
+- Under StrictMode in PS 5.1, `@()`-wrapping or outputting a
+  `Generic.List[object]` throws "argument types do not match". Return
+  `$list.ToArray()` instead of `@($list)`.
 - Use approved PowerShell verbs where practical.
 - Prefix new helper functions with `WinPulse` where it fits existing style.
 - Prefer clear PowerShell 5.1-compatible code over clever syntax.
@@ -86,26 +92,173 @@ PowerShell-first.
 
 ## Migration Work
 
-Current implemented milestone: Migration Preflight Foundation.
+### Status Checklist (keep this current)
 
-Migration preflight is read-only. It should inspect and report without copying
-data or exporting secrets.
+This is the single source of truth for migration progress. Update it whenever a
+piece moves between states.
 
-Future migration backup/restore work should use explicit selection, dry-run
-planning, clear manifests, and safe defaults. Private keys and credential-like
-data must not be exported by default.
+Done (implemented and statically/functionally tested, NOT yet merged):
 
-Suggested next milestone: Migration Backup Skeleton.
+- [x] Migration Preflight (`-Mode MigrationPreflight`) - read-only reporting.
+- [x] Migration Backup (`-Mode MigrationBackup`) - user/folder selection,
+      dry-run plan, robocopy copy, `manifest.json`, YES confirmation.
+- [x] Migration Restore (`-Mode MigrationRestore`) - manifest read, restore
+      plan, overwrite flagging, profile-safe copy.
+- [x] Backup/Restore verification (file count + byte comparison, exclusion
+      aware), written to manifests and shown on screen.
+- [x] Safety: certificates included in backup; SSH/PuTTY keys + hives excluded.
+- [x] Safety: restore protects known folders (skips desktop.ini/thumbs.db,
+      re-asserts directory attributes after robocopy).
+- [x] Menu wiring (main + triage), mode dispatch, elevation, ValidateSets,
+      smoke-test ValidateSet.
+- [x] Per-run human summary report (HTML + text) written beside each backup and
+      restore JSON manifest, matching the preflight report styling.
 
-Scope:
+Half done / needs follow-up:
 
-- user selection
-- folder selection
-- dry-run copy plan
-- robocopy wrapper
-- `manifest.json`
-- no credentials/password export
-- no private key export by default
+- [ ] Real Windows runtime test of backup AND restore from an elevated window.
+      Only static + isolated-function tests have been run so far. The full
+      interactive flow (menus, robocopy execute, verification) has NOT been
+      exercised end to end on a live profile. THIS IS THE MAIN OPEN ITEM.
+- [ ] Smoke-test wrapper accepts `MigrationBackup`/`MigrationRestore` modes but
+      cannot drive them (they are interactive). No automated coverage for them.
+- [ ] Version string still `0.7.0-20260531`. Decide on a bump before merge to
+      main (CDN cache on the `irm | iex` path).
+- [ ] Work is uncommitted on branch `dev/migration-preflight-foundation`.
+
+To do (next milestone: Backup/Restore Reporting And Selection):
+
+- [x] Per-run human summary report (HTML/text) beside the JSON manifests,
+      reusing the preflight HTML/text export style.
+- [x] Selectable per-folder restore instead of whole-manifest restore
+      (`Select-WinPulseRestoreItems`; single-folder backups skip the menu).
+- [x] Opt-in toggles to widen scope into excluded categories, with explicit
+      warnings (`Select-WinPulseBackupScopeOptIns`: private keys + AppData,
+      off by default, recorded in the manifest as `OptInCategories`).
+- [x] Optional hash sampling on top of count/byte verification (opt-in prompt
+      after confirming an execute; SHA256 of a random sample, default 25 files).
+
+Backlog (not scheduled):
+
+- [ ] Incremental backup (opt-in `/MIR` for the backup destination only, never
+      for restore - `/MIR` purges and would cause data loss in a live profile).
+- [ ] Restore remapping to a different target user name (cross-account moves).
+- [ ] Selective AppData (per-application data); currently excluded by design.
+- [ ] Remote backup/restore over an SMB admin share (`\\HOST\C$`). Candidate
+      feature, decision pending. See "Candidate feature: Remote over SMB (C$)".
+
+Implemented milestones:
+
+- Migration Preflight Foundation (`-Mode MigrationPreflight`). Read-only. It
+  inspects and reports without copying data or exporting secrets.
+- Migration Backup Skeleton (`-Mode MigrationBackup`). Explicit user and folder
+  selection, dry-run copy plan, `robocopy` wrapper, and a `manifest.json`. It
+  stays read-only until the technician confirms the copy. Private keys and
+  credential-like files are excluded by default.
+- Migration Restore Skeleton (`-Mode MigrationRestore`). Reads a backup
+  `manifest.json`, maps users/folders to restore targets, builds a dry-run
+  restore plan, and copies files back with the shared `robocopy` wrapper. It
+  flags existing targets before overwrite and stays read-only until confirmed.
+- Backup/Restore Verification. After an executed copy, each folder is verified
+  by comparing the expected source set (exclusions applied) against the
+  destination file and byte counts. Per-item Verified/Mismatch status and a
+  run-level mismatch count are written to the manifests and shown on screen.
+  Optional SHA256 hash sampling (opt-in) adds a stronger per-file check.
+- Backup/Restore Reporting And Selection. Per-run HTML + text summary reports
+  beside each manifest; selectable per-folder restore; opt-in scope toggles for
+  excluded categories (private keys, AppData); optional hash sampling.
+
+Backup/restore implementation notes:
+
+- Entry points: `Invoke-WinPulseMigrationBackup`, `Invoke-WinPulseMigrationRestore`.
+- Backup helpers: `Get-WinPulseBackupFolderCatalog`, `Get-WinPulseBackupExclusions`,
+  `Select-WinPulseBackupUsers`, `Select-WinPulseBackupFolders`,
+  `New-WinPulseBackupPlan`, `Invoke-WinPulseRobocopy`.
+- Restore helpers: `Read-WinPulseBackupManifest`, `Get-WinPulseAvailableBackups`,
+  `Get-WinPulseRestoreExclusions`, `New-WinPulseRestorePlan` (reuses
+  `Invoke-WinPulseRobocopy`).
+- Verification helpers: `Get-WinPulseFilteredFiles` (shared filtered file set),
+  `Measure-WinPulseFolderFiltered` (counts files/bytes honoring /XF and /XD
+  style exclusions) and `Get-WinPulseCopyVerification` (source-vs-destination
+  comparison plus optional `-hashSampleSize` SHA256 sampling). Verification runs
+  only on executed copies.
+- Selection helpers: `Select-WinPulseBackupScopeOptIns` (backup opt-in scope),
+  `Select-WinPulseRestoreItems` and `New-WinPulseRestorePlanObject` (per-folder
+  restore filtering with recomputed totals).
+- Report helpers: `ConvertTo-WinPulseCopyReportRows`,
+  `Export-WinPulseMigrationCopyReportText`, `Export-WinPulseMigrationCopyReportHtml`.
+  One shared pair renders both backup and restore manifests (it branches on
+  `Tool.Mode`), so keep the two manifest shapes report-compatible.
+- Output lives under `C:\ProgramData\WinPulse\backups`.
+- Default backup folder set is the known doc folders only; AppData is excluded.
+- Certificate files (.pfx/.p12/.pem/.cer/.crt) are intentionally included in
+  backups so technicians can migrate them. Only standalone SSH/PuTTY private
+  keys (`*.ppk`, `id_rsa` family, `.ssh`, `.gnupg`) and registry hives are
+  excluded. This is a deliberate project decision; keep it unless asked.
+- Restore must not break the profile: it never copies `desktop.ini` or
+  `thumbs.db` and never copies directory attributes onto targets, so the
+  system/read-only markers on Desktop/Documents/Pictures known folders survive.
+  `Invoke-WinPulseRobocopy -copyDirMetadata:$false` controls the directory part.
+- Restore rebuilds source paths under the selected backup root, so a moved
+  backup folder still resolves; the default restore root is `C:\Users`.
+- `robocopy` is called with the call operator so paths with spaces are quoted
+  correctly. Exit codes 0-7 are treated as success.
+
+Future migration work must keep the same safety stance: explicit selection,
+dry-run planning, clear manifests, and safe defaults. Private keys and
+credential-like data must not be exported by default.
+
+Suggested next milestone: Backup/Restore Polish And Coverage. Scope ideas:
+
+- restore remapping to a different target user name (cross-account moves)
+- an "open report / open folder" convenience action after a run completes
+- non-interactive backup/restore parameters so the smoke-test harness can drive
+  them (currently both modes are fully interactive and have no automated cover)
+- resume/skip-existing option for very large backups (robocopy `/XO` style),
+  kept opt-in and clearly separate from restore (never purge)
+
+### Candidate feature: Remote over SMB (C$)
+
+Status: proposed, not yet decided. Implement or drop in the future.
+
+Goal: let a technician pull a user's data straight from the original PC over its
+SMB admin share (`\\HOST\C$\Users\...`) into a backup on the local workstation
+(and, symmetrically, push a restore back). This enables an online migration
+without first logging into the old machine to run WinPulse there.
+
+Why it is not a big rewrite: the copy engine is already UNC-capable.
+`Invoke-WinPulseRobocopy` shells out to `robocopy`, which accepts `\\HOST\C$\...`
+sources today, and both the backup destination and the restore root are already
+free-form paths. The only hard coupling is profile discovery:
+`Get-WinPulseMigrationProfiles` hardcodes `$usersRoot = 'C:\Users'`.
+
+Scope (suggested phasing):
+
+- Phase 1 (MVP): parameterize the users root so it can be `\\HOST\C$\Users`; add
+  a source picker at the start of backup ("This PC" vs "Remote PC (C$)"); ask for
+  the hostname; reachability check (`Test-Path \\HOST\C$`); rely on the
+  technician's current admin token (transparent auth, no credential prompt);
+  record `SourceHost` in the manifest.
+- Phase 2: explicit credentials via `Get-Credential` + `New-SmbMapping`, with the
+  mapping torn down afterwards; remote restore (push to `\\HOST\C$`); lighter or
+  optional dry-run sizing to avoid slow recursive enumeration over the wire.
+
+Constraints and gotchas:
+
+- C$ requires local-admin rights on the remote host, admin shares enabled, and
+  File and Printer Sharing reachable through the firewall.
+- Live-PC locked files (NTUSER.DAT, browser DBs, OST, open documents) will not
+  copy. The real fix is remote VSS shadow copies, which is a large separate
+  effort and explicitly out of MVP scope.
+- Over-the-wire recursive sizing and hashing are slow; keep them bounded/optional
+  for remote sources.
+- Using credentials to authenticate to a share is not credential export and does
+  not breach the safety boundaries; never persist the credentials.
+- SMB file copy runs no code on the remote host, so it stays within the
+  "no automatic remote execution" non-goal. Do not add PSRemoting/WMI execution
+  to make this work.
+
+Complexity estimate: medium. Phase 1 alone is on the smaller side.
 
 ## Git Discipline
 

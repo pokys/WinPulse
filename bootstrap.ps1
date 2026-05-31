@@ -1,11 +1,11 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')]
+    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
     [string]$Mode = 'Triage'
 )
 
-$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')
+$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')
 $modeOverride = $null
 $globalMode = Get-Variable -Name WinPulseMode -Scope Global -ErrorAction SilentlyContinue
 if ($globalMode -and -not [string]::IsNullOrWhiteSpace([string]$globalMode.Value)) {
@@ -77,7 +77,7 @@ function Start-WinPulseElevation {
         $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $tempScript))
     }
 
-    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'ExportBundle')) {
+    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')) {
         $args = @('-NoExit') + $args
     }
 
@@ -3852,6 +3852,1264 @@ function Invoke-WinPulseMigrationPreflight {
     }
 }
 
+# ===========================================================================
+# Migration Backup Skeleton
+#
+# Explicit selection, dry-run planning, robocopy wrapper, and a manifest.
+# Safe defaults: private keys and credential-like files are excluded, and the
+# copy step requires explicit confirmation. Browser secrets, passwords, and
+# DPAPI material are never exported.
+# ===========================================================================
+
+function Get-WinPulseBackupFolderCatalog {
+    # Known per-user folders that are safe migration targets by default.
+    # AppData is intentionally excluded because it is large, noisy, and can
+    # hold credential-like data.
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [ordered]@{ Key = 'Desktop';   Label = 'Desktop';   Relative = 'Desktop' },
+        [ordered]@{ Key = 'Documents'; Label = 'Documents'; Relative = 'Documents' },
+        [ordered]@{ Key = 'Downloads'; Label = 'Downloads'; Relative = 'Downloads' },
+        [ordered]@{ Key = 'Pictures';  Label = 'Pictures';  Relative = 'Pictures' },
+        [ordered]@{ Key = 'Videos';    Label = 'Videos';    Relative = 'Videos' },
+        [ordered]@{ Key = 'Music';     Label = 'Music';     Relative = 'Music' },
+        [ordered]@{ Key = 'Favorites'; Label = 'Favorites'; Relative = 'Favorites' }
+    )
+}
+
+function Get-WinPulseBackupExclusions {
+    # Default safe exclusions. Standalone private keys (SSH/PuTTY) and the
+    # registry hive files are not backed up by default. Certificate files
+    # (.pfx/.p12/.pem/.cer/.crt) are intentionally INCLUDED because technicians
+    # need them to migrate signing/VPN/email certificates. This list is
+    # reported in the manifest so the scope is explicit and auditable.
+    #
+    # -includePrivateKeys is an explicit technician opt-in that widens scope to
+    # back up SSH/PuTTY private keys and the .ssh/.gnupg folders. Registry hives
+    # stay excluded regardless because they are locked and not doc-folder data.
+    [CmdletBinding()]
+    param(
+        [switch]$includePrivateKeys
+    )
+
+    $keyFiles = @('*.ppk', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519')
+    $hiveFiles = @('NTUSER.DAT', 'NTUSER.DAT.*', 'UsrClass.dat', 'UsrClass.dat.*')
+    $keyDirs = @('.ssh', '.gnupg')
+
+    if ($includePrivateKeys) {
+        return [pscustomobject][ordered]@{
+            Files = @($hiveFiles)
+            Dirs  = @()
+            Note  = 'Private keys INCLUDED by explicit technician opt-in. Registry hives are still excluded.'
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        Files = @($keyFiles + $hiveFiles)
+        Dirs  = @($keyDirs)
+        Note  = 'Standalone SSH/PuTTY private keys and registry hives are excluded. Certificate files are included so they can be migrated.'
+    }
+}
+
+function Select-WinPulseBackupScopeOptIns {
+    # Opt-in toggles for categories that are excluded by default. Everything
+    # here is off unless the technician deliberately enables it. Returns an
+    # array of selected category keys ('privatekeys', 'appdata').
+    [CmdletBinding()]
+    param()
+
+    $items = @(
+        @{ Label = 'Include private keys (.ssh, .gnupg, id_rsa, *.ppk)'; Key = 'privatekeys'; Hint = 'Sensitive' },
+        @{ Label = 'Include AppData folder';                            Key = 'appdata';     Hint = 'Large/noisy' }
+    )
+
+    return @(Select-WinPulseMultiMenuItem -Title 'Include extras?  (optional, off by default)' -Items $items)
+}
+
+function Select-WinPulseBackupUsers {
+    # Returns array of selected user names (profile folder names).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$profiles
+    )
+
+    if (@($profiles).Count -eq 0) {
+        Write-Host '  No user profiles found to back up.' -ForegroundColor Yellow
+        return @()
+    }
+
+    $items = @()
+    foreach ($profile in @($profiles)) {
+        $items += @{
+            Label = ('{0}  ({1})' -f $profile.UserName, $profile.EstimatedTotalSize)
+            Key   = $profile.UserName
+            Hint  = $profile.ProfilePath
+        }
+    }
+
+    return @(Select-WinPulseMultiMenuItem -Title 'Which users to back up?  (Space to tick, Enter to confirm)' -Items $items)
+}
+
+function Select-WinPulseBackupFolders {
+    # Returns array of selected folder keys from the catalog.
+    [CmdletBinding()]
+    param()
+
+    $items = @()
+    foreach ($entry in (Get-WinPulseBackupFolderCatalog)) {
+        $items += @{ Label = $entry['Label']; Key = $entry['Key']; Hint = $entry['Relative'] }
+    }
+
+    return @(Select-WinPulseMultiMenuItem -Title 'Which folders?  (AppData is excluded unless you opt in next)' -Items $items)
+}
+
+function New-WinPulseBackupPlan {
+    # Builds a dry-run copy plan. Read-only: it only measures source folders
+    # and computes destination paths. No files are copied here.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$profiles,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$userKeys,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$folderKeys,
+
+        [Parameter(Mandatory = $true)]
+        [string]$destinationRoot
+    )
+
+    $catalog = Get-WinPulseBackupFolderCatalog
+    $items = @()
+    $totalBytes = [double]0
+
+    foreach ($userKey in @($userKeys)) {
+        $profile = $profiles | Where-Object { $_.UserName -eq $userKey } | Select-Object -First 1
+        if (-not $profile) { continue }
+
+        foreach ($folderKey in @($folderKeys)) {
+            $entry = $catalog | Where-Object { $_['Key'] -eq $folderKey } | Select-Object -First 1
+            $relative = if ($entry) { $entry['Relative'] } else { $folderKey }
+
+            $source = Join-Path -Path $profile.ProfilePath -ChildPath $relative
+            $dest = Join-WinPulsePath -path $destinationRoot -childpath @($userKey, $relative)
+            $size = Get-WinPulsePathSize -path $source
+
+            $items += [pscustomobject][ordered]@{
+                UserName    = $userKey
+                Folder      = $folderKey
+                Source      = $source
+                Destination = $dest
+                Exists      = [bool]$size.Exists
+                Bytes       = [double]$size.Bytes
+                Size        = $size.Size
+            }
+            if ($size.Exists) { $totalBytes += [double]$size.Bytes }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        DestinationRoot = $destinationRoot
+        Items           = @($items)
+        ItemCount       = @($items).Count
+        ExistingCount   = @($items | Where-Object { $_.Exists }).Count
+        TotalBytes      = $totalBytes
+        TotalSize       = ConvertTo-ReadableSize -bytes $totalBytes
+    }
+}
+
+function Invoke-WinPulseRobocopy {
+    # Thin robocopy wrapper. -DryRun adds /L so nothing is copied. The call
+    # operator is used so source/destination paths with spaces are quoted
+    # correctly. Robocopy writes its own per-item log via /LOG+.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$destination,
+
+        [Parameter(Mandatory = $true)]
+        [string]$logPath,
+
+        [string[]]$excludeFiles = @(),
+
+        [string[]]$excludeDirs = @(),
+
+        [bool]$copyDirMetadata = $true,
+
+        [switch]$DryRun
+    )
+
+    $robocopy = Get-Command -Name robocopy.exe -ErrorAction SilentlyContinue
+    if (-not $robocopy) {
+        return [pscustomobject][ordered]@{ ExitCode = -1; Success = $false; DryRun = [bool]$DryRun; LogPath = $logPath; Note = 'robocopy.exe not found.' }
+    }
+
+    # File data/attributes/timestamps are always copied. Directory metadata is
+    # optional and requested via /DCOPY. Note: robocopy strips the destination
+    # directory's existing attributes regardless of the /DCOPY flag, so when
+    # copyDirMetadata is off (restore) we snapshot the target's attributes and
+    # re-assert them after the copy. This protects the system/read-only markers
+    # that make Desktop/Documents/Pictures known folders.
+    $savedAttributes = $null
+    if (-not $copyDirMetadata -and -not $DryRun -and (Test-Path -LiteralPath $destination)) {
+        try { $savedAttributes = (Get-Item -LiteralPath $destination -Force).Attributes } catch { $savedAttributes = $null }
+    }
+
+    $arguments = @($source, $destination, '/E', '/COPY:DAT', '/R:1', '/W:1', '/XJ', '/NP', '/BYTES', '/NFL', '/NDL')
+    if ($copyDirMetadata) { $arguments += '/DCOPY:DAT' } else { $arguments += '/DCOPY:T' }
+    if ($DryRun) { $arguments += '/L' }
+    foreach ($f in @($excludeFiles)) { $arguments += '/XF'; $arguments += $f }
+    foreach ($d in @($excludeDirs)) { $arguments += '/XD'; $arguments += $d }
+    $arguments += ('/LOG+:{0}' -f $logPath)
+
+    $note = ''
+    try {
+        & $robocopy.Source @arguments | Out-Null
+        $code = $LASTEXITCODE
+    }
+    catch {
+        $code = -2
+        $note = $_.Exception.Message
+    }
+
+    if ($null -ne $savedAttributes -and (Test-Path -LiteralPath $destination)) {
+        try { (Get-Item -LiteralPath $destination -Force).Attributes = $savedAttributes } catch { }
+    }
+
+    # Robocopy exit codes 0-7 indicate success (copied / nothing to do / extra).
+    # 8 and above indicate at least one failure.
+    $success = ($code -ge 0 -and $code -lt 8)
+
+    return [pscustomobject][ordered]@{
+        ExitCode = $code
+        Success  = $success
+        DryRun   = [bool]$DryRun
+        LogPath  = $logPath
+        Note     = $note
+    }
+}
+
+function Get-WinPulseFilteredFiles {
+    # Returns the files under a folder, skipping anything that matches the given
+    # file name patterns or that lives under one of the excluded folder names.
+    # Mirrors robocopy /XF and /XD semantics. Shared by the count and the
+    # hash-sample verification so both see the same file set.
+    [CmdletBinding()]
+    param(
+        [string]$path,
+        [string[]]$excludeFiles = @(),
+        [string[]]$excludeDirs = @()
+    )
+
+    $out = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return $out.ToArray()
+    }
+
+    $exDirs = @(@($excludeDirs) | ForEach-Object { $_.ToLowerInvariant() })
+    $rootLen = $path.TrimEnd('\').Length
+
+    foreach ($file in (Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+        $skip = $false
+        foreach ($pat in @($excludeFiles)) {
+            if ($file.Name -like $pat) { $skip = $true; break }
+        }
+        if (-not $skip -and $exDirs.Count -gt 0) {
+            $dir = $file.DirectoryName
+            $relDir = if ($dir.Length -gt $rootLen) { $dir.Substring($rootLen) } else { '' }
+            foreach ($seg in ($relDir -split '[\\/]' | Where-Object { $_ })) {
+                if ($exDirs -contains $seg.ToLowerInvariant()) { $skip = $true; break }
+            }
+        }
+        if ($skip) { continue }
+        [void]$out.Add($file)
+    }
+
+    # .ToArray() instead of @($out): under StrictMode, @()-wrapping or piping a
+    # Generic.List[object] throws "argument types do not match" in PS 5.1.
+    return $out.ToArray()
+}
+
+function Measure-WinPulseFolderFiltered {
+    # Counts files and bytes under a folder using the shared filtered file set.
+    [CmdletBinding()]
+    param(
+        [string]$path,
+        [string[]]$excludeFiles = @(),
+        [string[]]$excludeDirs = @()
+    )
+
+    $files = Get-WinPulseFilteredFiles -path $path -excludeFiles $excludeFiles -excludeDirs $excludeDirs
+    $bytes = [double]0
+    foreach ($file in @($files)) {
+        $bytes += [double]$file.Length
+    }
+
+    return [pscustomobject][ordered]@{ Files = @($files).Count; Bytes = $bytes }
+}
+
+function Get-WinPulseCopyVerification {
+    # Compares an expected source set (with the copy's exclusions applied)
+    # against what landed at the destination. The destination may legitimately
+    # hold extra pre-existing files, so verification only fails when the
+    # destination is missing files or bytes the copy should have produced.
+    #
+    # -hashSampleSize > 0 adds an optional, stronger check: a random sample of
+    # source files is SHA256-hashed and compared against the matching
+    # destination file. Any mismatch or missing destination file fails it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$destination,
+
+        [string[]]$excludeFiles = @(),
+
+        [string[]]$excludeDirs = @(),
+
+        [int]$hashSampleSize = 0
+    )
+
+    $src = Measure-WinPulseFolderFiltered -path $source -excludeFiles $excludeFiles -excludeDirs $excludeDirs
+    $dst = Measure-WinPulseFolderFiltered -path $destination
+
+    $status = 'Verified'
+    $note = ''
+    if ($dst.Files -lt $src.Files -or $dst.Bytes -lt $src.Bytes) {
+        $status = 'Mismatch'
+        $note = ('Expected at least {0} files / {1} bytes, found {2} files / {3} bytes.' -f $src.Files, $src.Bytes, $dst.Files, $dst.Bytes)
+    }
+
+    $hashSampled = 0
+    $hashMatched = 0
+    $hashMismatched = 0
+    if ($hashSampleSize -gt 0 -and $src.Files -gt 0) {
+        $files = Get-WinPulseFilteredFiles -path $source -excludeFiles $excludeFiles -excludeDirs $excludeDirs
+        $srcRoot = $source.TrimEnd('\')
+        $sample = if (@($files).Count -le $hashSampleSize) { @($files) } else { @($files | Get-Random -Count $hashSampleSize) }
+        foreach ($file in $sample) {
+            $hashSampled++
+            $relative = $file.FullName.Substring($srcRoot.Length).TrimStart('\')
+            $destFile = Join-Path -Path $destination -ChildPath $relative
+            if (-not (Test-Path -LiteralPath $destFile)) { $hashMismatched++; continue }
+            try {
+                $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                $destHash = (Get-FileHash -LiteralPath $destFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                if ($sourceHash -eq $destHash) { $hashMatched++ } else { $hashMismatched++ }
+            }
+            catch {
+                $hashMismatched++
+            }
+        }
+        if ($hashMismatched -gt 0) {
+            $status = 'Mismatch'
+            $hashNote = ('{0} of {1} sampled file hashes did not match.' -f $hashMismatched, $hashSampled)
+            $note = if ($note) { '{0} {1}' -f $note, $hashNote } else { $hashNote }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        SourceFiles    = $src.Files
+        SourceBytes    = $src.Bytes
+        DestFiles      = $dst.Files
+        DestBytes      = $dst.Bytes
+        HashSampled    = $hashSampled
+        HashMatched    = $hashMatched
+        HashMismatched = $hashMismatched
+        Status         = $status
+        Note           = $note
+    }
+}
+
+function ConvertTo-WinPulseCopyReportRows {
+    # Flattens a backup or restore manifest's Items (plus their verification)
+    # into a uniform set of rows for the text and HTML reports.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$manifest
+    )
+
+    $isDryRun = ($manifest.Tool.Action -eq 'DryRun')
+    $rows = @()
+    foreach ($item in @($manifest.Items)) {
+        $dest = ''
+        if ($item.PSObject.Properties['Destination']) { $dest = [string]$item.Destination }
+        elseif ($item.PSObject.Properties['Target']) { $dest = [string]$item.Target }
+
+        $result = if ($item.Skipped) { 'Skipped' } elseif ($isDryRun) { 'Planned' } elseif ($item.Success) { 'OK' } else { 'FAILED' }
+
+        $verify = '-'
+        $srcFiles = ''
+        $destFiles = ''
+        $hash = '-'
+        if ($item.PSObject.Properties['Verification'] -and $item.Verification) {
+            $verify = [string]$item.Verification.Status
+            $srcFiles = $item.Verification.SourceFiles
+            $destFiles = $item.Verification.DestFiles
+            if ($item.Verification.PSObject.Properties['HashSampled'] -and [int]$item.Verification.HashSampled -gt 0) {
+                $hash = ('{0}/{1}' -f $item.Verification.HashMatched, $item.Verification.HashSampled)
+            }
+        }
+
+        $rows += [pscustomobject][ordered]@{
+            User        = [string]$item.UserName
+            Folder      = [string]$item.Folder
+            Result      = $result
+            Verify      = $verify
+            SrcFiles    = $srcFiles
+            DestFiles   = $destFiles
+            Hash        = $hash
+            Exit        = $item.ExitCode
+            Destination = $dest
+            Note        = [string]$item.Note
+        }
+    }
+
+    return @($rows)
+}
+
+function Export-WinPulseMigrationCopyReportText {
+    # Human-readable text summary for a backup or restore run.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$manifest,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $isBackup = ($manifest.Tool.Mode -eq 'MigrationBackup')
+    $title = if ($isBackup) { 'WinPulse Migration Backup Report' } else { 'WinPulse Migration Restore Report' }
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    $lines.Add($title)
+    $lines.Add(('Generated: {0}' -f $manifest.Tool.GeneratedAt))
+    $lines.Add(('Action: {0} | WinPulse {1}' -f $manifest.Tool.Action, $manifest.Tool.Version))
+    $lines.Add(('Machine: {0}' -f $manifest.Computer))
+    $lines.Add('')
+    if ($isBackup) {
+        $lines.Add(('Destination: {0}' -f $manifest.DestinationRoot))
+        $lines.Add(('Users: {0}' -f (@($manifest.Users) -join ', ')))
+        $lines.Add(('Folders: {0}' -f (@($manifest.Folders) -join ', ')))
+    }
+    else {
+        $lines.Add(('Backup source: {0}' -f $manifest.BackupRoot))
+        $lines.Add(('Restore root: {0}' -f $manifest.RestoreRoot))
+    }
+    $lines.Add('')
+    $lines.Add(('Plan: {0} items, {1} with data, total {2}' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount, $manifest.Plan.TotalSize))
+    $lines.Add(('Failed: {0} | Verification mismatches: {1}' -f $manifest.FailedCount, $manifest.MismatchCount))
+    $lines.Add('')
+    $lines.Add('Items:')
+    foreach ($row in (ConvertTo-WinPulseCopyReportRows -manifest $manifest)) {
+        $verifyText = if ($row.Verify -eq '-') { '' } else { (' | verify={0} ({1}->{2} files)' -f $row.Verify, $row.SrcFiles, $row.DestFiles) }
+        $hashText = if ($row.Hash -eq '-') { '' } else { (' | hash {0} matched' -f $row.Hash) }
+        $lines.Add(('- {0}\{1}: {2} (exit {3}){4}{5}' -f $row.User, $row.Folder, $row.Result, $row.Exit, $verifyText, $hashText))
+    }
+    if (@($manifest.Items).Count -eq 0) {
+        $lines.Add('- No items.')
+    }
+    $lines.Add('')
+    if ($manifest.PSObject.Properties['Exclusions'] -and $manifest.Exclusions) {
+        $lines.Add(('Excluded files: {0}' -f (@($manifest.Exclusions.Files) -join ', ')))
+        if (@($manifest.Exclusions.Dirs).Count -gt 0) {
+            $lines.Add(('Excluded dirs: {0}' -f (@($manifest.Exclusions.Dirs) -join ', ')))
+        }
+        $lines.Add('')
+    }
+    $lines.Add('Notes:')
+    foreach ($note in @($manifest.SafetyNotes)) {
+        $lines.Add(('- {0}' -f $note))
+    }
+    $jsonName = if ($isBackup) { 'manifest.json' } else { 'migration-restore.json' }
+    $lines.Add(('- See {0} for full machine-readable details.' -f $jsonName))
+
+    $lines | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationCopyReportHtml {
+    # Printable HTML summary for a backup or restore run, matching the preflight
+    # report styling.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$manifest,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $isBackup = ($manifest.Tool.Mode -eq 'MigrationBackup')
+    $title = if ($isBackup) { 'WinPulse Migration Backup' } else { 'WinPulse Migration Restore' }
+    $rows = ConvertTo-WinPulseCopyReportRows -manifest $manifest
+
+    $statusClass = if ([int]$manifest.FailedCount -gt 0) { 'notready' }
+        elseif ([int]$manifest.MismatchCount -gt 0) { 'attention' }
+        elseif ($manifest.Tool.Action -eq 'DryRun') { 'unknown' }
+        else { 'ready' }
+    $statusText = if ([int]$manifest.FailedCount -gt 0) { ('{0} failed' -f $manifest.FailedCount) }
+        elseif ([int]$manifest.MismatchCount -gt 0) { ('{0} mismatch' -f $manifest.MismatchCount) }
+        elseif ($manifest.Tool.Action -eq 'DryRun') { 'Dry run' }
+        else { 'All verified' }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append(@'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WinPulse Migration Report</title>
+<style>
+:root{--bg:#111827;--panel:#182233;--panel2:#101826;--border:#334155;--text:#e5e7eb;--muted:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--info:#38bdf8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Tahoma,sans-serif;line-height:1.45}
+.container{max-width:1180px;margin:0 auto;padding:24px}
+header{border-bottom:2px solid var(--border);padding-bottom:18px;margin-bottom:18px}
+h1{font-size:1.8rem;margin:0 0 6px;color:var(--info)}
+h2{font-size:1.05rem;margin:0 0 10px;color:var(--info)}
+section{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:16px;margin:0 0 14px}
+.subtitle,.empty,footer{color:var(--muted)}
+.badge{display:inline-block;border:1px solid var(--border);border-radius:4px;padding:4px 9px;margin:4px 8px 4px 0;font-weight:600}
+.ready{color:var(--ok);border-color:var(--ok)}.attention{color:var(--warn);border-color:var(--warn)}.notready{color:var(--crit);border-color:var(--crit)}.unknown{color:var(--muted)}
+.kv{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:5px 18px}
+.k{color:var(--muted);font-weight:600}.v{color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}
+th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px;border-bottom:1px solid var(--border)}
+td{padding:7px;border-bottom:1px solid rgba(148,163,184,.16);vertical-align:top}
+tr:hover td{background:rgba(255,255,255,.025)}
+ul{margin:0;padding-left:20px}
+code{color:var(--info)}
+footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margin-top:18px}
+@media print{body{background:#fff;color:#111}.container{max-width:none;padding:10px}section{background:#fff;border-color:#ccc;break-inside:avoid}.subtitle,.empty,footer,.k,th{color:#555}th{background:#eee}.v,td{color:#111}}
+</style>
+</head>
+<body>
+<div class="container">
+'@)
+
+    [void]$sb.Append(('<header><h1>{0}</h1><div class="subtitle">{1} | {2} | WinPulse {3}</div>' -f
+            (ConvertTo-WinPulseHtmlText -value $title),
+            (ConvertTo-WinPulseHtmlText -value $manifest.Computer),
+            (ConvertTo-WinPulseHtmlText -value $manifest.Tool.GeneratedAt),
+            (ConvertTo-WinPulseHtmlText -value $manifest.Tool.Version)))
+    [void]$sb.Append(('<div class="badge">Action: {0}</div>' -f (ConvertTo-WinPulseHtmlText -value $manifest.Tool.Action)))
+    [void]$sb.Append(('<div class="badge {0}">{1}</div></header>' -f $statusClass, (ConvertTo-WinPulseHtmlText -value $statusText)))
+
+    [void]$sb.Append('<section><h2>Summary</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Machine' -value $manifest.Computer
+    if ($isBackup) {
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Destination' -value $manifest.DestinationRoot
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Users' -value (@($manifest.Users) -join ', ')
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Folders' -value (@($manifest.Folders) -join ', ')
+    }
+    else {
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Backup source' -value $manifest.BackupRoot
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Restore root' -value $manifest.RestoreRoot
+    }
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Items (with data)' -value ('{0} ({1})' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount)
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Total size' -value $manifest.Plan.TotalSize
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Failed' -value $manifest.FailedCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Verification mismatches' -value $manifest.MismatchCount
+    [void]$sb.Append('</div></section>')
+
+    [void]$sb.Append('<section><h2>Items</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $rows -columns @('User', 'Folder', 'Result', 'Verify', 'SrcFiles', 'DestFiles', 'Hash', 'Exit', 'Destination', 'Note')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Safety Notes</h2><ul>')
+    foreach ($note in @($manifest.SafetyNotes)) {
+        [void]$sb.Append(('<li>{0}</li>' -f (ConvertTo-WinPulseHtmlText -value $note)))
+    }
+    [void]$sb.Append('</ul></section>')
+
+    [void]$sb.Append(('<footer>Generated by WinPulse {0}</footer>' -f (ConvertTo-WinPulseHtmlText -value $manifest.Tool.Version)))
+    [void]$sb.Append('</div></body></html>')
+
+    $sb.ToString() | Set-Content -Path $path -Encoding UTF8
+}
+
+function Invoke-WinPulseMigrationBackup {
+    # Orchestrates the backup skeleton: select users, select folders, choose a
+    # destination, build a dry-run plan, then optionally execute the copy and
+    # write a manifest. Read-only until the technician explicitly confirms.
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Backup'
+    Write-Host '  Copy a user''s files to a backup folder you choose (local or external drive).' -ForegroundColor Cyan
+    Write-Host '  You pick the users and folders. Preview first; nothing is copied until you type YES.' -ForegroundColor Cyan
+    Write-Host '  Certificates are kept; passwords and private keys are skipped unless you opt in.' -ForegroundColor Cyan
+    Write-Host ''
+
+    Write-Host '  Scanning user profiles...' -ForegroundColor DarkGray
+    $profiles = @(Get-WinPulseMigrationProfiles)
+    if ($profiles.Count -eq 0) {
+        Write-Host '  No user profiles found. Nothing to back up.' -ForegroundColor Yellow
+        return $null
+    }
+
+    $userKeys = @(Select-WinPulseBackupUsers -profiles $profiles)
+    if ($userKeys.Count -eq 0) {
+        Write-Host '  No users selected. Backup cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+
+    $folderKeys = @(Select-WinPulseBackupFolders)
+    if ($folderKeys.Count -eq 0) {
+        Write-Host '  No folders selected. Backup cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+
+    $optIns = @(Select-WinPulseBackupScopeOptIns)
+    $includeKeys = ($optIns -contains 'privatekeys')
+    $includeAppData = ($optIns -contains 'appdata')
+    if ($includeKeys -or $includeAppData) {
+        Write-Host ''
+        if ($includeKeys) {
+            Write-Host '  WARNING: private keys (.ssh, .gnupg, id_rsa, *.ppk) will be backed up.' -ForegroundColor Yellow
+        }
+        if ($includeAppData) {
+            Write-Host '  WARNING: AppData will be backed up (large, noisy, may hold credential-like data).' -ForegroundColor Yellow
+        }
+    }
+    if ($includeAppData -and ($folderKeys -notcontains 'AppData')) {
+        $folderKeys += 'AppData'
+    }
+
+    $computerName = Get-WinPulseSafeComputerName
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $defaultRoot = Join-Path -Path $script:WinPulsePaths.Backups -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Backup'
+    Write-Host ('  Default destination: {0}' -f $defaultRoot) -ForegroundColor DarkGray
+    $destInput = Read-Host '  Where to save the backup?  (Enter for default, or a path like E:\Backups\Name)'
+    $destinationRoot = if ([string]::IsNullOrWhiteSpace($destInput)) { $defaultRoot } else { $destInput.Trim() }
+
+    Write-Host ''
+    Write-Host '  Building dry-run copy plan...' -ForegroundColor DarkGray
+    $exclusions = Get-WinPulseBackupExclusions -includePrivateKeys:$includeKeys
+    $plan = New-WinPulseBackupPlan -profiles $profiles -userKeys $userKeys -folderKeys $folderKeys -destinationRoot $destinationRoot
+
+    Write-Host ''
+    Write-Host ('  Plan: {0} items, {1} exist, total {2}' -f $plan.ItemCount, $plan.ExistingCount, $plan.TotalSize) -ForegroundColor Cyan
+    Write-Host ('  Destination: {0}' -f $destinationRoot) -ForegroundColor DarkGray
+    Write-Host ''
+    foreach ($item in $plan.Items) {
+        $mark = if ($item.Exists) { '[+]' } else { '[ ]' }
+        $color = if ($item.Exists) { 'White' } else { 'DarkGray' }
+        Write-Host ('    {0} {1}\{2}  {3}' -f $mark, $item.UserName, $item.Folder, $item.Size) -ForegroundColor $color
+    }
+    Write-Host ''
+    Write-Host ('  Excluded files: {0}' -f ($exclusions.Files -join ', ')) -ForegroundColor DarkYellow
+    if (@($exclusions.Dirs).Count -gt 0) {
+        Write-Host ('  Excluded dirs:  {0}' -f ($exclusions.Dirs -join ', ')) -ForegroundColor DarkYellow
+    }
+    if ($includeKeys -or $includeAppData) {
+        Write-Host ('  Opt-in scope:   {0}' -f ($optIns -join ', ')) -ForegroundColor Yellow
+    }
+
+    Write-Host ''
+    $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or copy for real?' -Items @(
+        @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
+        @{ Label = 'Copy files now';                         Key = 'X'; Hint = 'Writes to destination' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($action -ne 'D' -and $action -ne 'X') {
+        Write-Host '  Backup cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+    $dryRun = ($action -eq 'D')
+
+    $hashSampleSize = 0
+    if (-not $dryRun) {
+        Write-Host ''
+        Write-Host ('  About to copy {0} into {1}.' -f $plan.TotalSize, $destinationRoot) -ForegroundColor Yellow
+        $confirm = Read-Host '  Type YES to proceed'
+        if ($confirm -ne 'YES') {
+            Write-Host '  Not confirmed. Backup cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
+            @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
+            @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
+        )
+        if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+    }
+
+    New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
+    $logFolder = Join-Path -Path $destinationRoot -ChildPath 'logs'
+    New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
+    $logPath = Join-Path -Path $logFolder -ChildPath 'migration-backup.log'
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup started. DryRun={0}, Destination={1}' -f $dryRun, $destinationRoot)
+
+    Write-Host ''
+    $results = @()
+    foreach ($item in $plan.Items) {
+        if (-not $item.Exists) {
+            Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip missing source: {0}' -f $item.Source)
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $true; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
+            continue
+        }
+
+        $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
+        $verb = if ($dryRun) { 'Planning' } else { 'Copying' }
+        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
+        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -DryRun:$dryRun
+        $level = if ($rc.Success) { 'INFO' } else { 'ERROR' }
+        Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
+
+        $verify = $null
+        if (-not $dryRun -and $rc.Success) {
+            $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
+            if ($verify.Status -eq 'Mismatch') {
+                Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
+                Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
+            }
+        }
+
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $false; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+    }
+
+    $failed = @($results | Where-Object { -not $_.Success })
+    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
+    $manifest = [pscustomobject][ordered]@{
+        Tool            = [pscustomobject][ordered]@{
+            Name          = 'WinPulse'
+            Version       = $script:WinPulseVersion
+            Mode          = 'MigrationBackup'
+            Action        = if ($dryRun) { 'DryRun' } else { 'Execute' }
+            GeneratedAt   = (Get-Date).ToString('o')
+            SchemaVersion = '0.1'
+        }
+        Computer        = $computerName
+        DestinationRoot = $destinationRoot
+        Users           = @($userKeys)
+        Folders         = @($folderKeys)
+        OptInCategories = @($optIns)
+        Exclusions      = $exclusions
+        Plan            = [pscustomobject][ordered]@{
+            ItemCount     = $plan.ItemCount
+            ExistingCount = $plan.ExistingCount
+            TotalBytes    = $plan.TotalBytes
+            TotalSize     = $plan.TotalSize
+        }
+        Items           = @($results)
+        FailedCount     = $failed.Count
+        MismatchCount   = $mismatch.Count
+        SafetyNotes     = @(
+            'Explicit user and folder selection only.',
+            ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
+            'No passwords, DPAPI secrets, or browser secrets are exported.',
+            'Copy step requires explicit YES confirmation.'
+        )
+    }
+
+    $manifestPath = Join-Path -Path $destinationRoot -ChildPath 'manifest.json'
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+    $reportTextPath = Join-Path -Path $destinationRoot -ChildPath 'migration-backup-report.txt'
+    $reportHtmlPath = Join-Path -Path $destinationRoot -ChildPath 'migration-backup-report.html'
+    Export-WinPulseMigrationCopyReportText -manifest $manifest -path $reportTextPath
+    Export-WinPulseMigrationCopyReportHtml -manifest $manifest -path $reportHtmlPath
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup completed. Failed={0}, Mismatch={1}' -f $failed.Count, $mismatch.Count)
+
+    Write-Host ''
+    if ($dryRun) {
+        Write-Host 'Dry-run plan complete. No files were copied.' -ForegroundColor Green
+    }
+    elseif ($failed.Count -eq 0 -and $mismatch.Count -eq 0) {
+        Write-Host 'Migration backup complete. All folders verified.' -ForegroundColor Green
+    }
+    elseif ($failed.Count -eq 0) {
+        Write-Host ('Migration backup complete, but {0} folder(s) failed verification. Review logs.' -f $mismatch.Count) -ForegroundColor Yellow
+    }
+    else {
+        Write-Host ('Migration backup finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
+    }
+    Write-Host ('  Folder:   {0}' -f $destinationRoot) -ForegroundColor Green
+    Write-Host ('  Manifest: {0}' -f $manifestPath) -ForegroundColor Gray
+    Write-Host ('  Report:   {0}' -f $reportHtmlPath) -ForegroundColor Gray
+    Write-Host ('  Log:      {0}' -f $logPath) -ForegroundColor Gray
+
+    return [pscustomobject][ordered]@{
+        DestinationRoot = $destinationRoot
+        ManifestPath    = $manifestPath
+        ReportTextPath  = $reportTextPath
+        ReportHtmlPath  = $reportHtmlPath
+        LogPath         = $logPath
+        DryRun          = $dryRun
+        FailedCount     = $failed.Count
+        MismatchCount   = $mismatch.Count
+        Manifest        = $manifest
+    }
+}
+
+# ===========================================================================
+# Migration Restore Skeleton
+#
+# Reads a backup manifest.json, maps backed-up users/folders to restore
+# targets, builds a dry-run restore plan, then optionally copies files back
+# with the shared robocopy wrapper. Restore stays read-only until the
+# technician confirms, and existing targets are flagged before overwrite.
+# Restore only moves what the backup chose to keep, so no extra credential or
+# private-key material is reintroduced.
+# ===========================================================================
+
+function Get-WinPulseRestoreExclusions {
+    # Files that must not be restored into known folders. desktop.ini carries
+    # folder localization/customization and the system marker for special
+    # folders; restoring a backed-up copy can rename or break Desktop/Documents/
+    # Pictures and corrupt the profile. thumbs.db is disposable cache.
+    [CmdletBinding()]
+    param()
+
+    return [pscustomobject][ordered]@{
+        Files = @('desktop.ini', 'thumbs.db')
+        Dirs  = @()
+        Note  = 'desktop.ini and thumbs.db are not restored, and directory attributes are left untouched, to protect known folders and the profile.'
+    }
+}
+
+function Read-WinPulseBackupManifest {
+    # Reads and validates a backup manifest.json. Returns the parsed object or
+    # $null if the file is missing or unreadable.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $manifest = $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+
+    if (-not $manifest -or -not $manifest.PSObject.Properties['Items']) {
+        return $null
+    }
+
+    return $manifest
+}
+
+function Get-WinPulseAvailableBackups {
+    # Scans the backups root for folders that contain a manifest.json.
+    [CmdletBinding()]
+    param()
+
+    $root = $script:WinPulsePaths.Backups
+    if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) {
+        return @()
+    }
+
+    $backups = @()
+    foreach ($dir in (Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+        $manifestPath = Join-Path -Path $dir.FullName -ChildPath 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath)) { continue }
+
+        $manifest = Read-WinPulseBackupManifest -path $manifestPath
+        if (-not $manifest) { continue }
+
+        $action = 'Unknown'
+        if ($manifest.PSObject.Properties['Tool'] -and $manifest.Tool.PSObject.Properties['Action']) {
+            $action = [string]$manifest.Tool.Action
+        }
+        $userCount = if ($manifest.PSObject.Properties['Users']) { @($manifest.Users).Count } else { 0 }
+        $totalSize = if ($manifest.PSObject.Properties['Plan'] -and $manifest.Plan.PSObject.Properties['TotalSize']) { [string]$manifest.Plan.TotalSize } else { '' }
+
+        $backups += [pscustomobject][ordered]@{
+            Name         = $dir.Name
+            Path         = $dir.FullName
+            ManifestPath = $manifestPath
+            Action       = $action
+            UserCount    = $userCount
+            TotalSize    = $totalSize
+            LastWrite    = ConvertTo-WinPulseDateText -value $dir.LastWriteTime
+        }
+    }
+
+    return @($backups)
+}
+
+function New-WinPulseRestorePlan {
+    # Builds a dry-run restore plan from a manifest. Source paths are rebuilt
+    # under the selected backup root so a moved backup folder still resolves.
+    # Read-only: it only measures sources and checks for existing targets.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$manifest,
+
+        [Parameter(Mandatory = $true)]
+        [string]$backupRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$restoreRoot
+    )
+
+    $catalog = Get-WinPulseBackupFolderCatalog
+    $items = @()
+    $totalBytes = [double]0
+
+    foreach ($entry in @($manifest.Items)) {
+        $userName = [string]$entry.UserName
+        $folder = [string]$entry.Folder
+        if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($folder)) { continue }
+
+        $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
+        $relative = if ($catEntry) { $catEntry['Relative'] } else { $folder }
+
+        $source = Join-WinPulsePath -path $backupRoot -childpath @($userName, $relative)
+        $target = Join-WinPulsePath -path $restoreRoot -childpath @($userName, $relative)
+        $size = Get-WinPulsePathSize -path $source
+        $targetExists = Test-Path -LiteralPath $target
+
+        $items += [pscustomobject][ordered]@{
+            UserName    = $userName
+            Folder      = $folder
+            Source      = $source
+            Target      = $target
+            Exists      = [bool]$size.Exists
+            TargetExists = [bool]$targetExists
+            Bytes       = [double]$size.Bytes
+            Size        = $size.Size
+        }
+        if ($size.Exists) { $totalBytes += [double]$size.Bytes }
+    }
+
+    return New-WinPulseRestorePlanObject -items $items -restoreRoot $restoreRoot
+}
+
+function New-WinPulseRestorePlanObject {
+    # Wraps a set of restore items into a plan object with recomputed totals.
+    # Shared by the initial plan build and the per-folder selection filter.
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [array]$items,
+
+        [Parameter(Mandatory = $true)]
+        [string]$restoreRoot
+    )
+
+    $totalBytes = [double]0
+    foreach ($item in @($items)) {
+        if ($item.Exists) { $totalBytes += [double]$item.Bytes }
+    }
+
+    return [pscustomobject][ordered]@{
+        RestoreRoot    = $restoreRoot
+        Items          = @($items)
+        ItemCount      = @($items).Count
+        ExistingCount  = @($items | Where-Object { $_.Exists }).Count
+        OverwriteCount = @($items | Where-Object { $_.Exists -and $_.TargetExists }).Count
+        TotalBytes     = $totalBytes
+        TotalSize      = ConvertTo-ReadableSize -bytes $totalBytes
+    }
+}
+
+function Select-WinPulseRestoreItems {
+    # Lets the technician pick which folders to restore. Returns a filtered plan,
+    # the original plan unchanged when there is nothing to choose, or $null when
+    # the selection was cancelled / nothing was picked.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$plan
+    )
+
+    $withData = @($plan.Items | Where-Object { $_.Exists })
+    if ($withData.Count -le 1) {
+        return $plan
+    }
+
+    $items = @()
+    foreach ($entry in $withData) {
+        $overwrite = if ($entry.TargetExists) { '  [overwrite]' } else { '' }
+        $items += @{
+            Label = ('{0}\{1}  {2}{3}' -f $entry.UserName, $entry.Folder, $entry.Size, $overwrite)
+            Key   = ('{0}||{1}' -f $entry.UserName, $entry.Folder)
+            Hint  = $entry.Target
+        }
+    }
+
+    $selected = @(Select-WinPulseMultiMenuItem -Title 'Which folders to restore?  (Space to tick, Enter to confirm)' -Items $items)
+    if ($selected.Count -eq 0) {
+        return $null
+    }
+
+    $selectedSet = @{}
+    foreach ($key in $selected) { $selectedSet[$key] = $true }
+    $filtered = @($plan.Items | Where-Object { $selectedSet.ContainsKey(('{0}||{1}' -f $_.UserName, $_.Folder)) })
+
+    return New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot
+}
+
+function Invoke-WinPulseMigrationRestore {
+    # Orchestrates the restore skeleton: pick a backup, choose a restore root,
+    # build a dry-run plan, then optionally copy files back and write a restore
+    # result manifest. Read-only until the technician explicitly confirms.
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Restore'
+    Write-Host '  Copy files from a backup back into a user profile.' -ForegroundColor Cyan
+    Write-Host '  Pick a backup and folders, preview the plan; nothing changes until you type YES.' -ForegroundColor Cyan
+    Write-Host '  Files that already exist are flagged first, and Windows known folders stay intact.' -ForegroundColor Cyan
+    Write-Host ''
+
+    $backups = @(Get-WinPulseAvailableBackups)
+    $selectedBackupRoot = $null
+
+    if ($backups.Count -gt 0) {
+        $items = @()
+        foreach ($b in $backups) {
+            $items += @{
+                Label = ('{0}  [{1}, {2} user(s), {3}]' -f $b.Name, $b.Action, $b.UserCount, $b.TotalSize)
+                Key   = $b.Path
+                Hint  = $b.LastWrite
+            }
+        }
+        $items += @{ Separator = $true }
+        $items += @{ Label = 'Enter a path manually'; Key = '__manual__'; Hint = 'External drive, etc.' }
+
+        $choice = Select-WinPulseMenuItem -Title 'Which backup do you want to restore?' -Items $items
+        if (-not $choice) {
+            Write-Host '  Restore cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        if ($choice -ne '__manual__') {
+            $selectedBackupRoot = $choice
+        }
+    }
+    else {
+        Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+    }
+
+    if (-not $selectedBackupRoot) {
+        $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+        if ([string]::IsNullOrWhiteSpace($manualInput)) {
+            Write-Host '  No path entered. Restore cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        $selectedBackupRoot = $manualInput.Trim()
+    }
+
+    $manifestPath = Join-Path -Path $selectedBackupRoot -ChildPath 'manifest.json'
+    $manifest = Read-WinPulseBackupManifest -path $manifestPath
+    if (-not $manifest) {
+        Write-Host ('  Could not read a valid manifest.json under {0}.' -f $selectedBackupRoot) -ForegroundColor Red
+        return $null
+    }
+
+    $restoreUsers = if ($manifest.PSObject.Properties['Users']) { @($manifest.Users) } else { @() }
+    $restoreFolders = if ($manifest.PSObject.Properties['Folders']) { @($manifest.Folders) } else { @() }
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Restore'
+    Write-Host ('  Backup:  {0}' -f $selectedBackupRoot) -ForegroundColor DarkGray
+    Write-Host ('  Users:   {0}' -f ($restoreUsers -join ', ')) -ForegroundColor DarkGray
+    Write-Host ('  Folders: {0}' -f ($restoreFolders -join ', ')) -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Default restore root: C:\Users (restores into C:\Users\<User>\<Folder>)' -ForegroundColor DarkGray
+    $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
+    $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
+
+    Write-Host ''
+    Write-Host '  Building dry-run restore plan...' -ForegroundColor DarkGray
+    $restoreExclusions = Get-WinPulseRestoreExclusions
+    $plan = New-WinPulseRestorePlan -manifest $manifest -backupRoot $selectedBackupRoot -restoreRoot $restoreRoot
+
+    if ($plan.ExistingCount -eq 0) {
+        Write-Host '  No restorable data found in this backup (was it a dry run?).' -ForegroundColor Yellow
+        return $null
+    }
+
+    $plan = Select-WinPulseRestoreItems -plan $plan
+    if (-not $plan) {
+        Write-Host '  No folders selected. Restore cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+
+    Write-Host ''
+    Write-Host ('  Plan: {0} items, {1} have data, {2} would overwrite, total {3}' -f $plan.ItemCount, $plan.ExistingCount, $plan.OverwriteCount, $plan.TotalSize) -ForegroundColor Cyan
+    Write-Host ('  Restore root: {0}' -f $restoreRoot) -ForegroundColor DarkGray
+    Write-Host ''
+    foreach ($item in $plan.Items) {
+        if (-not $item.Exists) {
+            Write-Host ('    [ ] {0}\{1}  (no data in backup)' -f $item.UserName, $item.Folder) -ForegroundColor DarkGray
+            continue
+        }
+        $mark = if ($item.TargetExists) { '[!]' } else { '[+]' }
+        $color = if ($item.TargetExists) { 'Yellow' } else { 'White' }
+        $suffix = if ($item.TargetExists) { '  (target exists - will overwrite)' } else { '' }
+        Write-Host ('    {0} {1}\{2}  {3}{4}' -f $mark, $item.UserName, $item.Folder, $item.Size, $suffix) -ForegroundColor $color
+    }
+    Write-Host ''
+    Write-Host ('  Not restored: {0} (known-folder attributes left untouched)' -f ($restoreExclusions.Files -join ', ')) -ForegroundColor DarkYellow
+
+    Write-Host ''
+    $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or restore for real?' -Items @(
+        @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
+        @{ Label = 'Restore files now';                      Key = 'X'; Hint = 'Writes into profile' },
+        @{ Separator = $true },
+        @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
+    )
+    if ($action -ne 'D' -and $action -ne 'X') {
+        Write-Host '  Restore cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+    $dryRun = ($action -eq 'D')
+
+    $hashSampleSize = 0
+    if (-not $dryRun) {
+        Write-Host ''
+        if ($plan.OverwriteCount -gt 0) {
+            Write-Host ('  WARNING: {0} target folder(s) already exist and will be overwritten.' -f $plan.OverwriteCount) -ForegroundColor Yellow
+        }
+        Write-Host ('  About to restore {0} into {1}.' -f $plan.TotalSize, $restoreRoot) -ForegroundColor Yellow
+        $confirm = Read-Host '  Type YES to proceed'
+        if ($confirm -ne 'YES') {
+            Write-Host '  Not confirmed. Restore cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
+            @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
+            @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
+        )
+        if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+    }
+
+    $computerName = Get-WinPulseSafeComputerName
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $recordRoot = Join-Path -Path $script:WinPulsePaths.Backups -ChildPath ('MigrationRestore-{0}-{1}' -f $computerName, $stamp)
+    $logFolder = Join-Path -Path $recordRoot -ChildPath 'logs'
+    New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
+    $logPath = Join-Path -Path $logFolder -ChildPath 'migration-restore.log'
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore started. DryRun={0}, Backup={1}, RestoreRoot={2}' -f $dryRun, $selectedBackupRoot, $restoreRoot)
+
+    Write-Host ''
+    $results = @()
+    foreach ($item in $plan.Items) {
+        if (-not $item.Exists) {
+            Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip empty source: {0}' -f $item.Source)
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $true; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
+            continue
+        }
+
+        $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
+        $verb = if ($dryRun) { 'Planning' } else { 'Restoring' }
+        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
+        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Target -logPath $itemLog -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -copyDirMetadata:$false -DryRun:$dryRun
+        $level = if ($rc.Success) { 'INFO' } else { 'ERROR' }
+        Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
+
+        $verify = $null
+        if (-not $dryRun -and $rc.Success) {
+            $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Target -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -hashSampleSize $hashSampleSize
+            if ($verify.Status -eq 'Mismatch') {
+                Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
+                Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
+            }
+        }
+
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $false; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+    }
+
+    $failed = @($results | Where-Object { -not $_.Success })
+    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
+    $record = [pscustomobject][ordered]@{
+        Tool          = [pscustomobject][ordered]@{
+            Name          = 'WinPulse'
+            Version       = $script:WinPulseVersion
+            Mode          = 'MigrationRestore'
+            Action        = if ($dryRun) { 'DryRun' } else { 'Execute' }
+            GeneratedAt   = (Get-Date).ToString('o')
+            SchemaVersion = '0.1'
+        }
+        Computer      = $computerName
+        BackupRoot    = $selectedBackupRoot
+        RestoreRoot   = $restoreRoot
+        Exclusions    = $restoreExclusions
+        Plan          = [pscustomobject][ordered]@{
+            ItemCount      = $plan.ItemCount
+            ExistingCount  = $plan.ExistingCount
+            OverwriteCount = $plan.OverwriteCount
+            TotalBytes     = $plan.TotalBytes
+            TotalSize      = $plan.TotalSize
+        }
+        Items         = @($results)
+        FailedCount   = $failed.Count
+        MismatchCount = $mismatch.Count
+        SafetyNotes   = @(
+            'Restore only copies data that the backup chose to keep.',
+            'desktop.ini and thumbs.db are not restored.',
+            'Directory attributes are left untouched so known folders are not broken.',
+            'Existing targets are flagged before any overwrite.',
+            'Copy step requires explicit YES confirmation.'
+        )
+    }
+
+    $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-restore.json'
+    $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
+    $reportTextPath = Join-Path -Path $recordRoot -ChildPath 'migration-restore-report.txt'
+    $reportHtmlPath = Join-Path -Path $recordRoot -ChildPath 'migration-restore-report.html'
+    Export-WinPulseMigrationCopyReportText -manifest $record -path $reportTextPath
+    Export-WinPulseMigrationCopyReportHtml -manifest $record -path $reportHtmlPath
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore completed. Failed={0}, Mismatch={1}' -f $failed.Count, $mismatch.Count)
+
+    Write-Host ''
+    if ($dryRun) {
+        Write-Host 'Dry-run restore plan complete. No files were copied.' -ForegroundColor Green
+    }
+    elseif ($failed.Count -eq 0 -and $mismatch.Count -eq 0) {
+        Write-Host 'Migration restore complete. All folders verified.' -ForegroundColor Green
+    }
+    elseif ($failed.Count -eq 0) {
+        Write-Host ('Migration restore complete, but {0} folder(s) failed verification. Review logs.' -f $mismatch.Count) -ForegroundColor Yellow
+    }
+    else {
+        Write-Host ('Migration restore finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
+    }
+    Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
+    Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray
+    Write-Host ('  Log:    {0}' -f $logPath) -ForegroundColor Gray
+
+    return [pscustomobject][ordered]@{
+        RecordRoot   = $recordRoot
+        RecordPath   = $recordPath
+        ReportTextPath = $reportTextPath
+        ReportHtmlPath = $reportHtmlPath
+        LogPath      = $logPath
+        DryRun       = $dryRun
+        FailedCount  = $failed.Count
+        MismatchCount = $mismatch.Count
+        Record       = $record
+    }
+}
+
 function Show-WinPulseWindows11Readiness {
     [CmdletBinding()]
     param()
@@ -7135,6 +8393,8 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'System health' },
             @{ Label = 'W11 readiness';     Key = 'A'; Hint = 'Upgrade signals' },
             @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
+            @{ Label = 'Migration backup';  Key = 'B'; Hint = 'Copy user files out' },
+            @{ Label = 'Migration restore'; Key = 'O'; Hint = 'Put files back' },
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
@@ -7148,6 +8408,8 @@ function Show-WinPulseMainMenu {
             'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Wait-WinPulseKey }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
+            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
+            'O' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
@@ -7263,6 +8525,8 @@ function Show-WinPulseTriageMenu {
             @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
             @{ Label = 'W11 readiness';      Key = 'A'; Hint = 'Upgrade signals' },
             @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
+            @{ Label = 'Migration backup';   Key = 'B'; Hint = 'Copy user files out' },
+            @{ Label = 'Migration restore';  Key = 'O'; Hint = 'Put files back' },
             @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
             @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
@@ -7275,6 +8539,8 @@ function Show-WinPulseTriageMenu {
             'F' { Show-WinPulseFindingsDetail -scan $scan }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
+            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
+            'O' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
@@ -7314,7 +8580,7 @@ function Invoke-WinPulseMode {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')]
+        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
         [string]$mode
     )
 
@@ -7346,6 +8612,14 @@ function Invoke-WinPulseMode {
         'MigrationPreflight' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration preflight mode.' -f $script:WinPulseVersion)
             Invoke-WinPulseMigrationPreflight | Out-Null
+        }
+        'MigrationBackup' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running migration backup mode.' -f $script:WinPulseVersion)
+            Invoke-WinPulseMigrationBackup | Out-Null
+        }
+        'MigrationRestore' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
+            Invoke-WinPulseMigrationRestore | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
