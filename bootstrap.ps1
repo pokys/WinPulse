@@ -1,8 +1,31 @@
 #requires -version 5.1
+[CmdletBinding()]
+param(
+    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')]
+    [string]$Mode = 'Triage'
+)
+
+$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')
+$modeOverride = $null
+$globalMode = Get-Variable -Name WinPulseMode -Scope Global -ErrorAction SilentlyContinue
+if ($globalMode -and -not [string]::IsNullOrWhiteSpace([string]$globalMode.Value)) {
+    $modeOverride = [string]$globalMode.Value
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:WINPULSE_MODE)) {
+    $modeOverride = [string]$env:WINPULSE_MODE
+}
+
+if ($modeOverride) {
+    if ($modeOverride -notin $validWinPulseModes) {
+        throw ('Invalid WinPulse mode override "{0}". Valid modes: {1}' -f $modeOverride, ($validWinPulseModes -join ', '))
+    }
+    $Mode = $modeOverride
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.6.8-20250405'
+$script:WinPulseVersion = '0.7.0-20260531'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -18,7 +41,8 @@ function Start-WinPulseElevation {
     param(
         [string]$bootstrappath,
         [string]$bootstrapdefinition,
-        [string]$bootstrapurl
+        [string]$bootstrapurl,
+        [string]$mode
     )
 
     if (Test-WinPulseIsAdmin) {
@@ -51,6 +75,14 @@ function Start-WinPulseElevation {
         $tempScript = Join-Path -Path $env:TEMP -ChildPath ('WinPulse-Bootstrap-{0}.ps1' -f ([Guid]::NewGuid().ToString('N')))
         [IO.File]::WriteAllText($tempScript, $bootstrapdefinition, [Text.UTF8Encoding]::new($false))
         $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $tempScript))
+    }
+
+    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'ExportBundle')) {
+        $args = @('-NoExit') + $args
+    }
+
+    if ($mode) {
+        $args += @('-Mode', ('"{0}"' -f $mode))
     }
 
     Start-Process -FilePath $shellPath -Verb RunAs -ArgumentList ($args -join ' ')
@@ -430,7 +462,7 @@ function Get-WinPulseRepairPlans {
     return $plans
 }
 
-# ── Extended Diagnostic Helpers ──────────────────────────────────────────────
+# -- Extended Diagnostic Helpers ----------------------------------------------
 
 function Get-WinPulseHardwareDetail {
     [CmdletBinding()]
@@ -1394,7 +1426,7 @@ function Invoke-CoreScan {
         $result.Errors += "NETWORK scan failed: $($_.Exception.Message)"
     }
 
-    # ── Extended diagnostic sections ─────────────────────────────────────────
+    # -- Extended diagnostic sections -----------------------------------------
     Write-Host '  Scanning hardware details...' -ForegroundColor DarkGray -NoNewline
     try { $result.HardwareDetail = Get-WinPulseHardwareDetail }
     catch { $result.Errors += "HW DETAIL: $($_.Exception.Message)" }
@@ -2022,7 +2054,7 @@ function Show-WinPulseTriageSummary {
     }
 }
 
-# ── HTML Report ──────────────────────────────────────────────────────────────
+# -- HTML Report --------------------------------------------------------------
 
 function ConvertTo-WinPulseHtmlTable {
     [CmdletBinding()]
@@ -2085,7 +2117,7 @@ function Export-WinPulseHtmlReport {
 
     $sb = [System.Text.StringBuilder]::new()
 
-    # ── HTML Head ────────────────────────────────────────────────────────────
+    # -- HTML Head ------------------------------------------------------------
     [void]$sb.Append(@'
 <!DOCTYPE html>
 <html lang="cs">
@@ -2138,12 +2170,12 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
 <div class="container">
 '@)
 
-    # ── Header ───────────────────────────────────────────────────────────────
+    # -- Header ---------------------------------------------------------------
     [void]$sb.Append(('<header><h1>WinPulse Diagnostic Report</h1><p class="subtitle">{0} | Generated: {1}</p>' -f $e::HtmlEncode($scan.System.Hostname), $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')))
     [void]$sb.Append(('<div class="overall-badge {0}">Overall: {1}</div>' -f $overallClass, $overall))
     [void]$sb.Append('</header>')
 
-    # ── Triage ───────────────────────────────────────────────────────────────
+    # -- Triage ---------------------------------------------------------------
     [void]$sb.Append('<section><h2>Triage Findings</h2>')
     if ($findings.Count -eq 0) {
         [void]$sb.Append('<p class="state-ok">No issues detected.</p>')
@@ -2158,10 +2190,10 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
     [void]$sb.Append('</section>')
 
-    # ── Technician Notes ─────────────────────────────────────────────────────
+    # -- Technician Notes -----------------------------------------------------
     [void]$sb.Append('<section><h2>Technician Notes</h2><textarea class="notes-area" placeholder="Add notes here before printing..."></textarea></section>')
 
-    # ── System Info ──────────────────────────────────────────────────────────
+    # -- System Info ----------------------------------------------------------
     [void]$sb.Append('<section><h2>System Information</h2><div class="kv">')
     $sysFields = [ordered]@{
         'Hostname' = $scan.System.Hostname; 'Model' = $scan.System.Model; 'Serial' = $scan.System.Serial
@@ -2174,7 +2206,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
     [void]$sb.Append('</div></section>')
 
-    # ── Hardware Details ─────────────────────────────────────────────────────
+    # -- Hardware Details -----------------------------------------------------
     if ($scan.HardwareDetail) {
         [void]$sb.Append('<section><h2>Hardware Details</h2>')
 
@@ -2215,7 +2247,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── RAM & Disk ───────────────────────────────────────────────────────────
+    # -- RAM & Disk -----------------------------------------------------------
     [void]$sb.Append('<section><h2>Storage &amp; Memory</h2><div class="kv">')
     $ram = $scan.Hardware.Ram
     [void]$sb.Append(('<span class="k">RAM</span><span class="v">{0} used ({1}%) | {2} free | {3} total</span>' -f $ram.Used, $ram.UsedPercent, $ram.Free, $ram.Total))
@@ -2227,7 +2259,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
     [void]$sb.Append('</section>')
 
-    # ── Temperatures ─────────────────────────────────────────────────────────
+    # -- Temperatures ---------------------------------------------------------
     if ($scan.Temperatures) {
         [void]$sb.Append('<section><h2>Temperatures</h2><div class="kv">')
         $cpuT = if ($scan.Temperatures.CPUTempCelsius) { '{0} C' -f $scan.Temperatures.CPUTempCelsius } else { 'N/A' }
@@ -2242,7 +2274,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── TPM ──────────────────────────────────────────────────────────────────
+    # -- TPM ------------------------------------------------------------------
     if ($scan.TPM) {
         [void]$sb.Append('<section><h2>TPM Status</h2><div class="kv">')
         $t = $scan.TPM
@@ -2255,7 +2287,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</div></section>')
     }
 
-    # ── Security ─────────────────────────────────────────────────────────────
+    # -- Security -------------------------------------------------------------
     [void]$sb.Append('<section><h2>Security</h2><div class="kv">')
     $avLabel = if ($scan.Security.Antivirus.Products.Count -gt 0) { ($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { $_ } | Sort-Object -Unique) -join ', ' } else { 'None detected' }
     [void]$sb.Append(('<span class="k">Antivirus</span><span class="v">{0}</span>' -f $e::HtmlEncode($avLabel)))
@@ -2266,7 +2298,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     [void]$sb.Append(('<span class="k">BitLocker</span><span class="v">{0}</span>' -f $(if ($blOn) { 'On' } else { 'Off' })))
     [void]$sb.Append('</div></section>')
 
-    # ── License ──────────────────────────────────────────────────────────────
+    # -- License --------------------------------------------------------------
     if ($scan.License) {
         [void]$sb.Append('<section><h2>Windows License</h2><div class="kv">')
         $l = $scan.License
@@ -2279,7 +2311,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</div></section>')
     }
 
-    # ── Health & Events ──────────────────────────────────────────────────────
+    # -- Health & Events ------------------------------------------------------
     [void]$sb.Append('<section><h2>Health &amp; Events</h2><div class="kv">')
     $h = $scan.Health
     [void]$sb.Append(('<span class="k">BSOD (7 days)</span><span class="v {0}">{1}</span>' -f $(if ($h.BsodRecentCount -gt 0) { 'state-crit' } else { 'state-ok' }), $h.BsodRecentCount))
@@ -2293,7 +2325,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
     [void]$sb.Append('</section>')
 
-    # ── Network ──────────────────────────────────────────────────────────────
+    # -- Network --------------------------------------------------------------
     [void]$sb.Append('<section><h2>Network</h2><div class="kv">')
     [void]$sb.Append(('<span class="k">IPv4</span><span class="v">{0}</span>' -f $scan.Network.IPv4))
     [void]$sb.Append(('<span class="k">Gateway</span><span class="v">{0}</span>' -f $scan.Network.Gateway))
@@ -2329,7 +2361,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
     [void]$sb.Append('</section>')
 
-    # ── Drivers ──────────────────────────────────────────────────────────────
+    # -- Drivers --------------------------------------------------------------
     if ($scan.Drivers) {
         [void]$sb.Append('<section><h2>Driver Analysis</h2>')
         if ($scan.Drivers.Problematic.Count -gt 0) {
@@ -2352,7 +2384,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── Startup ──────────────────────────────────────────────────────────────
+    # -- Startup --------------------------------------------------------------
     if ($scan.Startup) {
         [void]$sb.Append('<section><h2>Startup &amp; Boot</h2><div class="kv">')
         [void]$sb.Append(('<span class="k">Last Boot</span><span class="v">{0}</span>' -f $(if ($scan.Startup.LastBootTime) { $scan.Startup.LastBootTime.ToString('yyyy-MM-dd HH:mm:ss') } else { 'N/A' })))
@@ -2375,7 +2407,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── User Accounts ────────────────────────────────────────────────────────
+    # -- User Accounts --------------------------------------------------------
     if ($scan.UserAccounts) {
         [void]$sb.Append('<section><h2>User Accounts</h2>')
         [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">User profiles on disk: {0}</p>' -f $scan.UserAccounts.ProfileCount))
@@ -2385,7 +2417,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── Printers ─────────────────────────────────────────────────────────────
+    # -- Printers -------------------------------------------------------------
     if ($scan.Printers) {
         [void]$sb.Append('<section><h2>Printers</h2>')
         [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">Default: {0}</p>' -f $e::HtmlEncode($scan.Printers.DefaultPrinter)))
@@ -2402,7 +2434,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── Software Inventory ───────────────────────────────────────────────────
+    # -- Software Inventory ---------------------------------------------------
     if ($scan.Software) {
         [void]$sb.Append(('<section><h2>Installed Software ({0})</h2>' -f $scan.Software.Count))
         if ($scan.Software.Items.Count -gt 0) {
@@ -2413,7 +2445,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── Scheduled Tasks ──────────────────────────────────────────────────────
+    # -- Scheduled Tasks ------------------------------------------------------
     if ($scan.ScheduledTasks) {
         [void]$sb.Append('<section><h2>Scheduled Tasks</h2>')
         if ($scan.ScheduledTasks.Failed.Count -gt 0) {
@@ -2436,7 +2468,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</section>')
     }
 
-    # ── Virtualization ───────────────────────────────────────────────────────
+    # -- Virtualization -------------------------------------------------------
     if ($scan.Virtualization) {
         [void]$sb.Append('<section><h2>Virtualization</h2><div class="kv">')
         $v = $scan.Virtualization
@@ -2451,7 +2483,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</div></section>')
     }
 
-    # ── Scan Warnings ────────────────────────────────────────────────────────
+    # -- Scan Warnings --------------------------------------------------------
     if ($scan.Errors.Count -gt 0) {
         [void]$sb.Append('<section><h2>Scan Warnings</h2><ul class="findings-list">')
         foreach ($err in $scan.Errors) {
@@ -2460,7 +2492,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append('</ul></section>')
     }
 
-    # ── Footer ───────────────────────────────────────────────────────────────
+    # -- Footer ---------------------------------------------------------------
     [void]$sb.Append(('<footer>Generated by WinPulse v1.0 | {0} | {1}</footer>' -f $scan.System.Hostname, $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')))
     [void]$sb.Append('</div></body></html>')
 
@@ -2475,7 +2507,1424 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     return $target
 }
 
-# ── End HTML Report ──────────────────────────────────────────────────────────
+# -- End HTML Report ----------------------------------------------------------
+
+function Join-WinPulsePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$childpath
+    )
+
+    $result = $path
+    foreach ($child in $childpath) {
+        $result = Join-Path -Path $result -ChildPath $child
+    }
+    return $result
+}
+
+function ConvertTo-WinPulseDateText {
+    [CmdletBinding()]
+    param(
+        [object]$value
+    )
+
+    if ($null -eq $value) { return $null }
+    try {
+        return ([datetime]$value).ToString('o')
+    }
+    catch {
+        return [string]$value
+    }
+}
+
+function ConvertTo-WinPulseHtmlText {
+    [CmdletBinding()]
+    param(
+        [object]$value
+    )
+
+    if ($null -eq $value) { return '' }
+    $text = [string]$value
+    $text = $text -replace '&', '&amp;'
+    $text = $text -replace '<', '&lt;'
+    $text = $text -replace '>', '&gt;'
+    $text = $text -replace '"', '&quot;'
+    $text = $text -replace "'", '&#39;'
+    return $text
+}
+
+function Get-WinPulseObjectValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$inputobject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$name
+    )
+
+    if ($inputobject -is [System.Collections.IDictionary]) {
+        if ($inputobject.Contains($name)) {
+            return $inputobject[$name]
+        }
+        return $null
+    }
+
+    $prop = $inputobject.PSObject.Properties[$name]
+    if ($prop) {
+        return $prop.Value
+    }
+    return $null
+}
+
+function ConvertTo-WinPulseMigrationHtmlTable {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [array]$data,
+
+        [string[]]$columns
+    )
+
+    $rows = @($data)
+    if ($rows.Count -eq 0) {
+        return '<p class="empty">No data detected.</p>'
+    }
+
+    if (-not $columns -or $columns.Count -eq 0) {
+        if ($rows[0] -is [System.Collections.IDictionary]) {
+            $columns = @($rows[0].Keys)
+        }
+        else {
+            $columns = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+        }
+    }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('<table><thead><tr>')
+    foreach ($column in $columns) {
+        [void]$sb.Append(('<th>{0}</th>' -f (ConvertTo-WinPulseHtmlText -value $column)))
+    }
+    [void]$sb.Append('</tr></thead><tbody>')
+
+    foreach ($row in $rows) {
+        [void]$sb.Append('<tr>')
+        foreach ($column in $columns) {
+            $value = Get-WinPulseObjectValue -inputobject $row -name $column
+            if ($value -is [array]) {
+                $value = ($value -join ', ')
+            }
+            [void]$sb.Append(('<td>{0}</td>' -f (ConvertTo-WinPulseHtmlText -value $value)))
+        }
+        [void]$sb.Append('</tr>')
+    }
+
+    [void]$sb.Append('</tbody></table>')
+    return $sb.ToString()
+}
+
+function Add-WinPulseMigrationHtmlKv {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.StringBuilder]$builder,
+
+        [Parameter(Mandatory = $true)]
+        [string]$key,
+
+        [object]$value
+    )
+
+    [void]$builder.Append(('<span class="k">{0}</span><span class="v">{1}</span>' -f
+            (ConvertTo-WinPulseHtmlText -value $key),
+            (ConvertTo-WinPulseHtmlText -value $value)))
+}
+
+function New-WinPulseCheckResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$id,
+
+        [Parameter(Mandatory = $true)]
+        [string]$category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$name,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Pass', 'Warning', 'Fail', 'Info')]
+        [string]$status,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Low', 'Medium', 'High', 'Critical')]
+        [string]$severity,
+
+        [Parameter(Mandatory = $true)]
+        [string]$summary,
+
+        [object]$evidence,
+
+        [string]$recommendation = '',
+
+        [bool]$canautofix = $false,
+
+        [string]$fixid = $null
+    )
+
+    if ($null -eq $evidence) {
+        $evidence = [ordered]@{}
+    }
+
+    return [pscustomobject]@{
+        Id             = $id
+        Category       = $category
+        Name           = $name
+        Status         = $status
+        Severity       = $severity
+        Summary        = $summary
+        Evidence       = $evidence
+        Recommendation = $recommendation
+        CanAutoFix     = $canautofix
+        FixId          = $fixid
+        Timestamp      = (Get-Date).ToString('o')
+    }
+}
+
+function New-WinPulsePreflightError {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$collector,
+
+        [Parameter(Mandatory = $true)]
+        [string]$message
+    )
+
+    return [pscustomobject]@{
+        Collector = $collector
+        Message   = $message
+        Timestamp = (Get-Date).ToString('o')
+    }
+}
+
+function Write-WinPulseMigrationLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('INFO', 'WARNING', 'ERROR')]
+        [string]$level,
+
+        [Parameter(Mandatory = $true)]
+        [string]$message
+    )
+
+    $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $level, $message
+    Add-Content -Path $path -Value $line -Encoding UTF8
+}
+
+function Get-WinPulsePathSize {
+    [CmdletBinding()]
+    param(
+        [string]$path
+    )
+
+    $result = [ordered]@{
+        Exists = $false
+        Bytes  = [double]0
+        Size   = '0 B'
+        Error  = $null
+    }
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+            return [pscustomobject]$result
+        }
+
+        $result['Exists'] = $true
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer) {
+            $result['Bytes'] = [double]$item.Length
+        }
+        else {
+            $measure = Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum
+            if ($measure -and $measure.Sum) {
+                $result['Bytes'] = [double]$measure.Sum
+            }
+        }
+    }
+    catch {
+        $result['Error'] = $_.Exception.Message
+    }
+
+    $result['Size'] = ConvertTo-ReadableSize -bytes ([double]$result['Bytes'])
+    return [pscustomobject]$result
+}
+
+function ConvertTo-WinPulseFileSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$file
+    )
+
+    return [ordered]@{
+        Path          = [string]$file.FullName
+        Bytes         = [double]$file.Length
+        Size          = ConvertTo-ReadableSize -bytes ([double]$file.Length)
+        LastWriteTime = ConvertTo-WinPulseDateText -value $file.LastWriteTime
+    }
+}
+
+function Get-WinPulseSafeComputerName {
+    [CmdletBinding()]
+    param()
+
+    $name = $env:COMPUTERNAME
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        $name = [Environment]::MachineName
+    }
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        $name = 'UnknownComputer'
+    }
+    return ($name -replace '[^A-Za-z0-9_-]', '_')
+}
+
+function Get-WinPulseSystemIdentity {
+    [CmdletBinding()]
+    param()
+
+    $identity = [ordered]@{
+        ComputerName      = Get-WinPulseSafeComputerName
+        CurrentUser       = if ($env:USERNAME) { $env:USERNAME } else { [Environment]::UserName }
+        DomainOrWorkgroup = 'Unknown'
+        DomainJoined      = $false
+        OSCaption         = 'Unknown'
+        OSVersion         = 'Unknown'
+        OSBuild           = 'Unknown'
+        InstallDate       = $null
+        LastBootTime      = $null
+        Architecture      = $env:PROCESSOR_ARCHITECTURE
+        PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    }
+
+    try {
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        if ($computer) {
+            $identity['DomainJoined'] = [bool]$computer.PartOfDomain
+            if ([bool]$computer.PartOfDomain) {
+                $identity['DomainOrWorkgroup'] = [string]$computer.Domain
+            }
+            elseif ($computer.Workgroup) {
+                $identity['DomainOrWorkgroup'] = [string]$computer.Workgroup
+            }
+            else {
+                $identity['DomainOrWorkgroup'] = 'Workgroup'
+            }
+        }
+    }
+    catch {
+    }
+
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ($os) {
+            $identity['OSCaption'] = [string]$os.Caption
+            $identity['OSVersion'] = [string]$os.Version
+            $identity['OSBuild'] = [string]$os.BuildNumber
+            $identity['InstallDate'] = ConvertTo-WinPulseDateText -value $os.InstallDate
+            $identity['LastBootTime'] = ConvertTo-WinPulseDateText -value $os.LastBootUpTime
+            $identity['Architecture'] = [string]$os.OSArchitecture
+        }
+    }
+    catch {
+    }
+
+    return [pscustomobject]$identity
+}
+
+function Get-WinPulseWindows11Readiness {
+    [CmdletBinding()]
+    param()
+
+    $firmwareMode = Get-WinPulseFirmwareMode
+    $secureBoot = Get-WinPulseSecureBootState -firmwaremode $firmwareMode
+    $pendingReboot = Test-WinPulsePendingReboot
+    $tpm = [pscustomobject](Get-WinPulseTPMStatus)
+
+    $ramBytes = [double]0
+    $systemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
+    $systemDriveFreeBytes = [double]0
+    $cpuModel = 'Unknown'
+    $partitionStyle = 'Unknown'
+    $unknowns = @()
+    $warnings = @()
+    $blockers = @()
+
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ($os -and $os.TotalVisibleMemorySize) {
+            $ramBytes = [double]$os.TotalVisibleMemorySize * 1KB
+        }
+        else {
+            $unknowns += 'RAM size unavailable'
+        }
+    }
+    catch {
+        $unknowns += 'RAM size unavailable'
+    }
+
+    try {
+        $logicalDisk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $systemDrive) -ErrorAction Stop
+        if ($logicalDisk -and $logicalDisk.FreeSpace) {
+            $systemDriveFreeBytes = [double]$logicalDisk.FreeSpace
+        }
+        else {
+            $unknowns += 'System drive free space unavailable'
+        }
+    }
+    catch {
+        $unknowns += 'System drive free space unavailable'
+    }
+
+    try {
+        $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        if ($cpu -and $cpu.Name) {
+            $cpuModel = ([string]$cpu.Name).Trim()
+        }
+        else {
+            $unknowns += 'CPU model unavailable'
+        }
+    }
+    catch {
+        $unknowns += 'CPU model unavailable'
+    }
+
+    try {
+        if (Get-Command -Name Get-Partition -ErrorAction SilentlyContinue) {
+            $driveLetter = ($systemDrive -replace ':', '')
+            $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($partition -and (Get-Command -Name Get-Disk -ErrorAction SilentlyContinue)) {
+                $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction SilentlyContinue
+                if ($disk -and $disk.PartitionStyle) {
+                    $partitionStyle = [string]$disk.PartitionStyle
+                }
+            }
+        }
+        if ($partitionStyle -eq 'Unknown') {
+            $unknowns += 'Disk partition style unavailable'
+        }
+    }
+    catch {
+        $unknowns += 'Disk partition style unavailable'
+    }
+
+    if (-not $tpm.Present) {
+        $blockers += 'TPM not present'
+    }
+    elseif (-not $tpm.Enabled) {
+        $blockers += 'TPM present but not ready'
+    }
+    elseif (-not ($tpm.Version -like '2.*' -or $tpm.Version -eq '2.0')) {
+        $blockers += ('TPM version {0} is below 2.0 or unknown' -f $tpm.Version)
+    }
+
+    if ($firmwareMode -eq 'BIOS') {
+        $blockers += 'Legacy BIOS firmware detected'
+    }
+    elseif ($firmwareMode -eq 'Unknown') {
+        $unknowns += 'Firmware mode unavailable'
+    }
+
+    if ($secureBoot -eq 'Off') {
+        $warnings += 'Secure Boot is off'
+    }
+    elseif ($secureBoot -eq 'Unknown') {
+        $unknowns += 'Secure Boot state unavailable'
+    }
+
+    if ($ramBytes -gt 0 -and $ramBytes -lt 4GB) {
+        $blockers += 'RAM below 4 GB'
+    }
+
+    if ($systemDriveFreeBytes -gt 0 -and $systemDriveFreeBytes -lt 20GB) {
+        $warnings += 'System drive has less than 20 GB free'
+    }
+
+    if ($partitionStyle -eq 'MBR') {
+        $warnings += 'System disk appears to use MBR partitioning'
+    }
+
+    if ($pendingReboot) {
+        $warnings += 'Pending reboot detected'
+    }
+
+    $recommendation = 'Ready'
+    if ($blockers.Count -gt 0) {
+        $recommendation = 'Not ready'
+    }
+    elseif ($warnings.Count -gt 0) {
+        $recommendation = 'Needs attention'
+    }
+    elseif ($unknowns.Count -gt 0) {
+        $recommendation = 'Unknown'
+    }
+
+    return [pscustomobject][ordered]@{
+        Recommendation        = $recommendation
+        TPM                   = [pscustomobject][ordered]@{
+            Present      = [bool]$tpm.Present
+            Ready        = [bool]$tpm.Enabled
+            SpecVersion  = [string]$tpm.Version
+            Manufacturer = [string]$tpm.Manufacturer
+        }
+        SecureBootState       = $secureBoot
+        FirmwareMode          = $firmwareMode
+        RamBytes              = $ramBytes
+        RamSize               = ConvertTo-ReadableSize -bytes $ramBytes
+        SystemDrive           = $systemDrive
+        SystemDriveFreeBytes  = $systemDriveFreeBytes
+        SystemDriveFree       = ConvertTo-ReadableSize -bytes $systemDriveFreeBytes
+        CPUModel              = $cpuModel
+        DiskPartitionStyle    = $partitionStyle
+        PendingReboot         = [bool]$pendingReboot
+        Blockers              = $blockers
+        Warnings              = $warnings
+        Unknowns              = $unknowns
+        Note                  = 'CPU model is collected, but the Microsoft supported CPU list is not validated in this milestone.'
+    }
+}
+
+function Get-WinPulseMigrationProfiles {
+    [CmdletBinding()]
+    param()
+
+    $profiles = @()
+    $usersRoot = 'C:\Users'
+    $excludeNames = @('Public', 'Default', 'Default User', 'All Users', 'defaultuser0', 'WDAGUtilityAccount')
+
+    if (-not (Test-Path -LiteralPath $usersRoot)) {
+        return @()
+    }
+
+    foreach ($profile in (Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $excludeNames })) {
+        $desktop = Join-Path -Path $profile.FullName -ChildPath 'Desktop'
+        $documents = Join-Path -Path $profile.FullName -ChildPath 'Documents'
+        $downloads = Join-Path -Path $profile.FullName -ChildPath 'Downloads'
+        $pictures = Join-Path -Path $profile.FullName -ChildPath 'Pictures'
+        $videos = Join-Path -Path $profile.FullName -ChildPath 'Videos'
+        $music = Join-Path -Path $profile.FullName -ChildPath 'Music'
+        $appData = Join-Path -Path $profile.FullName -ChildPath 'AppData'
+
+        $totalSize = Get-WinPulsePathSize -path $profile.FullName
+        $desktopSize = Get-WinPulsePathSize -path $desktop
+        $documentsSize = Get-WinPulsePathSize -path $documents
+        $downloadsSize = Get-WinPulsePathSize -path $downloads
+        $picturesSize = Get-WinPulsePathSize -path $pictures
+        $videosSize = Get-WinPulsePathSize -path $videos
+        $musicSize = Get-WinPulsePathSize -path $music
+        $appDataSize = Get-WinPulsePathSize -path $appData
+
+        $profiles += [pscustomobject][ordered]@{
+            UserName            = $profile.Name
+            ProfilePath         = $profile.FullName
+            Exists              = $true
+            LastWriteTime       = ConvertTo-WinPulseDateText -value $profile.LastWriteTime
+            EstimatedTotalBytes = [double]$totalSize.Bytes
+            EstimatedTotalSize  = $totalSize.Size
+            DesktopBytes        = [double]$desktopSize.Bytes
+            DesktopSize         = $desktopSize.Size
+            DocumentsBytes      = [double]$documentsSize.Bytes
+            DocumentsSize       = $documentsSize.Size
+            DownloadsBytes      = [double]$downloadsSize.Bytes
+            DownloadsSize       = $downloadsSize.Size
+            PicturesBytes       = [double]$picturesSize.Bytes
+            PicturesSize        = $picturesSize.Size
+            VideosBytes         = [double]$videosSize.Bytes
+            VideosSize          = $videosSize.Size
+            MusicBytes          = [double]$musicSize.Bytes
+            MusicSize           = $musicSize.Size
+            AppDataBytes        = [double]$appDataSize.Bytes
+            AppDataSize         = $appDataSize.Size
+            AppDataNote         = 'Reported separately because AppData can be large and noisy.'
+        }
+    }
+
+    return @($profiles)
+}
+
+function Get-WinPulseOneDriveSignals {
+    [CmdletBinding()]
+    param(
+        [array]$profiles
+    )
+
+    $signals = @()
+    foreach ($profile in @($profiles)) {
+        $oneDrivePaths = @()
+        $kfmFolders = @()
+
+        try {
+            $oneDriveDirs = @(Get-ChildItem -LiteralPath $profile.ProfilePath -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'OneDrive*' })
+            foreach ($dir in $oneDriveDirs) {
+                $oneDrivePaths += $dir.FullName
+                foreach ($folderName in @('Desktop', 'Documents', 'Pictures')) {
+                    $candidate = Join-Path -Path $dir.FullName -ChildPath $folderName
+                    if (Test-Path -LiteralPath $candidate) {
+                        $kfmFolders += $folderName
+                    }
+                }
+            }
+        }
+        catch {
+        }
+
+        $kfmFolders = @($kfmFolders | Sort-Object -Unique)
+        $status = 'Not detected'
+        if ($kfmFolders.Count -gt 0) {
+            $status = 'Likely enabled'
+        }
+        elseif ($oneDrivePaths.Count -gt 0) {
+            $status = 'Unknown'
+        }
+
+        $signals += [pscustomobject][ordered]@{
+            UserName           = $profile.UserName
+            ProfilePath        = $profile.ProfilePath
+            OneDrivePaths      = $oneDrivePaths
+            OneDrivePathCount  = $oneDrivePaths.Count
+            KFMFoldersDetected = $kfmFolders
+            PotentialKFMStatus = $status
+        }
+    }
+
+    return @($signals)
+}
+
+function Get-WinPulseEmailDataSignals {
+    [CmdletBinding()]
+    param(
+        [array]$profiles
+    )
+
+    $pstFiles = @()
+    $ostFiles = @()
+    $thunderbirdProfiles = @()
+
+    foreach ($profile in @($profiles)) {
+        try {
+            foreach ($file in (Get-ChildItem -LiteralPath $profile.ProfilePath -Recurse -Force -File -Filter '*.pst' -ErrorAction SilentlyContinue)) {
+                $summary = ConvertTo-WinPulseFileSummary -file $file
+                $summary['UserName'] = $profile.UserName
+                $pstFiles += [pscustomobject]$summary
+            }
+        }
+        catch {
+        }
+
+        try {
+            foreach ($file in (Get-ChildItem -LiteralPath $profile.ProfilePath -Recurse -Force -File -Filter '*.ost' -ErrorAction SilentlyContinue)) {
+                $summary = ConvertTo-WinPulseFileSummary -file $file
+                $summary['UserName'] = $profile.UserName
+                $summary['MigrationNote'] = 'OST is usually cache data and not a primary migration target.'
+                $ostFiles += [pscustomobject]$summary
+            }
+        }
+        catch {
+        }
+
+        try {
+            $tbRoot = Join-WinPulsePath -path $profile.ProfilePath -childpath @('AppData', 'Roaming', 'Thunderbird', 'Profiles')
+            if (Test-Path -LiteralPath $tbRoot) {
+                foreach ($dir in (Get-ChildItem -LiteralPath $tbRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+                    $size = Get-WinPulsePathSize -path $dir.FullName
+                    $thunderbirdProfiles += [pscustomobject][ordered]@{
+                        UserName      = $profile.UserName
+                        Path          = $dir.FullName
+                        Bytes         = [double]$size.Bytes
+                        Size          = $size.Size
+                        LastWriteTime = ConvertTo-WinPulseDateText -value $dir.LastWriteTime
+                    }
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        PstFiles            = @($pstFiles)
+        OstFiles            = @($ostFiles)
+        ThunderbirdProfiles = @($thunderbirdProfiles)
+        PstCount            = @($pstFiles).Count
+        OstCount            = @($ostFiles).Count
+        ThunderbirdCount    = @($thunderbirdProfiles).Count
+        PstBytes            = [double]((@($pstFiles) | Measure-Object -Property Bytes -Sum).Sum)
+        OstBytes            = [double]((@($ostFiles) | Measure-Object -Property Bytes -Sum).Sum)
+        OstNote             = 'OST files are detected for awareness, but are usually cache data and not a primary migration target.'
+    }
+}
+
+function Get-WinPulseBrowserSignals {
+    [CmdletBinding()]
+    param(
+        [array]$profiles
+    )
+
+    $browsers = @()
+    foreach ($profile in @($profiles)) {
+        $targets = @(
+            @{ Name = 'Chrome'; Relative = @('AppData', 'Local', 'Google', 'Chrome', 'User Data') },
+            @{ Name = 'Edge'; Relative = @('AppData', 'Local', 'Microsoft', 'Edge', 'User Data') },
+            @{ Name = 'Firefox'; Relative = @('AppData', 'Roaming', 'Mozilla', 'Firefox', 'Profiles') },
+            @{ Name = 'Brave'; Relative = @('AppData', 'Local', 'BraveSoftware', 'Brave-Browser', 'User Data') }
+        )
+
+        foreach ($target in $targets) {
+            $path = Join-WinPulsePath -path $profile.ProfilePath -childpath $target['Relative']
+            $size = Get-WinPulsePathSize -path $path
+            $browsers += [pscustomobject][ordered]@{
+                UserName = $profile.UserName
+                Browser  = $target['Name']
+                Path     = $path
+                Exists   = [bool]$size.Exists
+                Bytes    = [double]$size.Bytes
+                Size     = $size.Size
+            }
+        }
+    }
+
+    return @($browsers)
+}
+
+function Get-WinPulseNetworkMigrationSignals {
+    [CmdletBinding()]
+    param(
+        [array]$profiles
+    )
+
+    $wifiNames = @()
+    $netshAvailable = [bool](Get-Command -Name netsh.exe -ErrorAction SilentlyContinue)
+    if ($netshAvailable) {
+        try {
+            $output = & netsh.exe wlan show profiles 2>$null
+            foreach ($line in @($output)) {
+                $match = [regex]::Match([string]$line, ':\s*(.+)$')
+                if ($line -match 'Profile' -and $match.Success) {
+                    $name = $match.Groups[1].Value.Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($name)) {
+                        $wifiNames += $name
+                    }
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    $vpnPhonebooks = @()
+    $programDataPath = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+    $globalPbk = Join-WinPulsePath -path $programDataPath -childpath @('Microsoft', 'Network', 'Connections', 'Pbk', 'rasphone.pbk')
+    foreach ($candidate in @($globalPbk)) {
+        $size = Get-WinPulsePathSize -path $candidate
+        if ($size.Exists) {
+            $vpnPhonebooks += [pscustomobject][ordered]@{
+                Scope = 'ProgramData'
+                UserName = $null
+                Path = $candidate
+                Exists = $true
+                Bytes = [double]$size.Bytes
+                Size = $size.Size
+            }
+        }
+    }
+
+    foreach ($profile in @($profiles)) {
+        $candidate = Join-WinPulsePath -path $profile.ProfilePath -childpath @('AppData', 'Roaming', 'Microsoft', 'Network', 'Connections', 'Pbk', 'rasphone.pbk')
+        $size = Get-WinPulsePathSize -path $candidate
+        if ($size.Exists) {
+            $vpnPhonebooks += [pscustomobject][ordered]@{
+                Scope = 'User'
+                UserName = $profile.UserName
+                Path = $candidate
+                Exists = $true
+                Bytes = [double]$size.Bytes
+                Size = $size.Size
+            }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        NetshAvailable     = $netshAvailable
+        WiFiProfilesExist  = (@($wifiNames).Count -gt 0)
+        WiFiProfileNames   = @($wifiNames | Sort-Object -Unique)
+        WiFiProfileCount   = @($wifiNames | Sort-Object -Unique).Count
+        WiFiCredentialNote = 'Preflight lists Wi-Fi profile names only. Keys are not exported.'
+        VpnPhonebooks      = @($vpnPhonebooks)
+        VpnPhonebookCount  = @($vpnPhonebooks).Count
+        VpnCredentialNote  = 'VPN phonebook files are detected only. Credentials are not exported.'
+    }
+}
+
+function Get-WinPulseMigrationApplicationInventory {
+    [CmdletBinding()]
+    param()
+
+    $regPaths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $seen = @{}
+    $items = @()
+    foreach ($regPath in $regPaths) {
+        try {
+            foreach ($entry in (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)) {
+                $displayName = if ($entry.PSObject.Properties['DisplayName']) { [string]$entry.PSObject.Properties['DisplayName'].Value } else { $null }
+                if ([string]::IsNullOrWhiteSpace($displayName)) { continue }
+
+                $displayVersion = if ($entry.PSObject.Properties['DisplayVersion']) { [string]$entry.PSObject.Properties['DisplayVersion'].Value } else { '' }
+                $publisher = if ($entry.PSObject.Properties['Publisher']) { [string]$entry.PSObject.Properties['Publisher'].Value } else { '' }
+                $installLocation = if ($entry.PSObject.Properties['InstallLocation']) { [string]$entry.PSObject.Properties['InstallLocation'].Value } else { '' }
+                $hasUninstallString = ($null -ne $entry.PSObject.Properties['UninstallString'] -and -not [string]::IsNullOrWhiteSpace([string]$entry.PSObject.Properties['UninstallString'].Value))
+
+                $dedupeKey = '{0}|{1}|{2}' -f $displayName, $displayVersion, $publisher
+                if ($seen.ContainsKey($dedupeKey)) { continue }
+                $seen[$dedupeKey] = $true
+
+                $items += [pscustomobject][ordered]@{
+                    DisplayName        = $displayName
+                    DisplayVersion     = if ($displayVersion) { $displayVersion } else { 'N/A' }
+                    Publisher          = if ($publisher) { $publisher } else { 'N/A' }
+                    InstallLocation    = if ($installLocation) { $installLocation } else { 'N/A' }
+                    HasUninstallString = [bool]$hasUninstallString
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    $wingetCommand = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
+    return [pscustomobject][ordered]@{
+        Items             = @($items | Sort-Object DisplayName)
+        Count             = @($items).Count
+        WingetAvailable   = [bool]$wingetCommand
+        WingetPath        = if ($wingetCommand) { [string]$wingetCommand.Source } else { $null }
+        WingetListRun     = $false
+        WingetListNote    = 'winget list is not run by default in this preflight milestone to keep collection predictable.'
+    }
+}
+
+function Get-WinPulseDeveloperHints {
+    [CmdletBinding()]
+    param(
+        [array]$profiles
+    )
+
+    $hints = @()
+    $relativeTargets = @(
+        @{ Label = '.ssh'; Relative = @('.ssh') },
+        @{ Label = '.gitconfig'; Relative = @('.gitconfig') },
+        @{ Label = '.aws'; Relative = @('.aws') },
+        @{ Label = '.azure'; Relative = @('.azure') },
+        @{ Label = '.kube'; Relative = @('.kube') },
+        @{ Label = '.docker'; Relative = @('.docker') },
+        @{ Label = '.npmrc'; Relative = @('.npmrc') },
+        @{ Label = '.wslconfig'; Relative = @('.wslconfig') },
+        @{ Label = 'VS Code user settings'; Relative = @('AppData', 'Roaming', 'Code', 'User', 'settings.json') },
+        @{ Label = 'Windows Terminal settings'; Relative = @('AppData', 'Local', 'Packages', 'Microsoft.WindowsTerminal_8wekyb3d8bbwe', 'LocalState', 'settings.json') },
+        @{ Label = 'Windows Terminal Preview settings'; Relative = @('AppData', 'Local', 'Packages', 'Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe', 'LocalState', 'settings.json') }
+    )
+
+    foreach ($profile in @($profiles)) {
+        foreach ($target in $relativeTargets) {
+            $path = Join-WinPulsePath -path $profile.ProfilePath -childpath $target['Relative']
+            $size = Get-WinPulsePathSize -path $path
+            $hints += [pscustomobject][ordered]@{
+                UserName = $profile.UserName
+                Item     = $target['Label']
+                Path     = $path
+                Exists   = [bool]$size.Exists
+                Bytes    = [double]$size.Bytes
+                Size     = $size.Size
+            }
+        }
+    }
+
+    return @($hints)
+}
+
+function New-WinPulseMigrationRiskSummary {
+    [CmdletBinding()]
+    param(
+        [array]$profiles,
+        [array]$oneDrive,
+        [pscustomobject]$email,
+        [array]$browsers,
+        [pscustomobject]$network,
+        [pscustomobject]$applications,
+        [pscustomobject]$windows11Readiness
+    )
+
+    $profileRows = @($profiles)
+    $totalUserBytes = [double]0
+    foreach ($profile in $profileRows) {
+        $totalUserBytes += [double]$profile.EstimatedTotalBytes
+    }
+
+    $largeProfiles = @($profileRows | Where-Object { [double]$_.EstimatedTotalBytes -ge 50GB })
+    $pstCount = if ($email) { [int]$email.PstCount } else { 0 }
+    $ostCount = if ($email) { [int]$email.OstCount } else { 0 }
+    $oneDriveLikelyCount = @(@($oneDrive) | Where-Object { $_.PotentialKFMStatus -eq 'Likely enabled' }).Count
+    $browserProfilesFound = @(@($browsers) | Where-Object { $_.Exists }).Count
+    $vpnProfilesFound = if ($network) { [int]$network.VpnPhonebookCount } else { 0 }
+    $wifiProfilesFound = if ($network) { [int]$network.WiFiProfileCount } else { 0 }
+    $wingetAvailable = if ($applications) { [bool]$applications.WingetAvailable } else { $false }
+    $readinessStatus = if ($windows11Readiness) { $windows11Readiness.Recommendation } else { 'Unknown' }
+    $pendingReboot = if ($windows11Readiness) { [bool]$windows11Readiness.PendingReboot } else { $false }
+
+    $approach = 'Needs manual review'
+    if ($readinessStatus -eq 'Unknown') {
+        $approach = 'Not enough information'
+    }
+    elseif ($readinessStatus -eq 'Ready' -and $largeProfiles.Count -eq 0 -and $pstCount -eq 0 -and $oneDriveLikelyCount -gt 0) {
+        $approach = 'In-place upgrade'
+    }
+    elseif ($readinessStatus -eq 'Not ready' -or $largeProfiles.Count -gt 0 -or $pstCount -gt 0) {
+        $approach = 'Clean install with backup/restore'
+    }
+
+    return [pscustomobject][ordered]@{
+        TotalEstimatedUserDataBytes = $totalUserBytes
+        TotalEstimatedUserDataSize  = ConvertTo-ReadableSize -bytes $totalUserBytes
+        UserProfileCount            = $profileRows.Count
+        LargeProfileThreshold       = '50 GB'
+        LargeProfiles               = @($largeProfiles | ForEach-Object { $_.UserName })
+        PstFilesFound               = $pstCount
+        OstFilesFound               = $ostCount
+        OneDriveKFMLikelyEnabled    = $oneDriveLikelyCount
+        BrowserProfilesFound        = $browserProfilesFound
+        VpnProfilesFound            = $vpnProfilesFound
+        WiFiProfilesFound           = $wifiProfilesFound
+        WingetAvailable             = $wingetAvailable
+        Windows11ReadinessStatus    = $readinessStatus
+        PendingReboot               = $pendingReboot
+        RecommendedMigrationApproach = $approach
+    }
+}
+
+function Export-WinPulseMigrationPreflightJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$report,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $report | ConvertTo-Json -Depth 12 | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationPreflightText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$report,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $computer = $report.Computer
+    $readiness = $report.Windows11Readiness
+    $migration = $report.Migration
+    $risk = $migration.RiskSummary
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    $lines.Add('WinPulse Migration Preflight')
+    $lines.Add(('Generated: {0}' -f $report.Tool.GeneratedAt))
+    $lines.Add('')
+    $lines.Add(('Machine: {0}' -f $computer.ComputerName))
+    $lines.Add(('User: {0}' -f $computer.CurrentUser))
+    $lines.Add(('OS: {0} {1} (Build {2})' -f $computer.OSCaption, $computer.OSVersion, $computer.OSBuild))
+    $lines.Add(('Domain/Workgroup: {0}' -f $computer.DomainOrWorkgroup))
+    $lines.Add('')
+    $lines.Add(('Windows 11 readiness: {0}' -f $readiness.Recommendation))
+    $lines.Add(('TPM: present={0}, ready={1}, version={2}' -f $readiness.TPM.Present, $readiness.TPM.Ready, $readiness.TPM.SpecVersion))
+    $lines.Add(('Secure Boot: {0}' -f $readiness.SecureBootState))
+    $lines.Add(('Firmware: {0}' -f $readiness.FirmwareMode))
+    $lines.Add(('RAM: {0}' -f $readiness.RamSize))
+    $lines.Add(('System drive free: {0}' -f $readiness.SystemDriveFree))
+    $lines.Add('')
+    $lines.Add('User profiles:')
+    foreach ($profile in @($migration.Profiles)) {
+        $lines.Add(('- {0}: {1} total | Desktop {2} | Documents {3} | Downloads {4}' -f
+                $profile.UserName, $profile.EstimatedTotalSize, $profile.DesktopSize, $profile.DocumentsSize, $profile.DownloadsSize))
+    }
+    if (@($migration.Profiles).Count -eq 0) {
+        $lines.Add('- No user profiles detected under C:\Users.')
+    }
+    $lines.Add('')
+    $lines.Add('Major risks:')
+    $largeProfileText = if ($risk.LargeProfiles.Count -gt 0) { $risk.LargeProfiles -join ', ' } else { 'none' }
+    $lines.Add(('- Total estimated user data: {0}' -f $risk.TotalEstimatedUserDataSize))
+    $lines.Add(('- Large profiles: {0}' -f $largeProfileText))
+    $lines.Add(('- PST files: {0}' -f $risk.PstFilesFound))
+    $lines.Add(('- OST files: {0} (usually cache, not primary migration target)' -f $risk.OstFilesFound))
+    $lines.Add(('- OneDrive/KFM likely enabled profiles: {0}' -f $risk.OneDriveKFMLikelyEnabled))
+    $lines.Add(('- Browser profiles found: {0}' -f $risk.BrowserProfilesFound))
+    $lines.Add(('- VPN phonebooks found: {0}' -f $risk.VpnProfilesFound))
+    $lines.Add(('- Wi-Fi profiles found: {0}' -f $risk.WiFiProfilesFound))
+    $lines.Add(('- winget available: {0}' -f $risk.WingetAvailable))
+    $lines.Add(('- Pending reboot: {0}' -f $risk.PendingReboot))
+    $lines.Add('')
+    $lines.Add(('Recommended next action: {0}' -f $risk.RecommendedMigrationApproach))
+    $lines.Add('')
+    $lines.Add('Notes:')
+    $lines.Add('- Preflight is read-only.')
+    $lines.Add('- Wi-Fi keys, VPN credentials, browser passwords, DPAPI secrets, and private keys are not exported.')
+    $lines.Add('- See migration-preflight.json for full machine-readable details.')
+
+    $lines | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationPreflightHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$report,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $computer = $report.Computer
+    $readiness = $report.Windows11Readiness
+    $migration = $report.Migration
+    $risk = $migration.RiskSummary
+    $checks = @($report.Checks)
+    $warnings = @($checks | Where-Object { $_.Status -ne 'Pass' })
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append(@'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WinPulse Migration Preflight</title>
+<style>
+:root{--bg:#111827;--panel:#182233;--panel2:#101826;--border:#334155;--text:#e5e7eb;--muted:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--info:#38bdf8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Tahoma,sans-serif;line-height:1.45}
+.container{max-width:1180px;margin:0 auto;padding:24px}
+header{border-bottom:2px solid var(--border);padding-bottom:18px;margin-bottom:18px}
+h1{font-size:1.8rem;margin:0 0 6px;color:var(--info)}
+h2{font-size:1.05rem;margin:0 0 10px;color:var(--info)}
+h3{font-size:.92rem;margin:14px 0 6px;color:var(--muted)}
+section{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:16px;margin:0 0 14px}
+.subtitle,.empty,footer{color:var(--muted)}
+.badge{display:inline-block;border:1px solid var(--border);border-radius:4px;padding:4px 9px;margin:4px 8px 4px 0;font-weight:600}
+.ready{color:var(--ok);border-color:var(--ok)}.attention{color:var(--warn);border-color:var(--warn)}.notready{color:var(--crit);border-color:var(--crit)}.unknown{color:var(--muted)}
+.kv{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:5px 18px}
+.k{color:var(--muted);font-weight:600}.v{color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}
+th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px;border-bottom:1px solid var(--border)}
+td{padding:7px;border-bottom:1px solid rgba(148,163,184,.16);vertical-align:top}
+tr:hover td{background:rgba(255,255,255,.025)}
+ul{margin:0;padding-left:20px}
+code{color:var(--info)}
+footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margin-top:18px}
+@media print{body{background:#fff;color:#111}.container{max-width:none;padding:10px}section{background:#fff;border-color:#ccc;break-inside:avoid}.subtitle,.empty,footer,.k,th{color:#555}th{background:#eee}.v,td{color:#111}}
+</style>
+</head>
+<body>
+<div class="container">
+'@)
+
+    $readinessClass = switch ($readiness.Recommendation) {
+        'Ready' { 'ready' }
+        'Needs attention' { 'attention' }
+        'Not ready' { 'notready' }
+        default { 'unknown' }
+    }
+
+    [void]$sb.Append(('<header><h1>WinPulse Migration Preflight</h1><div class="subtitle">{0} | {1} | WinPulse {2}</div>' -f
+            (ConvertTo-WinPulseHtmlText -value $computer.ComputerName),
+            (ConvertTo-WinPulseHtmlText -value $report.Tool.GeneratedAt),
+            (ConvertTo-WinPulseHtmlText -value $report.Tool.Version)))
+    [void]$sb.Append(('<div class="badge {0}">Windows 11: {1}</div>' -f $readinessClass, (ConvertTo-WinPulseHtmlText -value $readiness.Recommendation)))
+    [void]$sb.Append(('<div class="badge">Approach: {0}</div></header>' -f (ConvertTo-WinPulseHtmlText -value $risk.RecommendedMigrationApproach)))
+
+    [void]$sb.Append('<section><h2>Executive Summary</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Machine' -value $computer.ComputerName
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'OS' -value ('{0} {1} (Build {2})' -f $computer.OSCaption, $computer.OSVersion, $computer.OSBuild)
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Profiles' -value $risk.UserProfileCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Estimated user data' -value $risk.TotalEstimatedUserDataSize
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'PST / OST files' -value ('{0} / {1}' -f $risk.PstFilesFound, $risk.OstFilesFound)
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Recommended approach' -value $risk.RecommendedMigrationApproach
+    [void]$sb.Append('</div></section>')
+
+    [void]$sb.Append('<section><h2>Windows 11 Readiness</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Recommendation' -value $readiness.Recommendation
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'TPM' -value ('present={0}, ready={1}, version={2}' -f $readiness.TPM.Present, $readiness.TPM.Ready, $readiness.TPM.SpecVersion)
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Secure Boot' -value $readiness.SecureBootState
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Firmware' -value $readiness.FirmwareMode
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'RAM' -value $readiness.RamSize
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'System drive free' -value $readiness.SystemDriveFree
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'CPU' -value $readiness.CPUModel
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Partition style' -value $readiness.DiskPartitionStyle
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Pending reboot' -value $readiness.PendingReboot
+    [void]$sb.Append('</div>')
+    if ($readiness.Blockers.Count -gt 0) { [void]$sb.Append(('<h3>Blockers</h3><p>{0}</p>' -f (ConvertTo-WinPulseHtmlText -value ($readiness.Blockers -join '; ')))) }
+    if ($readiness.Warnings.Count -gt 0) { [void]$sb.Append(('<h3>Warnings</h3><p>{0}</p>' -f (ConvertTo-WinPulseHtmlText -value ($readiness.Warnings -join '; ')))) }
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Migration Risk Summary</h2><div class="kv">')
+    foreach ($prop in @('TotalEstimatedUserDataSize', 'UserProfileCount', 'LargeProfiles', 'PstFilesFound', 'OstFilesFound', 'OneDriveKFMLikelyEnabled', 'BrowserProfilesFound', 'VpnProfilesFound', 'WiFiProfilesFound', 'WingetAvailable', 'Windows11ReadinessStatus', 'PendingReboot', 'RecommendedMigrationApproach')) {
+        $value = Get-WinPulseObjectValue -inputobject $risk -name $prop
+        if ($value -is [array]) { $value = if ($value.Count -gt 0) { $value -join ', ' } else { 'none' } }
+        Add-WinPulseMigrationHtmlKv -builder $sb -key $prop -value $value
+    }
+    [void]$sb.Append('</div></section>')
+
+    [void]$sb.Append('<section><h2>User Profiles</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Profiles -columns @('UserName', 'ProfilePath', 'EstimatedTotalSize', 'DesktopSize', 'DocumentsSize', 'DownloadsSize', 'PicturesSize', 'VideosSize', 'MusicSize', 'AppDataSize')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>OneDrive/Known Folder Move Signals</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.OneDrive -columns @('UserName', 'OneDrivePathCount', 'KFMFoldersDetected', 'PotentialKFMStatus')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Email Data</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'PST files' -value $migration.Email.PstCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'OST files' -value $migration.Email.OstCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Thunderbird profiles' -value $migration.Email.ThunderbirdCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'OST note' -value $migration.Email.OstNote
+    [void]$sb.Append('</div><h3>PST Files</h3>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Email.PstFiles -columns @('UserName', 'Path', 'Size', 'LastWriteTime')))
+    [void]$sb.Append('<h3>OST Files</h3>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Email.OstFiles -columns @('UserName', 'Path', 'Size', 'MigrationNote')))
+    [void]$sb.Append('<h3>Thunderbird Profiles</h3>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Email.ThunderbirdProfiles -columns @('UserName', 'Path', 'Size', 'LastWriteTime')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Browsers</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Browsers -columns @('UserName', 'Browser', 'Exists', 'Size', 'Path')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Network Profiles</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Wi-Fi profiles' -value $migration.Network.WiFiProfileCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Wi-Fi names' -value ($migration.Network.WiFiProfileNames -join ', ')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'VPN phonebooks' -value $migration.Network.VpnPhonebookCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Credential note' -value $migration.Network.WiFiCredentialNote
+    [void]$sb.Append('</div>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $migration.Network.VpnPhonebooks -columns @('Scope', 'UserName', 'Path', 'Size')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Application Inventory Summary</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Installed applications' -value $migration.Applications.Count
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'winget available' -value $migration.Applications.WingetAvailable
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'winget note' -value $migration.Applications.WingetListNote
+    [void]$sb.Append('</div><h3>Installed Applications</h3>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data (@($migration.Applications.Items) | Select-Object -First 150) -columns @('DisplayName', 'DisplayVersion', 'Publisher', 'InstallLocation', 'HasUninstallString')))
+    if ($migration.Applications.Count -gt 150) {
+        [void]$sb.Append(('<p class="empty">Showing first 150 applications. Full list is in migration-preflight.json.</p>'))
+    }
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Developer/Config Hints</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data (@($migration.DeveloperHints) | Where-Object { $_.Exists }) -columns @('UserName', 'Item', 'Exists', 'Size', 'Path')))
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Errors/Warnings</h2>')
+    if ($warnings.Count -eq 0 -and @($report.Errors).Count -eq 0) {
+        [void]$sb.Append('<p class="ready">No collection warnings recorded.</p>')
+    }
+    else {
+        [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $warnings -columns @('Id', 'Status', 'Severity', 'Summary', 'Recommendation')))
+        if (@($report.Errors).Count -gt 0) {
+            [void]$sb.Append('<h3>Collector Errors</h3>')
+            [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $report.Errors -columns @('Collector', 'Message', 'Timestamp')))
+        }
+    }
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Raw Details</h2><p>Machine-readable data is saved next to this report as <code>migration-preflight.json</code>.</p></section>')
+    [void]$sb.Append(('<footer>Generated by WinPulse {0}</footer>' -f (ConvertTo-WinPulseHtmlText -value $report.Tool.Version)))
+    [void]$sb.Append('</div></body></html>')
+
+    $sb.ToString() | Set-Content -Path $path -Encoding UTF8
+}
+
+function Invoke-WinPulseMigrationPreflight {
+    [CmdletBinding()]
+    param()
+
+    $computerName = Get-WinPulseSafeComputerName
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $exportFolder = Join-Path -Path $script:WinPulsePaths.Exports -ChildPath ('MigrationPreflight-{0}-{1}' -f $computerName, $stamp)
+    $logFolder = Join-Path -Path $exportFolder -ChildPath 'logs'
+    New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
+
+    $jsonPath = Join-Path -Path $exportFolder -ChildPath 'migration-preflight.json'
+    $htmlPath = Join-Path -Path $exportFolder -ChildPath 'migration-preflight.html'
+    $textPath = Join-Path -Path $exportFolder -ChildPath 'migration-preflight.txt'
+    $logPath = Join-Path -Path $logFolder -ChildPath 'migration-preflight.log'
+
+    Write-WinPulseHeader -title 'Migration Preflight'
+    Write-Host '  Read-only collection. No files, credentials, keys, or browser secrets will be exported.' -ForegroundColor Cyan
+    Write-Host ('  Output: {0}' -f $exportFolder) -ForegroundColor DarkGray
+    Write-Host ''
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message 'Migration preflight started.'
+
+    $checks = @()
+    $errors = @()
+
+    $computer = $null
+    try {
+        Write-Host '  Collecting system identity...' -ForegroundColor DarkGray
+        $computer = Get-WinPulseSystemIdentity
+        $checks += New-WinPulseCheckResult -id 'Migration.SystemIdentity' -category 'Migration' -name 'System identity' -status 'Pass' -severity 'Low' -summary ('Collected identity for {0}.' -f $computer.ComputerName) -recommendation 'Use this to identify the exported report folder.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'SystemIdentity' -message $_.Exception.Message
+        $computer = [pscustomobject][ordered]@{ ComputerName = $computerName; CurrentUser = ''; DomainOrWorkgroup = 'Unknown'; OSCaption = 'Unknown'; OSVersion = 'Unknown'; OSBuild = 'Unknown' }
+        $checks += New-WinPulseCheckResult -id 'Migration.SystemIdentity' -category 'Migration' -name 'System identity' -status 'Fail' -severity 'Medium' -summary 'System identity collection failed.' -recommendation 'Review log and run elevated if needed.'
+    }
+
+    $readiness = $null
+    try {
+        Write-Host '  Collecting Windows 11 readiness signals...' -ForegroundColor DarkGray
+        $readiness = Get-WinPulseWindows11Readiness
+        $status = if ($readiness.Recommendation -eq 'Ready') { 'Pass' } elseif ($readiness.Recommendation -eq 'Not ready') { 'Fail' } else { 'Warning' }
+        $severity = if ($status -eq 'Fail') { 'High' } elseif ($status -eq 'Warning') { 'Medium' } else { 'Low' }
+        $checks += New-WinPulseCheckResult -id 'Migration.Windows11Readiness' -category 'Readiness' -name 'Windows 11 readiness' -status $status -severity $severity -summary ('Windows 11 readiness: {0}.' -f $readiness.Recommendation) -evidence $readiness -recommendation 'Review blockers and warnings before upgrade planning.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Windows11Readiness' -message $_.Exception.Message
+        $readiness = [pscustomobject][ordered]@{ Recommendation = 'Unknown'; PendingReboot = $false; TPM = [pscustomobject][ordered]@{ Present = $false; Ready = $false; SpecVersion = 'Unknown' }; Blockers = @(); Warnings = @(); Unknowns = @('Readiness collection failed') }
+        $checks += New-WinPulseCheckResult -id 'Migration.Windows11Readiness' -category 'Readiness' -name 'Windows 11 readiness' -status 'Warning' -severity 'Medium' -summary 'Windows 11 readiness collection failed.' -recommendation 'Validate readiness manually.'
+    }
+
+    $profiles = @()
+    try {
+        Write-Host '  Scanning user profiles and known folders...' -ForegroundColor DarkGray
+        $profiles = @(Get-WinPulseMigrationProfiles)
+        $checks += New-WinPulseCheckResult -id 'Migration.ProfileScan' -category 'Migration' -name 'User profile scan' -status 'Pass' -severity 'Low' -summary ('Found {0} user profiles.' -f $profiles.Count) -evidence ([ordered]@{ Count = $profiles.Count }) -recommendation 'Review large profiles before backup.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Profiles' -message $_.Exception.Message
+        $checks += New-WinPulseCheckResult -id 'Migration.ProfileScan' -category 'Migration' -name 'User profile scan' -status 'Fail' -severity 'High' -summary 'User profile scan failed.' -recommendation 'Check profile permissions and rerun.'
+    }
+
+    $oneDrive = @()
+    try {
+        Write-Host '  Detecting OneDrive/KFM signals...' -ForegroundColor DarkGray
+        $oneDrive = @(Get-WinPulseOneDriveSignals -profiles $profiles)
+        $likelyCount = @($oneDrive | Where-Object { $_.PotentialKFMStatus -eq 'Likely enabled' }).Count
+        $checks += New-WinPulseCheckResult -id 'Migration.OneDriveKFM' -category 'Migration' -name 'OneDrive/KFM detection' -status 'Info' -severity 'Low' -summary ('OneDrive/KFM likely enabled for {0} profiles.' -f $likelyCount) -recommendation 'Verify cloud sync health before wiping or reinstalling.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'OneDrive' -message $_.Exception.Message
+        $checks += New-WinPulseCheckResult -id 'Migration.OneDriveKFM' -category 'Migration' -name 'OneDrive/KFM detection' -status 'Warning' -severity 'Medium' -summary 'OneDrive/KFM detection failed.' -recommendation 'Check OneDrive manually.'
+    }
+
+    $email = $null
+    try {
+        Write-Host '  Detecting PST/OST and Thunderbird data...' -ForegroundColor DarkGray
+        $email = Get-WinPulseEmailDataSignals -profiles $profiles
+        $emailStatus = if ($email.PstCount -gt 0) { 'Warning' } else { 'Info' }
+        $checks += New-WinPulseCheckResult -id 'Migration.EmailData' -category 'Migration' -name 'Email data detection' -status $emailStatus -severity 'Medium' -summary ('Found {0} PST files, {1} OST files, and {2} Thunderbird profiles.' -f $email.PstCount, $email.OstCount, $email.ThunderbirdCount) -recommendation 'Treat PST files as migration targets. OST files are usually cache data.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Email' -message $_.Exception.Message
+        $email = [pscustomobject][ordered]@{ PstFiles = @(); OstFiles = @(); ThunderbirdProfiles = @(); PstCount = 0; OstCount = 0; ThunderbirdCount = 0; PstBytes = 0; OstBytes = 0; OstNote = 'Email collection failed.' }
+        $checks += New-WinPulseCheckResult -id 'Migration.EmailData' -category 'Migration' -name 'Email data detection' -status 'Warning' -severity 'Medium' -summary 'Email data detection failed.' -recommendation 'Search for PST files manually.'
+    }
+
+    $browsers = @()
+    try {
+        Write-Host '  Detecting browser profile roots...' -ForegroundColor DarkGray
+        $browsers = @(Get-WinPulseBrowserSignals -profiles $profiles)
+        $browserCount = @($browsers | Where-Object { $_.Exists }).Count
+        $checks += New-WinPulseCheckResult -id 'Migration.Browsers' -category 'Migration' -name 'Browser profile detection' -status 'Info' -severity 'Low' -summary ('Found {0} browser profile roots.' -f $browserCount) -recommendation 'Do not export browser passwords or DPAPI secrets.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Browsers' -message $_.Exception.Message
+        $checks += New-WinPulseCheckResult -id 'Migration.Browsers' -category 'Migration' -name 'Browser profile detection' -status 'Warning' -severity 'Low' -summary 'Browser profile detection failed.' -recommendation 'Check browser profile paths manually.'
+    }
+
+    $network = $null
+    try {
+        Write-Host '  Detecting Wi-Fi names and VPN phonebooks...' -ForegroundColor DarkGray
+        $network = Get-WinPulseNetworkMigrationSignals -profiles $profiles
+        $checks += New-WinPulseCheckResult -id 'Migration.NetworkProfiles' -category 'Migration' -name 'Network profile detection' -status 'Info' -severity 'Low' -summary ('Found {0} Wi-Fi profiles and {1} VPN phonebooks.' -f $network.WiFiProfileCount, $network.VpnPhonebookCount) -recommendation 'Wi-Fi keys and VPN credentials are intentionally not exported.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Network' -message $_.Exception.Message
+        $network = [pscustomobject][ordered]@{ NetshAvailable = $false; WiFiProfilesExist = $false; WiFiProfileNames = @(); WiFiProfileCount = 0; VpnPhonebooks = @(); VpnPhonebookCount = 0; WiFiCredentialNote = 'Network collection failed.'; VpnCredentialNote = 'Network collection failed.' }
+        $checks += New-WinPulseCheckResult -id 'Migration.NetworkProfiles' -category 'Migration' -name 'Network profile detection' -status 'Warning' -severity 'Low' -summary 'Network profile detection failed.' -recommendation 'Check Wi-Fi and VPN profiles manually.'
+    }
+
+    $applications = $null
+    try {
+        Write-Host '  Reading installed application inventory...' -ForegroundColor DarkGray
+        $applications = Get-WinPulseMigrationApplicationInventory
+        $checks += New-WinPulseCheckResult -id 'Migration.ApplicationInventory' -category 'Migration' -name 'Application inventory' -status 'Info' -severity 'Low' -summary ('Found {0} installed application entries. winget available: {1}.' -f $applications.Count, $applications.WingetAvailable) -recommendation 'Use inventory to plan reinstall list.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'Applications' -message $_.Exception.Message
+        $applications = [pscustomobject][ordered]@{ Items = @(); Count = 0; WingetAvailable = $false; WingetPath = $null; WingetListRun = $false; WingetListNote = 'Application inventory failed.' }
+        $checks += New-WinPulseCheckResult -id 'Migration.ApplicationInventory' -category 'Migration' -name 'Application inventory' -status 'Warning' -severity 'Medium' -summary 'Application inventory failed.' -recommendation 'Check installed applications manually.'
+    }
+
+    $developerHints = @()
+    try {
+        Write-Host '  Detecting developer/config hints...' -ForegroundColor DarkGray
+        $developerHints = @(Get-WinPulseDeveloperHints -profiles $profiles)
+        $hintCount = @($developerHints | Where-Object { $_.Exists }).Count
+        $checks += New-WinPulseCheckResult -id 'Migration.DeveloperHints' -category 'Migration' -name 'Developer/config hints' -status 'Info' -severity 'Low' -summary ('Found {0} developer/config paths.' -f $hintCount) -recommendation 'Review sensitive developer data. Private keys are not exported by preflight.'
+    }
+    catch {
+        $errors += New-WinPulsePreflightError -collector 'DeveloperHints' -message $_.Exception.Message
+        $checks += New-WinPulseCheckResult -id 'Migration.DeveloperHints' -category 'Migration' -name 'Developer/config hints' -status 'Warning' -severity 'Low' -summary 'Developer/config hint detection failed.' -recommendation 'Check developer folders manually.'
+    }
+
+    $risk = New-WinPulseMigrationRiskSummary -profiles $profiles -oneDrive $oneDrive -email $email -browsers $browsers -network $network -applications $applications -windows11Readiness $readiness
+    $migration = [ordered]@{
+        Profiles       = @($profiles)
+        OneDrive       = @($oneDrive)
+        Email          = $email
+        Browsers       = @($browsers)
+        Network        = $network
+        Applications   = $applications
+        DeveloperHints = @($developerHints)
+        RiskSummary    = $risk
+    }
+
+    $report = [pscustomobject][ordered]@{
+        Tool               = [pscustomobject][ordered]@{
+            Name          = 'WinPulse'
+            Version       = $script:WinPulseVersion
+            Mode          = 'MigrationPreflight'
+            GeneratedAt   = (Get-Date).ToString('o')
+            SchemaVersion = '0.1'
+        }
+        Computer           = $computer
+        Windows11Readiness = $readiness
+        Migration          = [pscustomobject]$migration
+        Checks             = @($checks)
+        Errors             = @($errors)
+    }
+
+    Write-Host '  Writing JSON, HTML, text, and log outputs...' -ForegroundColor DarkGray
+    Export-WinPulseMigrationPreflightJson -report $report -path $jsonPath
+    Export-WinPulseMigrationPreflightHtml -report $report -path $htmlPath
+    Export-WinPulseMigrationPreflightText -report $report -path $textPath
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message 'Migration preflight completed.'
+
+    Write-Host ''
+    Write-Host 'Migration preflight complete.' -ForegroundColor Green
+    Write-Host ('  Folder: {0}' -f $exportFolder) -ForegroundColor Green
+    Write-Host ('  JSON:   {0}' -f $jsonPath) -ForegroundColor Gray
+    Write-Host ('  HTML:   {0}' -f $htmlPath) -ForegroundColor Gray
+    Write-Host ('  Text:   {0}' -f $textPath) -ForegroundColor Gray
+
+    return [pscustomobject][ordered]@{
+        ExportFolder = $exportFolder
+        JsonPath      = $jsonPath
+        HtmlPath      = $htmlPath
+        TextPath      = $textPath
+        LogPath       = $logPath
+        Report        = $report
+    }
+}
+
+function Show-WinPulseWindows11Readiness {
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Windows 11 Readiness'
+    $readiness = Get-WinPulseWindows11Readiness
+
+    $color = switch ($readiness.Recommendation) {
+        'Ready' { 'Green' }
+        'Needs attention' { 'Yellow' }
+        'Not ready' { 'Red' }
+        default { 'DarkYellow' }
+    }
+
+    Write-Host ('Recommendation : {0}' -f $readiness.Recommendation) -ForegroundColor $color
+    Write-Host ('TPM            : present={0}, ready={1}, version={2}' -f $readiness.TPM.Present, $readiness.TPM.Ready, $readiness.TPM.SpecVersion) -ForegroundColor Cyan
+    Write-Host ('Secure Boot    : {0}' -f $readiness.SecureBootState) -ForegroundColor Cyan
+    Write-Host ('Firmware       : {0}' -f $readiness.FirmwareMode) -ForegroundColor Cyan
+    Write-Host ('RAM            : {0}' -f $readiness.RamSize) -ForegroundColor Cyan
+    Write-Host ('System Free    : {0}' -f $readiness.SystemDriveFree) -ForegroundColor Cyan
+    Write-Host ('CPU            : {0}' -f $readiness.CPUModel) -ForegroundColor Cyan
+    Write-Host ('Partition      : {0}' -f $readiness.DiskPartitionStyle) -ForegroundColor Cyan
+    Write-Host ('Pending reboot : {0}' -f $readiness.PendingReboot) -ForegroundColor Cyan
+
+    if ($readiness.Blockers.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Blockers:' -ForegroundColor Red
+        foreach ($item in $readiness.Blockers) { Write-Host ('- {0}' -f $item) -ForegroundColor Red }
+    }
+    if ($readiness.Warnings.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Warnings:' -ForegroundColor Yellow
+        foreach ($item in $readiness.Warnings) { Write-Host ('- {0}' -f $item) -ForegroundColor Yellow }
+    }
+    if ($readiness.Unknowns.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Unknown signals:' -ForegroundColor DarkYellow
+        foreach ($item in $readiness.Unknowns) { Write-Host ('- {0}' -f $item) -ForegroundColor DarkYellow }
+    }
+
+    Write-Host ''
+    Write-Host $readiness.Note -ForegroundColor DarkGray
+}
+
+function Export-WinPulseLatestBundle {
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-Path -Path $script:WinPulsePaths.Exports)) {
+        throw 'WinPulse exports folder does not exist yet.'
+    }
+
+    $latestFolder = Get-ChildItem -Path $script:WinPulsePaths.Exports -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if (-not $latestFolder) {
+        throw 'No export folders were found to bundle.'
+    }
+
+    $zipPath = Join-Path -Path $script:WinPulsePaths.Exports -ChildPath ('WinPulseBundle-{0}-{1}.zip' -f (Get-WinPulseSafeComputerName), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    if (Get-Command -Name Compress-Archive -ErrorAction SilentlyContinue) {
+        Compress-Archive -Path $latestFolder.FullName -DestinationPath $zipPath -Force
+    }
+    else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($latestFolder.FullName, $zipPath)
+    }
+
+    Write-Host ('Export bundle created: {0}' -f $zipPath) -ForegroundColor Green
+    return $zipPath
+}
 
 function Show-WindowsUpdateErrorDetails {
     [CmdletBinding()]
@@ -3604,7 +5053,7 @@ function Invoke-WinPulseInstallInWindow {
         foreach ($pkg in $packages) { Write-Host ('[DRY RUN] winget install --id {0}' -f $pkg.Id) -ForegroundColor Cyan }
         return
     }
-    $lines = @("Write-Host 'WinPulse — winget install' -ForegroundColor Cyan; Write-Host ''")
+    $lines = @("Write-Host 'WinPulse - winget install' -ForegroundColor Cyan; Write-Host ''")
     foreach ($pkg in $packages) {
         $locale = if ($pkg.Locale) { " --locale $($pkg.Locale)" } else { '' }
         $lines += "Write-Host 'Installing $($pkg.Name)...' -ForegroundColor White"
@@ -3629,7 +5078,7 @@ function Invoke-WinPulseChocoInstallInWindow {
         return
     }
     $idList = ($pkgs.ChocoId) -join ' '
-    $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    $cmd = "Write-Host 'WinPulse - Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
 }
 
@@ -3727,12 +5176,12 @@ function Show-WinPulseNiniteMenu {
 
     # Step 1: pick categories to browse
     Clear-Host
-    Write-WinPulseHeader -title 'Ninite — Categories'
+    Write-WinPulseHeader -title 'Ninite - Categories'
     $categoryItems = @(foreach ($cat in $categories) {
         $count = @($catalog | Where-Object { $_['Category'] -eq $cat }).Count
         @{ Label = $cat; Key = $cat; Hint = ('{0} apps' -f $count) }
     })
-    $pickedCategories = @(Select-WinPulseMultiMenuItem -Title 'Ninite — Select categories' -Items $categoryItems)
+    $pickedCategories = @(Select-WinPulseMultiMenuItem -Title 'Ninite - Select categories' -Items $categoryItems)
     if ($pickedCategories.Count -eq 0) { return }
 
     # Step 2: for each picked category, pick apps
@@ -3744,8 +5193,8 @@ function Show-WinPulseNiniteMenu {
             @{ Label = $app['Label']; Key = $app['Slug']; Hint = $app['Slug'] }
         })
         Clear-Host
-        Write-WinPulseHeader -title ('Ninite — {0}' -f $cat)
-        $picked = @(Select-WinPulseMultiMenuItem -Title ('{0} — Select apps' -f $cat) -Items $appItems)
+        Write-WinPulseHeader -title ('Ninite - {0}' -f $cat)
+        $picked = @(Select-WinPulseMultiMenuItem -Title ('{0} - Select apps' -f $cat) -Items $appItems)
         if ($picked.Count -gt 0) {
             $selectedSlugs += $picked
         }
@@ -3833,7 +5282,7 @@ function Ensure-WinGet {
 function Test-ChocolateyAvailable {
     [CmdletBinding()]
     param()
-    # Check executable directly — Get-Command only sees PATH of current session
+    # Check executable directly - Get-Command only sees PATH of current session
     $chocoBin = Join-Path $env:ProgramData 'chocolatey\bin'
     $chocoExe = Join-Path $chocoBin 'choco.exe'
     if (Test-Path -Path $chocoExe) {
@@ -3864,7 +5313,7 @@ function Ensure-Chocolatey {
 }
 
 function Show-WinPulseChocoMenu {
-    # Chocolatey search → select → install flow
+    # Chocolatey search -> select -> install flow
     [CmdletBinding()]
     param()
 
@@ -3879,7 +5328,7 @@ function Show-WinPulseChocoMenu {
     while ($true) {
         Clear-Host
         Write-WinPulseHeader -title 'Chocolatey'
-        Write-Host '  Zadej název balíčku (prázdné = zpět):' -ForegroundColor DarkCyan
+        Write-Host '  Zadej nazev balicku (prazdne = zpet):' -ForegroundColor DarkCyan
         Write-Host -NoNewline '  > '
         [Console]::CursorVisible = $true
         $term = (Read-Host).Trim()
@@ -3887,21 +5336,21 @@ function Show-WinPulseChocoMenu {
         if ($term -eq '') { return }
 
         Clear-Host
-        Write-WinPulseHeader -title ('Chocolatey — hledám: {0}' -f $term)
-        Write-Host '  Vyhledávám...' -ForegroundColor DarkGray
+        Write-WinPulseHeader -title ('Chocolatey - hledam: {0}' -f $term)
+        Write-Host '  Vyhledavam...' -ForegroundColor DarkGray
 
         $searchOutput = @()
         try {
             $searchOutput = @(& choco search $term --limit-output 2>&1 | Where-Object { $_ -match '^\S+\|' })
         }
         catch {
-            Write-Host ('  Chyba při vyhledávání: {0}' -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host ('  Chyba pri vyhledavani: {0}' -f $_.Exception.Message) -ForegroundColor Red
             Wait-WinPulseKey
             continue
         }
 
         if ($searchOutput.Count -eq 0) {
-            Write-Host '  Žádné výsledky.' -ForegroundColor Yellow
+            Write-Host '  Zadne vysledky.' -ForegroundColor Yellow
             Wait-WinPulseKey
             continue
         }
@@ -3914,16 +5363,16 @@ function Show-WinPulseChocoMenu {
         } | Where-Object { $_ })
 
         if ($pkgItems.Count -eq 0) {
-            Write-Host '  Žádné výsledky.' -ForegroundColor Yellow
+            Write-Host '  Zadne vysledky.' -ForegroundColor Yellow
             Wait-WinPulseKey
             continue
         }
 
-        $selected = @(Select-WinPulseMultiMenuItem -Title ('Chocolatey — výsledky: {0}' -f $term) -Items $pkgItems)
+        $selected = @(Select-WinPulseMultiMenuItem -Title ('Chocolatey - vysledky: {0}' -f $term) -Items $pkgItems)
         if ($selected.Count -eq 0) { continue }
 
         $idList = $selected -join ' '
-        $cmd = "Write-Host 'WinPulse — Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Hotovo. Stiskni Enter pro zavření.' -ForegroundColor Green; Read-Host"
+        $cmd = "Write-Host 'WinPulse - Chocolatey install' -ForegroundColor Cyan; Write-Host ''; choco install $idList -y --force; Write-Host ''; Write-Host 'Hotovo. Stiskni Enter pro zavreni.' -ForegroundColor Green; Read-Host"
         Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Verb RunAs -Wait
         return
     }
@@ -4085,7 +5534,7 @@ function Invoke-WinPulseCustomInstall {
 
     $catalog = @(Get-WinPulsePackageCatalog)
     $menuItems = @($catalog | ForEach-Object { @{ Label = $_.Name; Key = $_.Id; Hint = $_.Category } })
-    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Install — Space to toggle, Enter to confirm' -Items $menuItems)
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Install - Space to toggle, Enter to confirm' -Items $menuItems)
     if ($selectedKeys.Count -eq 0) { return }
 
     $selected = @($catalog | Where-Object { $selectedKeys -contains $_.Id })
@@ -4106,13 +5555,13 @@ function Invoke-WinPulseCustomUninstall {
     }
 
     $menuItems = @($installed | ForEach-Object { @{ Label = $_.Name; Key = $_.Id; Hint = $_.Category } })
-    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Uninstall — Space to toggle, Enter to confirm' -Items $menuItems)
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Uninstall - Space to toggle, Enter to confirm' -Items $menuItems)
     if ($selectedKeys.Count -eq 0) { return }
 
     $selected = @($installed | Where-Object { $selectedKeys -contains $_.Id })
 
     if (-not $dryrun) {
-        $cmd = "Write-Host 'WinPulse — winget uninstall' -ForegroundColor Cyan; Write-Host ''"
+        $cmd = "Write-Host 'WinPulse - winget uninstall' -ForegroundColor Cyan; Write-Host ''"
         foreach ($pkg in $selected) {
             $cmd += "; Write-Host 'Uninstalling $($pkg.Name)...' -ForegroundColor White; winget uninstall --id '$($pkg.Id)' --silent"
         }
@@ -4127,7 +5576,7 @@ function Update-AllApplications {
     [CmdletBinding()]
     param()
 
-    $cmd = "Write-Host 'WinPulse — winget upgrade --all' -ForegroundColor Cyan; Write-Host ''; winget upgrade --all --accept-source-agreements --accept-package-agreements; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
+    $cmd = "Write-Host 'WinPulse - winget upgrade --all' -ForegroundColor Cyan; Write-Host ''; winget upgrade --all --accept-source-agreements --accept-package-agreements; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Wait
 }
 
@@ -4229,7 +5678,7 @@ function Install-WinPulseOffice {
 
     Clear-Host
     Write-WinPulseHeader -title 'Office Install'
-    $yearChoice = Select-WinPulseMenuItem -Title 'Office Install — Version' -Items @(
+    $yearChoice = Select-WinPulseMenuItem -Title 'Office Install - Version' -Items @(
         @{ Label = 'Office 2021';     Key = '1'; Hint = 'Perpetual' },
         @{ Label = 'Office 2024';     Key = '4'; Hint = 'Perpetual' },
         @{ Label = 'Microsoft 365';   Key = '3'; Hint = 'Subscription' }
@@ -4252,7 +5701,7 @@ function Install-WinPulseOffice {
     })
     Clear-Host
     Write-WinPulseHeader -title 'Office Install'
-    $edKey = Select-WinPulseMenuItem -Title ('Office {0} — Edition' -f $selectedYear) -Items $editionItems
+    $edKey = Select-WinPulseMenuItem -Title ('Office {0} - Edition' -f $selectedYear) -Items $editionItems
     if (-not $edKey) { return }
 
     $selection = $filtered | Where-Object {
@@ -4307,7 +5756,7 @@ function Uninstall-WinPulseOffice {
 
     Clear-Host
     Write-WinPulseHeader -title 'Office Uninstall'
-    Write-Host '  Odstraní všechny produkty Office (Click-to-Run). Tiché odstranění.' -ForegroundColor Yellow
+    Write-Host '  Odstrani vsechny produkty Office (Click-to-Run). Tiche odstraneni.' -ForegroundColor Yellow
     Write-Host ''
     $confirm = Select-WinPulseMenuItem -Title 'Uninstall Office?' -Items @(
         @{ Label = 'Yes, uninstall'; Key = 'Y'; Hint = 'Removes all Office' },
@@ -4570,7 +6019,7 @@ function Remove-WinPulseCompletely {
     param()
 
     $confirm = Select-WinPulseMenuItem -Title '!! Remove WinPulse folder completely !!' -Items @(
-        @{ Label = 'YES — delete C:\ProgramData\WinPulse'; Key = 'Y'; Hint = 'Irreversible'; Color = 'Red' },
+        @{ Label = 'YES - delete C:\ProgramData\WinPulse'; Key = 'Y'; Hint = 'Irreversible'; Color = 'Red' },
         @{ Separator = $true },
         @{ Label = 'Cancel'; Key = 'C'; Color = 'DarkGray' }
     )
@@ -5648,7 +7097,8 @@ function Show-WinPulseExportMenu {
     while ($true) {
         $choice = Select-WinPulseMenuItem -Title 'Export' -Items @(
             @{ Label = 'Export Scan JSON';    Key = 'J'; Hint = '.json' },
-            @{ Label = 'Export HTML Report';  Key = 'H'; Hint = '.html' }
+            @{ Label = 'Export HTML Report';  Key = 'H'; Hint = '.html' },
+            @{ Label = 'Export Bundle ZIP';   Key = 'B'; Hint = 'latest folder' }
         )
         if (-not $choice) { return }
         switch ($choice) {
@@ -5660,6 +7110,11 @@ function Show-WinPulseExportMenu {
             }
             'H' {
                 Export-WinPulseHtmlReport -scan $scan
+                Wait-WinPulseKey
+            }
+            'B' {
+                try { Export-WinPulseLatestBundle | Out-Null }
+                catch { Write-Host ("  Export bundle failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }
                 Wait-WinPulseKey
             }
             default { return }
@@ -5678,6 +7133,8 @@ function Show-WinPulseMainMenu {
         Show-WinPulseDashboard -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Main Menu' -Items @(
             @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'System health' },
+            @{ Label = 'W11 readiness';     Key = 'A'; Hint = 'Upgrade signals' },
+            @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
@@ -5689,6 +7146,8 @@ function Show-WinPulseMainMenu {
         )
         switch ($choice) {
             'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Wait-WinPulseKey }
+            'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
+            'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
@@ -5711,7 +7170,7 @@ function Show-WinPulseFindingsDetail {
     Clear-Host
     Write-WinPulseHeader -title 'Findings & Details'
 
-    # ── Problematic drivers ──────────────────────────────────────────────────
+    # -- Problematic drivers --------------------------------------------------
     if ($scan.Drivers -and $scan.Drivers.Problematic.Count -gt 0) {
         Write-Host '  Problematic drivers:' -ForegroundColor DarkCyan
         foreach ($d in $scan.Drivers.Problematic) {
@@ -5720,7 +7179,7 @@ function Show-WinPulseFindingsDetail {
         Write-Host ''
     }
 
-    # ── Failed auto-start services ───────────────────────────────────────────
+    # -- Failed auto-start services -------------------------------------------
     if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 0) {
         Write-Host '  Failed auto-start services:' -ForegroundColor DarkCyan
         foreach ($s in $scan.Startup.FailedAutoServices) {
@@ -5729,7 +7188,7 @@ function Show-WinPulseFindingsDetail {
         Write-Host ''
     }
 
-    # ── Stuck print jobs ─────────────────────────────────────────────────────
+    # -- Stuck print jobs -----------------------------------------------------
     if ($scan.Printers -and $scan.Printers.StuckJobs.Count -gt 0) {
         Write-Host '  Stuck print jobs:' -ForegroundColor DarkCyan
         foreach ($j in $scan.Printers.StuckJobs) {
@@ -5738,7 +7197,7 @@ function Show-WinPulseFindingsDetail {
         Write-Host ''
     }
 
-    # ── Other findings ───────────────────────────────────────────────────────
+    # -- Other findings -------------------------------------------------------
     $otherFindings = @(Get-WinPulseTriageFindings -scan $scan | Where-Object {
         $msg = $_.Message
         -not ($msg -match '^Problematic device drivers') -and
@@ -5760,7 +7219,7 @@ function Show-WinPulseFindingsDetail {
         Write-Host ''
     }
 
-    # ── Scan errors ──────────────────────────────────────────────────────────
+    # -- Scan errors ----------------------------------------------------------
     if ($scan.Errors.Count -gt 0) {
         Write-Host '  Scan errors:' -ForegroundColor DarkCyan
         foreach ($e in $scan.Errors) {
@@ -5769,7 +7228,7 @@ function Show-WinPulseFindingsDetail {
         Write-Host ''
     }
 
-    # ── System details ───────────────────────────────────────────────────────
+    # -- System details -------------------------------------------------------
     Write-Host '  System Details:' -ForegroundColor DarkCyan
     Write-Host ('    Hostname : {0}' -f $scan.System.Hostname) -ForegroundColor White
     Write-Host ('    OS       : {0}' -f $scan.System.WindowsVersion) -ForegroundColor White
@@ -5802,6 +7261,8 @@ function Show-WinPulseTriageMenu {
         Show-WinPulseDashboard -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
             @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
+            @{ Label = 'W11 readiness';      Key = 'A'; Hint = 'Upgrade signals' },
+            @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
             @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
             @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
@@ -5812,6 +7273,8 @@ function Show-WinPulseTriageMenu {
         switch ($choice) {
             'R' { $scan = Invoke-CoreScan }
             'F' { Show-WinPulseFindingsDetail -scan $scan }
+            'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
+            'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
@@ -5847,6 +7310,56 @@ function Show-WinPulseSafeActions {
     }
 }
 
+function Invoke-WinPulseMode {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'ExportBundle')]
+        [string]$mode
+    )
+
+    switch ($mode) {
+        'Triage' {
+            Clear-Host
+            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
+            Write-Host ''
+            Write-Host '  Nacitam systemove informace...' -ForegroundColor DarkGray
+
+            Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
+            $scan = Invoke-CoreScan
+            Show-WinPulseTriageMenu -scan $scan
+        }
+        'Repair' {
+            Clear-Host
+            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
+            Write-Host ''
+            Write-Host '  Nacitam systemove informace...' -ForegroundColor DarkGray
+
+            Write-Log -level 'INFO' -message ('WinPulse {0} starting repair-mode scan.' -f $script:WinPulseVersion)
+            $scan = Invoke-CoreScan
+            Invoke-WinPulseRepairs -scan $scan | Out-Null
+        }
+        'W11Readiness' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running Windows 11 readiness mode.' -f $script:WinPulseVersion)
+            Show-WinPulseWindows11Readiness
+        }
+        'MigrationPreflight' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running migration preflight mode.' -f $script:WinPulseVersion)
+            Invoke-WinPulseMigrationPreflight | Out-Null
+        }
+        'ExportBundle' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
+            try {
+                Export-WinPulseLatestBundle | Out-Null
+            }
+            catch {
+                Write-Host ('Export bundle failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
+                throw
+            }
+        }
+    }
+}
+
 # Best-effort process scope bypass for locked defaults.
 try {
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
@@ -5864,14 +7377,7 @@ if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.PSOb
     $bootstrapDefinition = [string]$MyInvocation.MyCommand.Definition
 }
 
-Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
+Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1' -mode $Mode
 Initialize-WinPulse
 
-Clear-Host
-Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
-Write-Host ''
-Write-Host '  Načítám systémové informace...' -ForegroundColor DarkGray
-
-Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
-$scan = Invoke-CoreScan
-Show-WinPulseTriageMenu -scan $scan
+Invoke-WinPulseMode -mode $Mode

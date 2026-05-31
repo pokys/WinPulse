@@ -16,3 +16,4 @@ logs/
 exports/
 backups/
 modules-cache/
+smoke-logs/
