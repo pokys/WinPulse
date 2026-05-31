@@ -25,7 +25,7 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.8.0-20260601'
+$script:WinPulseVersion = '0.8.1-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -8525,9 +8525,7 @@ function Show-WinPulseTriageMenu {
             @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
             @{ Label = 'W11 readiness';      Key = 'A'; Hint = 'Upgrade signals' },
             @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
-            @{ Label = 'Migration backup';   Key = 'B'; Hint = 'Copy user files out' },
-            @{ Label = 'Migration restore';  Key = 'O'; Hint = 'Put files back' },
-            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
+            @{ Label = 'Full menu';          Key = 'M'; Hint = 'Backup, restore, more' },
             @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
             @{ Label = 'Safe actions';       Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
@@ -8539,8 +8537,6 @@ function Show-WinPulseTriageMenu {
             'F' { Show-WinPulseFindingsDetail -scan $scan }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
-            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
-            'O' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
