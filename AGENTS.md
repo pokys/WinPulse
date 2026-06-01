@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.2-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.9.3-20260601`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -309,6 +309,11 @@ ask if anything is ambiguous. Use only temp fixtures, never real C:\Users.
 
 ### Task C12 - Restore to a different target user (cross-account migration)
 
+Status: DONE - implemented by Codex (`-RestoreAsUser`, validated name, plan
+remap, manifest/report fields, elevation passthrough), reviewed by Claude. The
+restore smoke test now covers both the default and the remap path. Path names
+are guarded against traversal. (Kept below for reference.)
+
 Why: a backup taken from user "old" usually needs to land in user "new" on the
 replacement machine. Today restore always writes back under the original
 `<UserName>` subfolder.
@@ -502,7 +507,8 @@ Backlog (not scheduled):
 
 - [ ] Incremental backup (opt-in `/MIR` for the backup destination only, never
       for restore - `/MIR` purges and would cause data loss in a live profile).
-- [ ] Restore remapping to a different target user name (cross-account moves).
+- [x] Restore remapping to a different target user name (cross-account moves) -
+      done via `-RestoreAsUser` (Task C12).
 - [ ] Selective AppData (per-application data); currently excluded by design.
 - [ ] Remote backup/restore over an SMB admin share (`\\HOST\C$`). Candidate
       feature, decision pending. See "Candidate feature: Remote over SMB (C$)".
