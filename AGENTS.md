@@ -299,6 +299,54 @@ changes for the non-interactive path.
 Acceptance: all findings are reachable and readable; selecting one shows detail;
 the dashboard summary (top findings) is unchanged.
 
+## Work Queue - Batch 3 (logic, Codex-friendly)
+
+This batch is non-TUI logic that can be fully verified WITHOUT elevation and
+WITHOUT a visual check - exactly what Codex can do. Same rules as before: one
+commit per task on `dev`, do not push to main, do not bump the version, run
+parser + ASCII + both fixture smoke tests after each, report changes + output,
+ask if anything is ambiguous. Use only temp fixtures, never real C:\Users.
+
+### Task C12 - Restore to a different target user (cross-account migration)
+
+Why: a backup taken from user "old" usually needs to land in user "new" on the
+replacement machine. Today restore always writes back under the original
+`<UserName>` subfolder.
+
+Scope:
+
+- Add `-RestoreAsUser <string>` to the top `param()` block and forward it through
+  `Invoke-WinPulseMode` to `Invoke-WinPulseMigrationRestore` (mirror how
+  `-RestoreFolders` is plumbed).
+- Interactive restore: after choosing the restore root, prompt "Restore into
+  which user name? (Enter = keep original)". Non-interactive: use
+  `-RestoreAsUser` when provided.
+- Plumb a target-user value into `New-WinPulseRestorePlan` (and the per-folder
+  filter path). When set, the per-item Target becomes
+  `<restoreRoot>\<targetUser>\<relative>` instead of `<originalUser>\<relative>`.
+  The Source (under the backup root) is unchanged. Do not change anything when
+  no target user is given - behaviour must be identical to today.
+- Record the remap in the restore manifest (e.g. add `RestoreAsUser` and keep
+  the per-item original UserName) and mention it in a safety note.
+- Keep ALL existing safety and behaviour: desktop.ini/thumbs.db still skipped,
+  directory attributes still re-asserted, PARTIAL handling intact, verification
+  still runs (it already rebuilds the destination path from the item Target, so
+  confirm it verifies the remapped target).
+
+Acceptance (non-elevated, temp fixtures):
+
+- Build a fixture backup (run a MigrationBackup into a temp dest as the smoke
+  test does), then:
+  `bootstrap.ps1 -Mode MigrationRestore -RestoreBackupPath <dest> -RestoreRoot`
+  `<tmp> -RestoreAsUser newuser -RestoreExecute` restores the folders under
+  `<tmp>\newuser\...`, exit 0, manifest FailedCount 0.
+- Without `-RestoreAsUser`, restore still lands under the original user name
+  (unchanged).
+- Optionally extend the smoke test with a remap assertion.
+- Parser + ASCII clean; both existing fixture smoke tests still exit 0.
+
+Out of scope: SMB/remote sources, AppData internals, any TUI rendering changes.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
