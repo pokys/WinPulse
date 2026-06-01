@@ -44,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.9.1-20260601'
+$script:WinPulseVersion = '0.9.2-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -4195,12 +4195,19 @@ function Invoke-WinPulseRobocopy {
     }
 
     # Robocopy exit codes 0-7 indicate success (copied / nothing to do / extra).
-    # 8 and above indicate at least one failure.
+    # 8-15 mean some files could not be copied (commonly in-use/locked files on a
+    # live profile, e.g. AppData) - a PARTIAL result, not a total failure. 16 is
+    # a fatal error where nothing usable happened.
     $success = ($code -ge 0 -and $code -lt 8)
+    $partial = ($code -ge 8 -and $code -lt 16)
+    if ($partial -and [string]::IsNullOrEmpty($note)) {
+        $note = 'Some files were skipped (in use or access denied) - common for a live AppData. The rest copied.'
+    }
 
     return [pscustomobject][ordered]@{
         ExitCode = $code
         Success  = $success
+        Partial  = $partial
         DryRun   = [bool]$DryRun
         LogPath  = $logPath
         Note     = $note
@@ -4357,7 +4364,8 @@ function ConvertTo-WinPulseCopyReportRows {
         if ($item.PSObject.Properties['Destination']) { $dest = [string]$item.Destination }
         elseif ($item.PSObject.Properties['Target']) { $dest = [string]$item.Target }
 
-        $result = if ($item.Skipped) { 'Skipped' } elseif ($isDryRun) { 'Planned' } elseif ($item.Success) { 'OK' } else { 'FAILED' }
+        $isPartial = ($item.PSObject.Properties['Partial'] -and $item.Partial)
+        $result = if ($item.Skipped) { 'Skipped' } elseif ($isDryRun) { 'Planned' } elseif ($item.Success) { 'OK' } elseif ($isPartial) { 'PARTIAL' } else { 'FAILED' }
 
         $verify = '-'
         $srcFiles = ''
@@ -4420,7 +4428,8 @@ function Export-WinPulseMigrationCopyReportText {
     }
     $lines.Add('')
     $lines.Add(('Plan: {0} items, {1} with data, total {2}' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount, $manifest.Plan.TotalSize))
-    $lines.Add(('Failed: {0} | Verification mismatches: {1}' -f $manifest.FailedCount, $manifest.MismatchCount))
+    $partialCount = if ($manifest.PSObject.Properties['PartialCount']) { [int]$manifest.PartialCount } else { 0 }
+    $lines.Add(('Failed: {0} | Partial: {1} | Verification mismatches: {2}' -f $manifest.FailedCount, $partialCount, $manifest.MismatchCount))
     $lines.Add('')
     $lines.Add('Items:')
     foreach ($row in (ConvertTo-WinPulseCopyReportRows -manifest $manifest)) {
@@ -4465,12 +4474,14 @@ function Export-WinPulseMigrationCopyReportHtml {
     $title = if ($isBackup) { 'WinPulse Migration Backup' } else { 'WinPulse Migration Restore' }
     $rows = ConvertTo-WinPulseCopyReportRows -manifest $manifest
 
+    $partialCount = if ($manifest.PSObject.Properties['PartialCount']) { [int]$manifest.PartialCount } else { 0 }
     $statusClass = if ([int]$manifest.FailedCount -gt 0) { 'notready' }
-        elseif ([int]$manifest.MismatchCount -gt 0) { 'attention' }
+        elseif ([int]$manifest.MismatchCount -gt 0 -or $partialCount -gt 0) { 'attention' }
         elseif ($manifest.Tool.Action -eq 'DryRun') { 'unknown' }
         else { 'ready' }
     $statusText = if ([int]$manifest.FailedCount -gt 0) { ('{0} failed' -f $manifest.FailedCount) }
         elseif ([int]$manifest.MismatchCount -gt 0) { ('{0} mismatch' -f $manifest.MismatchCount) }
+        elseif ($partialCount -gt 0) { ('{0} partial' -f $partialCount) }
         elseif ($manifest.Tool.Action -eq 'DryRun') { 'Dry run' }
         else { 'All verified' }
 
@@ -4532,6 +4543,7 @@ footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margi
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Items (with data)' -value ('{0} ({1})' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount)
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Total size' -value $manifest.Plan.TotalSize
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Failed' -value $manifest.FailedCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Partial (in-use skipped)' -value $partialCount
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Verification mismatches' -value $manifest.MismatchCount
     [void]$sb.Append('</div></section>')
 
@@ -4728,7 +4740,7 @@ function Invoke-WinPulseMigrationBackup {
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip missing source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $true; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
             continue
         }
 
@@ -4736,11 +4748,14 @@ function Invoke-WinPulseMigrationBackup {
         $verb = if ($dryRun) { 'Planning' } else { 'Copying' }
         Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -DryRun:$dryRun
-        $level = if ($rc.Success) { 'INFO' } else { 'ERROR' }
+        $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
+        if ($rc.Partial) {
+            Write-Host ('    some files were in use and skipped (the rest copied)') -ForegroundColor Yellow
+        }
 
         $verify = $null
-        if (-not $dryRun -and $rc.Success) {
+        if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
             $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
             if ($verify.Status -eq 'Mismatch') {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
@@ -4748,10 +4763,11 @@ function Invoke-WinPulseMigrationBackup {
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $false; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
 
-    $failed = @($results | Where-Object { -not $_.Success })
+    $partialItems = @($results | Where-Object { $_.Partial })
+    $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
     $manifest = [pscustomobject][ordered]@{
         Tool            = [pscustomobject][ordered]@{
@@ -4776,6 +4792,7 @@ function Invoke-WinPulseMigrationBackup {
         }
         Items           = @($results)
         FailedCount     = $failed.Count
+        PartialCount    = $partialItems.Count
         MismatchCount   = $mismatch.Count
         SafetyNotes     = @(
             'Explicit user and folder selection only.',
@@ -4791,7 +4808,7 @@ function Invoke-WinPulseMigrationBackup {
     $reportHtmlPath = Join-Path -Path $destinationRoot -ChildPath 'migration-backup-report.html'
     Export-WinPulseMigrationCopyReportText -manifest $manifest -path $reportTextPath
     Export-WinPulseMigrationCopyReportHtml -manifest $manifest -path $reportHtmlPath
-    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup completed. Failed={0}, Mismatch={1}' -f $failed.Count, $mismatch.Count)
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup completed. Failed={0}, Partial={1}, Mismatch={2}' -f $failed.Count, $partialItems.Count, $mismatch.Count)
 
     Write-Host ''
     if ($dryRun) {
@@ -4805,6 +4822,9 @@ function Invoke-WinPulseMigrationBackup {
     }
     else {
         Write-Host ('Migration backup finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
+    }
+    if ($partialItems.Count -gt 0) {
+        Write-Host ('  {0} folder(s) partial: some in-use files were skipped (normal for a live AppData). The rest copied.' -f $partialItems.Count) -ForegroundColor DarkYellow
     }
     Write-Host ('  Folder:   {0}' -f $destinationRoot) -ForegroundColor Green
     Write-Host ('  Manifest: {0}' -f $manifestPath) -ForegroundColor Gray
@@ -5256,7 +5276,7 @@ function Invoke-WinPulseMigrationRestore {
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip empty source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $true; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
             continue
         }
 
@@ -5264,11 +5284,14 @@ function Invoke-WinPulseMigrationRestore {
         $verb = if ($dryRun) { 'Planning' } else { 'Restoring' }
         Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Target -logPath $itemLog -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -copyDirMetadata:$false -DryRun:$dryRun
-        $level = if ($rc.Success) { 'INFO' } else { 'ERROR' }
+        $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
+        if ($rc.Partial) {
+            Write-Host ('    some files were in use and skipped (the rest copied)') -ForegroundColor Yellow
+        }
 
         $verify = $null
-        if (-not $dryRun -and $rc.Success) {
+        if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
             $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Target -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -hashSampleSize $hashSampleSize
             if ($verify.Status -eq 'Mismatch') {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
@@ -5276,10 +5299,11 @@ function Invoke-WinPulseMigrationRestore {
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $false; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
 
-    $failed = @($results | Where-Object { -not $_.Success })
+    $partialItems = @($results | Where-Object { $_.Partial })
+    $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
     $record = [pscustomobject][ordered]@{
         Tool          = [pscustomobject][ordered]@{
@@ -5303,6 +5327,7 @@ function Invoke-WinPulseMigrationRestore {
         }
         Items         = @($results)
         FailedCount   = $failed.Count
+        PartialCount  = $partialItems.Count
         MismatchCount = $mismatch.Count
         SafetyNotes   = @(
             'Restore only copies data that the backup chose to keep.',
@@ -5319,7 +5344,7 @@ function Invoke-WinPulseMigrationRestore {
     $reportHtmlPath = Join-Path -Path $recordRoot -ChildPath 'migration-restore-report.html'
     Export-WinPulseMigrationCopyReportText -manifest $record -path $reportTextPath
     Export-WinPulseMigrationCopyReportHtml -manifest $record -path $reportHtmlPath
-    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore completed. Failed={0}, Mismatch={1}' -f $failed.Count, $mismatch.Count)
+    Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore completed. Failed={0}, Partial={1}, Mismatch={2}' -f $failed.Count, $partialItems.Count, $mismatch.Count)
 
     Write-Host ''
     if ($dryRun) {
@@ -5333,6 +5358,9 @@ function Invoke-WinPulseMigrationRestore {
     }
     else {
         Write-Host ('Migration restore finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
+    }
+    if ($partialItems.Count -gt 0) {
+        Write-Host ('  {0} folder(s) partial: some in-use files were skipped. The rest were restored.' -f $partialItems.Count) -ForegroundColor DarkYellow
     }
     Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
     Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray

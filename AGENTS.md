@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.1-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.9.2-20260601`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
