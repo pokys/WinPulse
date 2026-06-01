@@ -2,7 +2,22 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
-    [string]$Mode = 'Triage'
+    [string]$Mode = 'Triage',
+
+    [string[]]$BackupUsers = @(),
+    [string[]]$BackupFolders = @(),
+    [string]$BackupDestination = $null,
+    [switch]$BackupExecute,
+    [switch]$BackupIncludePrivateKeys,
+    [switch]$BackupIncludeAppData,
+    [switch]$BackupHashSample,
+    [string]$BackupProfilesRoot = $null,
+
+    [string]$RestoreBackupPath = $null,
+    [string]$RestoreRoot = $null,
+    [string[]]$RestoreFolders = @(),
+    [switch]$RestoreExecute,
+    [switch]$RestoreHashSample
 )
 
 $validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')
@@ -25,7 +40,7 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.8.3-20260601'
+$script:WinPulseVersion = '0.9.0-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -42,8 +57,14 @@ function Start-WinPulseElevation {
         [string]$bootstrappath,
         [string]$bootstrapdefinition,
         [string]$bootstrapurl,
-        [string]$mode
+        [string]$mode,
+        [string[]]$passthrougharguments = @(),
+        [switch]$skipElevation
     )
+
+    if ($skipElevation) {
+        return
+    }
 
     if (Test-WinPulseIsAdmin) {
         return
@@ -83,6 +104,10 @@ function Start-WinPulseElevation {
 
     if ($mode) {
         $args += @('-Mode', ('"{0}"' -f $mode))
+    }
+
+    foreach ($argument in @($passthrougharguments)) {
+        $args += $argument
     }
 
     Start-Process -FilePath $shellPath -Verb RunAs -ArgumentList ($args -join ' ')
@@ -3046,10 +3071,12 @@ function Get-WinPulseWindows11Readiness {
 
 function Get-WinPulseMigrationProfiles {
     [CmdletBinding()]
-    param()
+    param(
+        [string]$root = 'C:\Users'
+    )
 
     $profiles = @()
-    $usersRoot = 'C:\Users'
+    $usersRoot = if ([string]::IsNullOrWhiteSpace($root)) { 'C:\Users' } else { $root }
     $excludeNames = @('Public', 'Default', 'Default User', 'All Users', 'defaultuser0', 'WDAGUtilityAccount')
 
     if (-not (Test-Path -LiteralPath $usersRoot)) {
@@ -4487,7 +4514,35 @@ function Invoke-WinPulseMigrationBackup {
     # destination, build a dry-run plan, then optionally execute the copy and
     # write a manifest. Read-only until the technician explicitly confirms.
     [CmdletBinding()]
-    param()
+    param(
+        [string[]]$BackupUsers = @(),
+        [string[]]$BackupFolders = @(),
+        [string]$BackupDestination = $null,
+        [switch]$BackupExecute,
+        [switch]$BackupIncludePrivateKeys,
+        [switch]$BackupIncludeAppData,
+        [switch]$BackupHashSample,
+        [string]$BackupProfilesRoot = $null
+    )
+
+    $hasBackupParameters = (
+        @($BackupUsers).Count -gt 0 -or
+        @($BackupFolders).Count -gt 0 -or
+        -not [string]::IsNullOrWhiteSpace($BackupDestination) -or
+        -not [string]::IsNullOrWhiteSpace($BackupProfilesRoot) -or
+        $BackupExecute -or
+        $BackupIncludePrivateKeys -or
+        $BackupIncludeAppData -or
+        $BackupHashSample
+    )
+    $nonInteractive = (
+        @($BackupUsers).Count -gt 0 -and
+        @($BackupFolders).Count -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($BackupDestination)
+    )
+    if ($hasBackupParameters -and -not $nonInteractive) {
+        throw 'Non-interactive MigrationBackup requires -BackupUsers, -BackupFolders, and -BackupDestination.'
+    }
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Backup'
@@ -4497,25 +4552,33 @@ function Invoke-WinPulseMigrationBackup {
     Write-Host ''
 
     Write-Host '  Scanning user profiles...' -ForegroundColor DarkGray
-    $profiles = @(Get-WinPulseMigrationProfiles)
+    $profileRoot = if ([string]::IsNullOrWhiteSpace($BackupProfilesRoot)) { 'C:\Users' } else { $BackupProfilesRoot }
+    $profiles = @(Get-WinPulseMigrationProfiles -root $profileRoot)
     if ($profiles.Count -eq 0) {
         Write-Host '  No user profiles found. Nothing to back up.' -ForegroundColor Yellow
         return $null
     }
 
-    $userKeys = @(Select-WinPulseBackupUsers -profiles $profiles)
+    $userKeys = @(if ($nonInteractive) { @($BackupUsers) } else { @(Select-WinPulseBackupUsers -profiles $profiles) })
     if ($userKeys.Count -eq 0) {
         Write-Host '  No users selected. Backup cancelled.' -ForegroundColor Yellow
         return $null
     }
 
-    $folderKeys = @(Select-WinPulseBackupFolders)
+    $folderKeys = @(if ($nonInteractive) { @($BackupFolders) } else { @(Select-WinPulseBackupFolders) })
     if ($folderKeys.Count -eq 0) {
         Write-Host '  No folders selected. Backup cancelled.' -ForegroundColor Yellow
         return $null
     }
 
-    $optIns = @(Select-WinPulseBackupScopeOptIns)
+    $optIns = @()
+    if ($nonInteractive) {
+        if ($BackupIncludePrivateKeys) { $optIns += 'privatekeys' }
+        if ($BackupIncludeAppData) { $optIns += 'appdata' }
+    }
+    else {
+        $optIns = @(Select-WinPulseBackupScopeOptIns)
+    }
     $includeKeys = ($optIns -contains 'privatekeys')
     $includeAppData = ($optIns -contains 'appdata')
     if ($includeKeys -or $includeAppData) {
@@ -4538,8 +4601,13 @@ function Invoke-WinPulseMigrationBackup {
     Clear-Host
     Write-WinPulseHeader -title 'Migration Backup'
     Write-Host ('  Default destination: {0}' -f $defaultRoot) -ForegroundColor DarkGray
-    $destInput = Read-Host '  Where to save the backup?  (Enter for default, or a path like E:\Backups\Name)'
-    $destinationRoot = if ([string]::IsNullOrWhiteSpace($destInput)) { $defaultRoot } else { $destInput.Trim() }
+    if ($nonInteractive) {
+        $destinationRoot = $BackupDestination.Trim()
+    }
+    else {
+        $destInput = Read-Host '  Where to save the backup?  (Enter for default, or a path like E:\Backups\Name)'
+        $destinationRoot = if ([string]::IsNullOrWhiteSpace($destInput)) { $defaultRoot } else { $destInput.Trim() }
+    }
 
     Write-Host ''
     Write-Host '  Building dry-run copy plan...' -ForegroundColor DarkGray
@@ -4565,15 +4633,20 @@ function Invoke-WinPulseMigrationBackup {
     }
 
     Write-Host ''
-    $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or copy for real?' -Items @(
-        @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
-        @{ Label = 'Copy files now';                         Key = 'X'; Hint = 'Writes to destination' },
-        @{ Separator = $true },
-        @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
-    )
-    if ($action -ne 'D' -and $action -ne 'X') {
-        Write-Host '  Backup cancelled.' -ForegroundColor Yellow
-        return $null
+    if ($nonInteractive) {
+        $action = if ($BackupExecute) { 'X' } else { 'D' }
+    }
+    else {
+        $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or copy for real?' -Items @(
+            @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
+            @{ Label = 'Copy files now';                         Key = 'X'; Hint = 'Writes to destination' },
+            @{ Separator = $true },
+            @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
+        )
+        if ($action -ne 'D' -and $action -ne 'X') {
+            Write-Host '  Backup cancelled.' -ForegroundColor Yellow
+            return $null
+        }
     }
     $dryRun = ($action -eq 'D')
 
@@ -4581,16 +4654,23 @@ function Invoke-WinPulseMigrationBackup {
     if (-not $dryRun) {
         Write-Host ''
         Write-Host ('  About to copy {0} into {1}.' -f $plan.TotalSize, $destinationRoot) -ForegroundColor Yellow
-        $confirm = Read-Host '  Type YES to proceed'
-        if ($confirm -ne 'YES') {
-            Write-Host '  Not confirmed. Backup cancelled.' -ForegroundColor Yellow
-            return $null
+        if (-not $nonInteractive) {
+            $confirm = Read-Host '  Type YES to proceed'
+            if ($confirm -ne 'YES') {
+                Write-Host '  Not confirmed. Backup cancelled.' -ForegroundColor Yellow
+                return $null
+            }
         }
-        $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
-            @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
-            @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
-        )
-        if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+        if ($nonInteractive) {
+            if ($BackupHashSample) { $hashSampleSize = 25 }
+        }
+        else {
+            $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
+                @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
+                @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
+            )
+            if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+        }
     }
 
     New-Item -Path $destinationRoot -ItemType Directory -Force | Out-Null
@@ -4657,7 +4737,7 @@ function Invoke-WinPulseMigrationBackup {
             'Explicit user and folder selection only.',
             ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
             'No passwords, DPAPI secrets, or browser secrets are exported.',
-            'Copy step requires explicit YES confirmation.'
+            $(if ($nonInteractive) { 'Copy step requires explicit -BackupExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
         )
     }
 
@@ -4912,7 +4992,28 @@ function Invoke-WinPulseMigrationRestore {
     # build a dry-run plan, then optionally copy files back and write a restore
     # result manifest. Read-only until the technician explicitly confirms.
     [CmdletBinding()]
-    param()
+    param(
+        [string]$RestoreBackupPath = $null,
+        [string]$RestoreRoot = $null,
+        [string[]]$RestoreFolders = @(),
+        [switch]$RestoreExecute,
+        [switch]$RestoreHashSample
+    )
+
+    $hasRestoreParameters = (
+        -not [string]::IsNullOrWhiteSpace($RestoreBackupPath) -or
+        -not [string]::IsNullOrWhiteSpace($RestoreRoot) -or
+        @($RestoreFolders).Count -gt 0 -or
+        $RestoreExecute -or
+        $RestoreHashSample
+    )
+    $nonInteractive = (
+        -not [string]::IsNullOrWhiteSpace($RestoreBackupPath) -and
+        -not [string]::IsNullOrWhiteSpace($RestoreRoot)
+    )
+    if ($hasRestoreParameters -and -not $nonInteractive) {
+        throw 'Non-interactive MigrationRestore requires -RestoreBackupPath and -RestoreRoot.'
+    }
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Restore'
@@ -4921,41 +5022,47 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host '  Files that already exist are flagged first, and Windows known folders stay intact.' -ForegroundColor Cyan
     Write-Host ''
 
-    $backups = @(Get-WinPulseAvailableBackups)
     $selectedBackupRoot = $null
 
-    if ($backups.Count -gt 0) {
-        $items = @()
-        foreach ($b in $backups) {
-            $items += @{
-                Label = ('{0}  [{1}, {2} user(s), {3}]' -f $b.Name, $b.Action, $b.UserCount, $b.TotalSize)
-                Key   = $b.Path
-                Hint  = $b.LastWrite
-            }
-        }
-        $items += @{ Separator = $true }
-        $items += @{ Label = 'Enter a path manually'; Key = '__manual__'; Hint = 'External drive, etc.' }
-
-        $choice = Select-WinPulseMenuItem -Title 'Which backup do you want to restore?' -Items $items
-        if (-not $choice) {
-            Write-Host '  Restore cancelled.' -ForegroundColor Yellow
-            return $null
-        }
-        if ($choice -ne '__manual__') {
-            $selectedBackupRoot = $choice
-        }
+    if ($nonInteractive) {
+        $selectedBackupRoot = $RestoreBackupPath.Trim()
     }
     else {
-        Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
-    }
+        $backups = @(Get-WinPulseAvailableBackups)
 
-    if (-not $selectedBackupRoot) {
-        $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
-        if ([string]::IsNullOrWhiteSpace($manualInput)) {
-            Write-Host '  No path entered. Restore cancelled.' -ForegroundColor Yellow
-            return $null
+        if ($backups.Count -gt 0) {
+            $items = @()
+            foreach ($b in $backups) {
+                $items += @{
+                    Label = ('{0}  [{1}, {2} user(s), {3}]' -f $b.Name, $b.Action, $b.UserCount, $b.TotalSize)
+                    Key   = $b.Path
+                    Hint  = $b.LastWrite
+                }
+            }
+            $items += @{ Separator = $true }
+            $items += @{ Label = 'Enter a path manually'; Key = '__manual__'; Hint = 'External drive, etc.' }
+
+            $choice = Select-WinPulseMenuItem -Title 'Which backup do you want to restore?' -Items $items
+            if (-not $choice) {
+                Write-Host '  Restore cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            if ($choice -ne '__manual__') {
+                $selectedBackupRoot = $choice
+            }
         }
-        $selectedBackupRoot = $manualInput.Trim()
+        else {
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+        }
+
+        if (-not $selectedBackupRoot) {
+            $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+            if ([string]::IsNullOrWhiteSpace($manualInput)) {
+                Write-Host '  No path entered. Restore cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            $selectedBackupRoot = $manualInput.Trim()
+        }
     }
 
     $manifestPath = Join-Path -Path $selectedBackupRoot -ChildPath 'manifest.json'
@@ -4975,8 +5082,13 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host ('  Folders: {0}' -f ($restoreFolders -join ', ')) -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  Default restore root: C:\Users (restores into C:\Users\<User>\<Folder>)' -ForegroundColor DarkGray
-    $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
-    $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
+    if ($nonInteractive) {
+        $restoreRoot = $RestoreRoot.Trim()
+    }
+    else {
+        $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
+        $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
+    }
 
     Write-Host ''
     Write-Host '  Building dry-run restore plan...' -ForegroundColor DarkGray
@@ -4988,7 +5100,19 @@ function Invoke-WinPulseMigrationRestore {
         return $null
     }
 
-    $plan = Select-WinPulseRestoreItems -plan $plan
+    if ($nonInteractive -and @($RestoreFolders).Count -gt 0) {
+        $folderSet = @{}
+        foreach ($folder in @($RestoreFolders)) {
+            if (-not [string]::IsNullOrWhiteSpace($folder)) {
+                $folderSet[[string]$folder] = $true
+            }
+        }
+        $filtered = @($plan.Items | Where-Object { $folderSet.ContainsKey([string]$_.Folder) })
+        $plan = New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot
+    }
+    elseif (-not $nonInteractive) {
+        $plan = Select-WinPulseRestoreItems -plan $plan
+    }
     if (-not $plan) {
         Write-Host '  No folders selected. Restore cancelled.' -ForegroundColor Yellow
         return $null
@@ -5012,15 +5136,20 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host ('  Not restored: {0} (known-folder attributes left untouched)' -f ($restoreExclusions.Files -join ', ')) -ForegroundColor DarkYellow
 
     Write-Host ''
-    $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or restore for real?' -Items @(
-        @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
-        @{ Label = 'Restore files now';                      Key = 'X'; Hint = 'Writes into profile' },
-        @{ Separator = $true },
-        @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
-    )
-    if ($action -ne 'D' -and $action -ne 'X') {
-        Write-Host '  Restore cancelled.' -ForegroundColor Yellow
-        return $null
+    if ($nonInteractive) {
+        $action = if ($RestoreExecute) { 'X' } else { 'D' }
+    }
+    else {
+        $action = Select-WinPulseMenuItem -Title 'Dry run (preview) or restore for real?' -Items @(
+            @{ Label = 'Dry run - preview only, copies nothing'; Key = 'D'; Hint = 'Recommended first' },
+            @{ Label = 'Restore files now';                      Key = 'X'; Hint = 'Writes into profile' },
+            @{ Separator = $true },
+            @{ Label = 'Cancel';                                 Key = 'C'; Color = 'DarkGray' }
+        )
+        if ($action -ne 'D' -and $action -ne 'X') {
+            Write-Host '  Restore cancelled.' -ForegroundColor Yellow
+            return $null
+        }
     }
     $dryRun = ($action -eq 'D')
 
@@ -5031,21 +5160,33 @@ function Invoke-WinPulseMigrationRestore {
             Write-Host ('  WARNING: {0} target folder(s) already exist and will be overwritten.' -f $plan.OverwriteCount) -ForegroundColor Yellow
         }
         Write-Host ('  About to restore {0} into {1}.' -f $plan.TotalSize, $restoreRoot) -ForegroundColor Yellow
-        $confirm = Read-Host '  Type YES to proceed'
-        if ($confirm -ne 'YES') {
-            Write-Host '  Not confirmed. Restore cancelled.' -ForegroundColor Yellow
-            return $null
+        if (-not $nonInteractive) {
+            $confirm = Read-Host '  Type YES to proceed'
+            if ($confirm -ne 'YES') {
+                Write-Host '  Not confirmed. Restore cancelled.' -ForegroundColor Yellow
+                return $null
+            }
         }
-        $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
-            @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
-            @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
-        )
-        if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+        if ($nonInteractive) {
+            if ($RestoreHashSample) { $hashSampleSize = 25 }
+        }
+        else {
+            $hashChoice = Select-WinPulseMenuItem -Title 'Also double-check files by hash?' -Items @(
+                @{ Label = 'No - just check file counts and sizes'; Key = 'N'; Hint = 'Faster' },
+                @{ Label = 'Yes - compare a sample by hash too';    Key = 'Y'; Hint = 'Slower, stronger' }
+            )
+            if ($hashChoice -eq 'Y') { $hashSampleSize = 25 }
+        }
     }
 
     $computerName = Get-WinPulseSafeComputerName
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $recordRoot = Join-Path -Path $script:WinPulsePaths.Backups -ChildPath ('MigrationRestore-{0}-{1}' -f $computerName, $stamp)
+    $restoreRootForRecord = $restoreRoot.TrimEnd('\')
+    $recordBase = $script:WinPulsePaths.Backups
+    if ($nonInteractive -and -not (Test-WinPulseIsAdmin) -and $restoreRootForRecord -ne 'C:\Users') {
+        $recordBase = Join-Path -Path $restoreRoot -ChildPath '_WinPulseRestoreRecords'
+    }
+    $recordRoot = Join-Path -Path $recordBase -ChildPath ('MigrationRestore-{0}-{1}' -f $computerName, $stamp)
     $logFolder = Join-Path -Path $recordRoot -ChildPath 'logs'
     New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
     $logPath = Join-Path -Path $logFolder -ChildPath 'migration-restore.log'
@@ -5109,7 +5250,7 @@ function Invoke-WinPulseMigrationRestore {
             'desktop.ini and thumbs.db are not restored.',
             'Directory attributes are left untouched so known folders are not broken.',
             'Existing targets are flagged before any overwrite.',
-            'Copy step requires explicit YES confirmation.'
+            $(if ($nonInteractive) { 'Copy step requires explicit -RestoreExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
         )
     }
 
@@ -8621,7 +8762,22 @@ function Invoke-WinPulseMode {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
-        [string]$mode
+        [string]$mode,
+
+        [string[]]$BackupUsers = @(),
+        [string[]]$BackupFolders = @(),
+        [string]$BackupDestination = $null,
+        [switch]$BackupExecute,
+        [switch]$BackupIncludePrivateKeys,
+        [switch]$BackupIncludeAppData,
+        [switch]$BackupHashSample,
+        [string]$BackupProfilesRoot = $null,
+
+        [string]$RestoreBackupPath = $null,
+        [string]$RestoreRoot = $null,
+        [string[]]$RestoreFolders = @(),
+        [switch]$RestoreExecute,
+        [switch]$RestoreHashSample
     )
 
     switch ($mode) {
@@ -8655,11 +8811,11 @@ function Invoke-WinPulseMode {
         }
         'MigrationBackup' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration backup mode.' -f $script:WinPulseVersion)
-            Invoke-WinPulseMigrationBackup | Out-Null
+            Invoke-WinPulseMigrationBackup -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot | Out-Null
         }
         'MigrationRestore' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
-            Invoke-WinPulseMigrationRestore | Out-Null
+            Invoke-WinPulseMigrationRestore -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
@@ -8691,7 +8847,95 @@ if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.PSOb
     $bootstrapDefinition = [string]$MyInvocation.MyCommand.Definition
 }
 
-Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1' -mode $Mode
+function ConvertTo-WinPulseCommandArgument {
+    [CmdletBinding()]
+    param(
+        [string]$value
+    )
+
+    return ('"{0}"' -f (([string]$value) -replace '"', '`"'))
+}
+
+function Test-WinPulsePathUnderRoot {
+    [CmdletBinding()]
+    param(
+        [string]$path,
+        [string]$root
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($root)) {
+        return $false
+    }
+
+    try {
+        $fullPath = ([System.IO.Path]::GetFullPath($path)).TrimEnd('\')
+        $fullRoot = ([System.IO.Path]::GetFullPath($root)).TrimEnd('\')
+        $rootPrefix = '{0}\' -f $fullRoot
+        return ($fullPath.Equals($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase))
+    }
+    catch {
+        return $false
+    }
+}
+
+$elevationPassthrough = @()
+if ($PSBoundParameters.ContainsKey('BackupUsers')) {
+    foreach ($value in @($BackupUsers)) { $elevationPassthrough += @('-BackupUsers', (ConvertTo-WinPulseCommandArgument -value $value)) }
+}
+if ($PSBoundParameters.ContainsKey('BackupFolders')) {
+    foreach ($value in @($BackupFolders)) { $elevationPassthrough += @('-BackupFolders', (ConvertTo-WinPulseCommandArgument -value $value)) }
+}
+if ($PSBoundParameters.ContainsKey('BackupDestination')) { $elevationPassthrough += @('-BackupDestination', (ConvertTo-WinPulseCommandArgument -value $BackupDestination)) }
+if ($BackupExecute) { $elevationPassthrough += '-BackupExecute' }
+if ($BackupIncludePrivateKeys) { $elevationPassthrough += '-BackupIncludePrivateKeys' }
+if ($BackupIncludeAppData) { $elevationPassthrough += '-BackupIncludeAppData' }
+if ($BackupHashSample) { $elevationPassthrough += '-BackupHashSample' }
+if ($PSBoundParameters.ContainsKey('BackupProfilesRoot')) { $elevationPassthrough += @('-BackupProfilesRoot', (ConvertTo-WinPulseCommandArgument -value $BackupProfilesRoot)) }
+if ($PSBoundParameters.ContainsKey('RestoreBackupPath')) { $elevationPassthrough += @('-RestoreBackupPath', (ConvertTo-WinPulseCommandArgument -value $RestoreBackupPath)) }
+if ($PSBoundParameters.ContainsKey('RestoreRoot')) { $elevationPassthrough += @('-RestoreRoot', (ConvertTo-WinPulseCommandArgument -value $RestoreRoot)) }
+if ($PSBoundParameters.ContainsKey('RestoreFolders')) {
+    foreach ($value in @($RestoreFolders)) { $elevationPassthrough += @('-RestoreFolders', (ConvertTo-WinPulseCommandArgument -value $value)) }
+}
+if ($RestoreExecute) { $elevationPassthrough += '-RestoreExecute' }
+if ($RestoreHashSample) { $elevationPassthrough += '-RestoreHashSample' }
+
+$backupNonInteractiveForElevation = (
+    $Mode -eq 'MigrationBackup' -and
+    @($BackupUsers).Count -gt 0 -and
+    @($BackupFolders).Count -gt 0 -and
+    -not [string]::IsNullOrWhiteSpace($BackupDestination)
+)
+$restoreNonInteractiveForElevation = (
+    $Mode -eq 'MigrationRestore' -and
+    -not [string]::IsNullOrWhiteSpace($RestoreBackupPath) -and
+    -not [string]::IsNullOrWhiteSpace($RestoreRoot)
+)
+$skipElevationForFixture = $false
+$perUserTempRoot = [IO.Path]::GetTempPath()
+if ($backupNonInteractiveForElevation -and -not [string]::IsNullOrWhiteSpace($BackupProfilesRoot)) {
+    $skipElevationForFixture = (
+        (Test-WinPulsePathUnderRoot -path $BackupProfilesRoot -root $perUserTempRoot) -and
+        (Test-WinPulsePathUnderRoot -path $BackupDestination -root $perUserTempRoot)
+    )
+}
+if ($restoreNonInteractiveForElevation -and -not [string]::IsNullOrWhiteSpace($RestoreRoot)) {
+    $skipElevationForFixture = $skipElevationForFixture -or (
+        (Test-WinPulsePathUnderRoot -path $RestoreBackupPath -root $perUserTempRoot) -and
+        (Test-WinPulsePathUnderRoot -path $RestoreRoot -root $perUserTempRoot)
+    )
+}
+
+if ($skipElevationForFixture) {
+    $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse'
+    $script:WinPulsePaths.Root = $tempRoot
+    $script:WinPulsePaths.Bin = Join-Path -Path $tempRoot -ChildPath 'bin'
+    $script:WinPulsePaths.Logs = Join-Path -Path $tempRoot -ChildPath 'logs'
+    $script:WinPulsePaths.Exports = Join-Path -Path $tempRoot -ChildPath 'exports'
+    $script:WinPulsePaths.Backups = Join-Path -Path $tempRoot -ChildPath 'backups'
+    $script:WinPulsePaths.Modules = Join-Path -Path $tempRoot -ChildPath 'modules'
+}
+
+Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1' -mode $Mode -passthrougharguments $elevationPassthrough -skipElevation:$skipElevationForFixture
 Initialize-WinPulse
 
-Invoke-WinPulseMode -mode $Mode
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample

@@ -36,6 +36,72 @@ function Join-SmokePath {
     return $result
 }
 
+function Convert-SmokeArgument {
+    [CmdletBinding()]
+    param(
+        [string]$Value
+    )
+
+    return ('"{0}"' -f (([string]$Value) -replace '"', '`"'))
+}
+
+function Invoke-SmokeChildProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $PowerShellPath
+    $psi.Arguments = ($Arguments -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    return [pscustomobject][ordered]@{
+        ExitCode = $process.ExitCode
+        Stdout   = $stdout
+        Stderr   = $stderr
+    }
+}
+
+function Assert-SmokeFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw ('Expected file missing: {0}' -f $Path)
+    }
+}
+
+function Assert-SmokeManifestCounts {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $manifest = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ([int]$manifest.FailedCount -ne 0 -or [int]$manifest.MismatchCount -ne 0) {
+        throw ('Manifest {0} has FailedCount={1}, MismatchCount={2}' -f $Path, $manifest.FailedCount, $manifest.MismatchCount)
+    }
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -59,7 +125,7 @@ Write-Host ('WinPulse smoke test: {0}' -f $Mode) -ForegroundColor Cyan
 Write-Host ('Bootstrap: {0}' -f $BootstrapPath) -ForegroundColor Gray
 Write-Host ('Logs: {0}' -f $logRoot) -ForegroundColor Gray
 
-if (-not (Test-SmokeIsAdmin)) {
+if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore')) {
     Write-Host ''
     Write-Host 'WARNING: run this smoke test from an elevated Windows PowerShell window.' -ForegroundColor Yellow
     Write-Host 'Parser errors will still be captured, but runtime output from auto-elevated child windows may not be captured.' -ForegroundColor Yellow
@@ -67,35 +133,132 @@ if (-not (Test-SmokeIsAdmin)) {
 }
 
 $powershell = (Get-Command -Name powershell.exe -ErrorAction Stop).Source
-$arguments = @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', ('"{0}"' -f $BootstrapPath),
-    '-Mode', $Mode
-) -join ' '
-
 $start = Get-Date
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $powershell
-$psi.Arguments = $arguments
-$psi.UseShellExecute = $false
-$psi.RedirectStandardOutput = $true
-$psi.RedirectStandardError = $true
-$psi.CreateNoWindow = $true
+$fixtureRoot = $null
+$backupRoot = $null
+$restoreRoot = $null
+$restoreRecordPath = $null
+$expectedFilesPresent = $false
+$fixtureCleaned = $false
+$processExitCode = 0
+$stdoutParts = @()
+$stderrParts = @()
 
-$process = New-Object System.Diagnostics.Process
-$process.StartInfo = $psi
-[void]$process.Start()
-$stdout = $process.StandardOutput.ReadToEnd()
-$stderr = $process.StandardError.ReadToEnd()
-$process.WaitForExit()
+try {
+    if ($Mode -in @('MigrationBackup', 'MigrationRestore')) {
+        $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
+        $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')
+        $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
+        $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Backup')
+        $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Restore')
+        New-Item -Path $desktop -ItemType Directory -Force | Out-Null
+        Set-Content -Path (Join-Path -Path $desktop -ChildPath 'sample.txt') -Value 'WinPulse smoke fixture' -Encoding ASCII
+
+        $backupArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationBackup',
+            '-BackupProfilesRoot', (Convert-SmokeArgument -Value $usersRoot),
+            '-BackupUsers', 'tester',
+            '-BackupFolders', 'Desktop',
+            '-BackupDestination', (Convert-SmokeArgument -Value $backupRoot),
+            '-BackupExecute'
+        )
+        $backupRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $backupArguments
+        $stdoutParts += $backupRun.Stdout
+        $stderrParts += $backupRun.Stderr
+        if ($backupRun.ExitCode -ne 0) {
+            throw ('MigrationBackup fixture exited with {0}' -f $backupRun.ExitCode)
+        }
+
+        $manifestPath = Join-Path -Path $backupRoot -ChildPath 'manifest.json'
+        Assert-SmokeFile -Path $manifestPath
+        Assert-SmokeFile -Path (Join-Path -Path $backupRoot -ChildPath 'migration-backup-report.html')
+        Assert-SmokeFile -Path (Join-Path -Path $backupRoot -ChildPath 'migration-backup-report.txt')
+        Assert-SmokeFile -Path (Join-SmokePath -Path $backupRoot -ChildPath @('logs', 'migration-backup.log'))
+        Assert-SmokeManifestCounts -Path $manifestPath
+        $expectedFilesPresent = $true
+
+        if ($Mode -eq 'MigrationRestore') {
+            $restoreArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationRestore',
+                '-RestoreBackupPath', (Convert-SmokeArgument -Value $backupRoot),
+                '-RestoreRoot', (Convert-SmokeArgument -Value $restoreRoot),
+                '-RestoreFolders', 'Desktop',
+                '-RestoreExecute'
+            )
+            $restoreRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $restoreArguments
+            $stdoutParts += $restoreRun.Stdout
+            $stderrParts += $restoreRun.Stderr
+            if ($restoreRun.ExitCode -ne 0) {
+                throw ('MigrationRestore fixture exited with {0}' -f $restoreRun.ExitCode)
+            }
+
+            Assert-SmokeFile -Path (Join-SmokePath -Path $restoreRoot -ChildPath @('tester', 'Desktop', 'sample.txt'))
+            $record = Get-ChildItem -LiteralPath (Join-Path -Path $restoreRoot -ChildPath '_WinPulseRestoreRecords') -Filter 'migration-restore.json' -Recurse -ErrorAction Stop |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+            if (-not $record) {
+                throw 'MigrationRestore fixture did not write migration-restore.json.'
+            }
+            $restoreRecordPath = $record.FullName
+            Assert-SmokeFile -Path $restoreRecordPath
+            Assert-SmokeFile -Path (Join-Path -Path $record.DirectoryName -ChildPath 'migration-restore-report.html')
+            Assert-SmokeFile -Path (Join-Path -Path $record.DirectoryName -ChildPath 'migration-restore-report.txt')
+            Assert-SmokeFile -Path (Join-SmokePath -Path $record.DirectoryName -ChildPath @('logs', 'migration-restore.log'))
+            Assert-SmokeManifestCounts -Path $restoreRecordPath
+        }
+    }
+    else {
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', $Mode
+        )
+        $run = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $arguments
+        $stdoutParts += $run.Stdout
+        $stderrParts += $run.Stderr
+        $processExitCode = $run.ExitCode
+    }
+}
+catch {
+    $processExitCode = 1
+    $stderrParts += $_.Exception.Message
+}
+
+if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {
+    try {
+        $resolvedFixture = (Resolve-Path -LiteralPath $fixtureRoot -ErrorAction Stop).Path
+        $resolvedTemp = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath()) -ErrorAction Stop).Path.TrimEnd('\')
+        $tempPrefix = '{0}\' -f $resolvedTemp
+        if ($resolvedFixture.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolvedFixture -Recurse -Force -ErrorAction Stop
+            $fixtureCleaned = $true
+        }
+        else {
+            throw ('Refusing to remove fixture outside temp path: {0}' -f $resolvedFixture)
+        }
+    }
+    catch {
+        $processExitCode = 1
+        $stderrParts += ('Fixture cleanup failed: {0}' -f $_.Exception.Message)
+    }
+}
+
 $end = Get-Date
+
+$stdout = @($stdoutParts) -join "`r`n"
+$stderr = @($stderrParts) -join "`r`n"
 
 $stdout | Set-Content -Path $stdoutPath -Encoding UTF8
 $stderr | Set-Content -Path $stderrPath -Encoding UTF8
 
 $latestExport = $null
-$expectedFilesPresent = $false
 if ($Mode -eq 'MigrationPreflight' -and (Test-Path -LiteralPath 'C:\ProgramData\WinPulse\exports')) {
     $latestExport = Get-ChildItem -Path 'C:\ProgramData\WinPulse\exports' -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like 'MigrationPreflight-*' } |
@@ -118,17 +281,25 @@ $summary.Add(('Mode: {0}' -f $Mode))
 $summary.Add(('Bootstrap: {0}' -f $BootstrapPath))
 $summary.Add(('Start: {0}' -f $start.ToString('o')))
 $summary.Add(('End: {0}' -f $end.ToString('o')))
-$summary.Add(('ExitCode: {0}' -f $process.ExitCode))
+$summary.Add(('ExitCode: {0}' -f $processExitCode))
 $summary.Add(('Stdout: {0}' -f $stdoutPath))
 $summary.Add(('Stderr: {0}' -f $stderrPath))
 if ($latestExport) {
     $summary.Add(('LatestExport: {0}' -f $latestExport.FullName))
     $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
 }
+if ($fixtureRoot) {
+    $summary.Add(('FixtureRoot: {0}' -f $fixtureRoot))
+    $summary.Add(('FixtureCleaned: {0}' -f $fixtureCleaned))
+    $summary.Add(('BackupRoot: {0}' -f $backupRoot))
+    if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
+    if ($restoreRecordPath) { $summary.Add(('RestoreRecord: {0}' -f $restoreRecordPath)) }
+    $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
+}
 $summary | Set-Content -Path $summaryPath -Encoding UTF8
 
 Write-Host ''
-Write-Host ('Exit code: {0}' -f $process.ExitCode) -ForegroundColor $(if ($process.ExitCode -eq 0) { 'Green' } else { 'Red' })
+Write-Host ('Exit code: {0}' -f $processExitCode) -ForegroundColor $(if ($processExitCode -eq 0) { 'Green' } else { 'Red' })
 Write-Host ('Summary: {0}' -f $summaryPath) -ForegroundColor Gray
 Write-Host ('Stdout:  {0}' -f $stdoutPath) -ForegroundColor Gray
 Write-Host ('Stderr:  {0}' -f $stderrPath) -ForegroundColor Gray
@@ -147,6 +318,12 @@ if ($latestExport) {
     Write-Host ('Expected files present: {0}' -f $expectedFilesPresent) -ForegroundColor $(if ($expectedFilesPresent) { 'Green' } else { 'Yellow' })
 }
 
-if ($process.ExitCode -ne 0) {
-    exit $process.ExitCode
+if ($fixtureRoot) {
+    Write-Host ''
+    Write-Host ('Fixture cleaned: {0}' -f $fixtureCleaned) -ForegroundColor $(if ($fixtureCleaned) { 'Green' } else { 'Yellow' })
+    Write-Host ('Expected files present: {0}' -f $expectedFilesPresent) -ForegroundColor $(if ($expectedFilesPresent) { 'Green' } else { 'Yellow' })
+}
+
+if ($processExitCode -ne 0) {
+    exit $processExitCode
 }

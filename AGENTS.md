@@ -37,6 +37,9 @@ session. So everything you build here MUST be verifiable WITHOUT elevation:
 
 ### Task C1 - Non-interactive parameters for backup and restore
 
+Status: DONE - implemented by Codex, reviewed and polished by Claude, fixture
+smoke passes non-elevated. (Kept below for reference.)
+
 Why: the backup and restore modes are fully interactive (menus + a typed `YES`),
 so they cannot be exercised by the smoke-test harness or scripted. This is the
 blocker for the "real runtime test" open item. Add a non-interactive path while
@@ -91,6 +94,9 @@ Out of scope: changing the copy/verification logic, the manifest schema, or the
 interactive UX text.
 
 ### Task C2 - Smoke-test coverage for backup and restore
+
+Status: DONE - implemented by Codex, reviewed by Claude. Both modes pass
+non-elevated with exit 0 and expected-files checks. (Kept below for reference.)
 
 Why: `tools/Invoke-WinPulseSmokeTest.ps1` already accepts `MigrationBackup` and
 `MigrationRestore` in its ValidateSet but cannot drive them. Use the Task C1
@@ -253,15 +259,12 @@ Done (implemented and statically/functionally tested, NOT yet merged):
 
 Half done / needs follow-up:
 
-- [ ] Real Windows runtime test of backup AND restore from an elevated window.
-      Only static + isolated-function tests have been run so far. The full
-      interactive flow (menus, robocopy execute, verification) has NOT been
-      exercised end to end on a live profile. THIS IS THE MAIN OPEN ITEM.
-- [ ] Smoke-test wrapper accepts `MigrationBackup`/`MigrationRestore` modes but
-      cannot drive them (they are interactive). No automated coverage for them.
-- [ ] Version string still `0.7.0-20260531`. Decide on a bump before merge to
-      main (CDN cache on the `irm | iex` path).
-- [ ] Work is uncommitted on branch `dev/migration-preflight-foundation`.
+- [x] Automated non-elevated coverage: the smoke-test now drives a real
+      backup + restore on a temp fixture (Task C2), and the non-interactive
+      parameters (Task C1) make it scriptable. Both pass with exit 0.
+- [ ] Elevated run against a REAL live profile (interactive menu flow + execute
+      against `C:\Users`) still has not been done. Lower risk now that the copy
+      path is covered on fixtures, but remains the last manual verification.
 
 To do (next milestone: Backup/Restore Reporting And Selection):
 
