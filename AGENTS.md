@@ -134,6 +134,21 @@ Approved by the owner; prepared by Claude. THE TOP RULE: do not break the
 working script. The startup scan, dashboard, the Quick Triage / Full menu flow,
 and the migration backup/restore all work today - keep them working.
 
+Status (Claude did this batch since Codex was out of limit):
+
+- C4 DONE - default backup to C:\WinPulseBackups (on main).
+- C5 DONE - Tweaks hidden, version in header (on main).
+- C6 DONE - English UI + InvariantCulture numbers (on main).
+- C8 DONE - responsive box width, identical at >= 90 cols (on main).
+- C10 DONE - repeat-command hint after interactive backup/restore (on main).
+- C7 DEFERRED - rewriting the single-select menu render loop (behind every menu)
+  is the highest-risk change for the lowest value (overflow only on tiny
+  windows, already handled by the Clear-Host safeguard). Hold until it can be
+  verified interactively.
+- C9 PENDING - needs interactive verification (TUI rendering not covered by the
+  smoke tests). Implement on dev, owner verifies before main.
+- C11 PENDING - same: interactive UI, verify before main.
+
 How to work this batch:
 
 - One task per commit, in order, on `dev/migration-preflight-foundation`. Do not
