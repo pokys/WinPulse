@@ -17,7 +17,8 @@ param(
     [string]$RestoreRoot = $null,
     [string[]]$RestoreFolders = @(),
     [switch]$RestoreExecute,
-    [switch]$RestoreHashSample
+    [switch]$RestoreHashSample,
+    [string]$RestoreAsUser = $null
 )
 
 $validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')
@@ -4425,6 +4426,9 @@ function Export-WinPulseMigrationCopyReportText {
     else {
         $lines.Add(('Backup source: {0}' -f $manifest.BackupRoot))
         $lines.Add(('Restore root: {0}' -f $manifest.RestoreRoot))
+        if ($manifest.PSObject.Properties['RestoreAsUser'] -and -not [string]::IsNullOrWhiteSpace([string]$manifest.RestoreAsUser)) {
+            $lines.Add(('Restore as user: {0}' -f $manifest.RestoreAsUser))
+        }
     }
     $lines.Add('')
     $lines.Add(('Plan: {0} items, {1} with data, total {2}' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount, $manifest.Plan.TotalSize))
@@ -4539,6 +4543,9 @@ footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margi
     else {
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Backup source' -value $manifest.BackupRoot
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Restore root' -value $manifest.RestoreRoot
+        if ($manifest.PSObject.Properties['RestoreAsUser'] -and -not [string]::IsNullOrWhiteSpace([string]$manifest.RestoreAsUser)) {
+            Add-WinPulseMigrationHtmlKv -builder $sb -key 'Restore as user' -value $manifest.RestoreAsUser
+        }
     }
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Items (with data)' -value ('{0} ({1})' -f $manifest.Plan.ItemCount, $manifest.Plan.ExistingCount)
     Add-WinPulseMigrationHtmlKv -builder $sb -key 'Total size' -value $manifest.Plan.TotalSize
@@ -4885,6 +4892,24 @@ function Get-WinPulseRestoreExclusions {
     }
 }
 
+function Get-WinPulseRestoreTargetUserName {
+    [CmdletBinding()]
+    param(
+        [string]$userName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        return $null
+    }
+
+    $trimmed = $userName.Trim()
+    if ($trimmed -eq '.' -or $trimmed -eq '..' -or ($trimmed.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0)) {
+        throw 'Restore target user name must be a single profile folder name.'
+    }
+
+    return $trimmed
+}
+
 function Read-WinPulseBackupManifest {
     # Reads and validates a backup manifest.json. Returns the parsed object or
     # $null if the file is missing or unreadable.
@@ -4965,9 +4990,12 @@ function New-WinPulseRestorePlan {
         [string]$backupRoot,
 
         [Parameter(Mandatory = $true)]
-        [string]$restoreRoot
+        [string]$restoreRoot,
+
+        [string]$targetUserName = $null
     )
 
+    $targetUserName = Get-WinPulseRestoreTargetUserName -userName $targetUserName
     $catalog = Get-WinPulseBackupFolderCatalog
     $items = @()
     $totalBytes = [double]0
@@ -4979,9 +5007,10 @@ function New-WinPulseRestorePlan {
 
         $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
         $relative = if ($catEntry) { $catEntry['Relative'] } else { $folder }
+        $targetUser = if ([string]::IsNullOrWhiteSpace($targetUserName)) { $userName } else { $targetUserName }
 
         $source = Join-WinPulsePath -path $backupRoot -childpath @($userName, $relative)
-        $target = Join-WinPulsePath -path $restoreRoot -childpath @($userName, $relative)
+        $target = Join-WinPulsePath -path $restoreRoot -childpath @($targetUser, $relative)
         $size = Get-WinPulsePathSize -path $source
         $targetExists = Test-Path -LiteralPath $target
 
@@ -4998,7 +5027,7 @@ function New-WinPulseRestorePlan {
         if ($size.Exists) { $totalBytes += [double]$size.Bytes }
     }
 
-    return New-WinPulseRestorePlanObject -items $items -restoreRoot $restoreRoot
+    return New-WinPulseRestorePlanObject -items $items -restoreRoot $restoreRoot -targetUserName $targetUserName
 }
 
 function New-WinPulseRestorePlanObject {
@@ -5010,9 +5039,12 @@ function New-WinPulseRestorePlanObject {
         [array]$items,
 
         [Parameter(Mandatory = $true)]
-        [string]$restoreRoot
+        [string]$restoreRoot,
+
+        [string]$targetUserName = $null
     )
 
+    $targetUserName = Get-WinPulseRestoreTargetUserName -userName $targetUserName
     $totalBytes = [double]0
     foreach ($item in @($items)) {
         if ($item.Exists) { $totalBytes += [double]$item.Bytes }
@@ -5020,6 +5052,7 @@ function New-WinPulseRestorePlanObject {
 
     return [pscustomobject][ordered]@{
         RestoreRoot    = $restoreRoot
+        RestoreAsUser  = $targetUserName
         Items          = @($items)
         ItemCount      = @($items).Count
         ExistingCount  = @($items | Where-Object { $_.Exists }).Count
@@ -5063,7 +5096,7 @@ function Select-WinPulseRestoreItems {
     foreach ($key in $selected) { $selectedSet[$key] = $true }
     $filtered = @($plan.Items | Where-Object { $selectedSet.ContainsKey(('{0}||{1}' -f $_.UserName, $_.Folder)) })
 
-    return New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot
+    return New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot -targetUserName $plan.RestoreAsUser
 }
 
 function Invoke-WinPulseMigrationRestore {
@@ -5076,12 +5109,14 @@ function Invoke-WinPulseMigrationRestore {
         [string]$RestoreRoot = $null,
         [string[]]$RestoreFolders = @(),
         [switch]$RestoreExecute,
-        [switch]$RestoreHashSample
+        [switch]$RestoreHashSample,
+        [string]$RestoreAsUser = $null
     )
 
     $hasRestoreParameters = (
         -not [string]::IsNullOrWhiteSpace($RestoreBackupPath) -or
         -not [string]::IsNullOrWhiteSpace($RestoreRoot) -or
+        -not [string]::IsNullOrWhiteSpace($RestoreAsUser) -or
         @($RestoreFolders).Count -gt 0 -or
         $RestoreExecute -or
         $RestoreHashSample
@@ -5168,11 +5203,20 @@ function Invoke-WinPulseMigrationRestore {
         $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
         $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
     }
+    $restoreAsUserInput = if ($nonInteractive) { $RestoreAsUser } else { Read-Host '  Restore into which user name? (Enter = keep original)' }
+    try {
+        $restoreAsUser = Get-WinPulseRestoreTargetUserName -userName $restoreAsUserInput
+    }
+    catch {
+        if ($nonInteractive) { throw }
+        Write-Host ('  {0}' -f $_.Exception.Message) -ForegroundColor Red
+        return $null
+    }
 
     Write-Host ''
     Write-Host '  Building dry-run restore plan...' -ForegroundColor DarkGray
     $restoreExclusions = Get-WinPulseRestoreExclusions
-    $plan = New-WinPulseRestorePlan -manifest $manifest -backupRoot $selectedBackupRoot -restoreRoot $restoreRoot
+    $plan = New-WinPulseRestorePlan -manifest $manifest -backupRoot $selectedBackupRoot -restoreRoot $restoreRoot -targetUserName $restoreAsUser
 
     if ($plan.ExistingCount -eq 0) {
         Write-Host '  No restorable data found in this backup (was it a dry run?).' -ForegroundColor Yellow
@@ -5187,7 +5231,7 @@ function Invoke-WinPulseMigrationRestore {
             }
         }
         $filtered = @($plan.Items | Where-Object { $folderSet.ContainsKey([string]$_.Folder) })
-        $plan = New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot
+        $plan = New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot -targetUserName $plan.RestoreAsUser
     }
     elseif (-not $nonInteractive) {
         $plan = Select-WinPulseRestoreItems -plan $plan
@@ -5200,6 +5244,9 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host ''
     Write-Host ('  Plan: {0} items, {1} have data, {2} would overwrite, total {3}' -f $plan.ItemCount, $plan.ExistingCount, $plan.OverwriteCount, $plan.TotalSize) -ForegroundColor Cyan
     Write-Host ('  Restore root: {0}' -f $restoreRoot) -ForegroundColor DarkGray
+    if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) {
+        Write-Host ('  Restore as user: {0}' -f $restoreAsUser) -ForegroundColor DarkGray
+    }
     Write-Host ''
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
@@ -5270,6 +5317,9 @@ function Invoke-WinPulseMigrationRestore {
     New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
     $logPath = Join-Path -Path $logFolder -ChildPath 'migration-restore.log'
     Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore started. DryRun={0}, Backup={1}, RestoreRoot={2}' -f $dryRun, $selectedBackupRoot, $restoreRoot)
+    if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) {
+        Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Restore user remap target: {0}' -f $restoreAsUser)
+    }
 
     Write-Host ''
     $results = @()
@@ -5305,7 +5355,18 @@ function Invoke-WinPulseMigrationRestore {
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
-    $record = [pscustomobject][ordered]@{
+    $safetyNotes = @(
+        'Restore only copies data that the backup chose to keep.',
+        'desktop.ini and thumbs.db are not restored.',
+        'Directory attributes are left untouched so known folders are not broken.',
+        'Existing targets are flagged before any overwrite.'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) {
+        $safetyNotes += ('Restore user remap is active: original backup users restore under {0}.' -f $restoreAsUser)
+    }
+    $safetyNotes += $(if ($nonInteractive) { 'Copy step requires explicit -RestoreExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
+
+    $recordProperties = [ordered]@{
         Tool          = [pscustomobject][ordered]@{
             Name          = 'WinPulse'
             Version       = $script:WinPulseVersion
@@ -5317,26 +5378,24 @@ function Invoke-WinPulseMigrationRestore {
         Computer      = $computerName
         BackupRoot    = $selectedBackupRoot
         RestoreRoot   = $restoreRoot
-        Exclusions    = $restoreExclusions
-        Plan          = [pscustomobject][ordered]@{
-            ItemCount      = $plan.ItemCount
-            ExistingCount  = $plan.ExistingCount
-            OverwriteCount = $plan.OverwriteCount
-            TotalBytes     = $plan.TotalBytes
-            TotalSize      = $plan.TotalSize
-        }
-        Items         = @($results)
-        FailedCount   = $failed.Count
-        PartialCount  = $partialItems.Count
-        MismatchCount = $mismatch.Count
-        SafetyNotes   = @(
-            'Restore only copies data that the backup chose to keep.',
-            'desktop.ini and thumbs.db are not restored.',
-            'Directory attributes are left untouched so known folders are not broken.',
-            'Existing targets are flagged before any overwrite.',
-            $(if ($nonInteractive) { 'Copy step requires explicit -RestoreExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
-        )
     }
+    if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) {
+        $recordProperties['RestoreAsUser'] = $restoreAsUser
+    }
+    $recordProperties['Exclusions'] = $restoreExclusions
+    $recordProperties['Plan'] = [pscustomobject][ordered]@{
+        ItemCount      = $plan.ItemCount
+        ExistingCount  = $plan.ExistingCount
+        OverwriteCount = $plan.OverwriteCount
+        TotalBytes     = $plan.TotalBytes
+        TotalSize      = $plan.TotalSize
+    }
+    $recordProperties['Items'] = @($results)
+    $recordProperties['FailedCount'] = $failed.Count
+    $recordProperties['PartialCount'] = $partialItems.Count
+    $recordProperties['MismatchCount'] = $mismatch.Count
+    $recordProperties['SafetyNotes'] = @($safetyNotes)
+    $record = [pscustomobject]$recordProperties
 
     $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-restore.json'
     $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
@@ -5371,6 +5430,7 @@ function Invoke-WinPulseMigrationRestore {
         $cmd = @('.\bootstrap.ps1 -Mode MigrationRestore')
         $cmd += '-RestoreBackupPath "{0}"' -f $selectedBackupRoot
         $cmd += '-RestoreRoot "{0}"' -f $restoreRoot
+        if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) { $cmd += '-RestoreAsUser "{0}"' -f $restoreAsUser }
         if ($restoredFolders.Count -gt 0) { $cmd += '-RestoreFolders {0}' -f (($restoredFolders | ForEach-Object { '"{0}"' -f $_ }) -join ',') }
         if ($hashSampleSize -gt 0) { $cmd += '-RestoreHashSample' }
         if (-not $dryRun) { $cmd += '-RestoreExecute' }
@@ -8875,7 +8935,8 @@ function Invoke-WinPulseMode {
         [string]$RestoreRoot = $null,
         [string[]]$RestoreFolders = @(),
         [switch]$RestoreExecute,
-        [switch]$RestoreHashSample
+        [switch]$RestoreHashSample,
+        [string]$RestoreAsUser = $null
     )
 
     switch ($mode) {
@@ -8913,7 +8974,7 @@ function Invoke-WinPulseMode {
         }
         'MigrationRestore' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
-            Invoke-WinPulseMigrationRestore -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample | Out-Null
+            Invoke-WinPulseMigrationRestore -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
@@ -8996,6 +9057,7 @@ if ($PSBoundParameters.ContainsKey('RestoreFolders')) {
 }
 if ($RestoreExecute) { $elevationPassthrough += '-RestoreExecute' }
 if ($RestoreHashSample) { $elevationPassthrough += '-RestoreHashSample' }
+if ($PSBoundParameters.ContainsKey('RestoreAsUser')) { $elevationPassthrough += @('-RestoreAsUser', (ConvertTo-WinPulseCommandArgument -value $RestoreAsUser)) }
 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
@@ -9036,4 +9098,4 @@ if ($skipElevationForFixture) {
 Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1' -mode $Mode -passthrougharguments $elevationPassthrough -skipElevation:$skipElevationForFixture
 Initialize-WinPulse
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser

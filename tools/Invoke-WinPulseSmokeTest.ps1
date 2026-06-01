@@ -137,7 +137,9 @@ $start = Get-Date
 $fixtureRoot = $null
 $backupRoot = $null
 $restoreRoot = $null
+$remapRestoreRoot = $null
 $restoreRecordPath = $null
+$remapRestoreRecordPath = $null
 $expectedFilesPresent = $false
 $fixtureCleaned = $false
 $processExitCode = 0
@@ -151,6 +153,7 @@ try {
         $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
         $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Backup')
         $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Restore')
+        $remapRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('RestoreRemap')
         New-Item -Path $desktop -ItemType Directory -Force | Out-Null
         Set-Content -Path (Join-Path -Path $desktop -ChildPath 'sample.txt') -Value 'WinPulse smoke fixture' -Encoding ASCII
 
@@ -211,6 +214,58 @@ try {
             Assert-SmokeFile -Path (Join-Path -Path $record.DirectoryName -ChildPath 'migration-restore-report.txt')
             Assert-SmokeFile -Path (Join-SmokePath -Path $record.DirectoryName -ChildPath @('logs', 'migration-restore.log'))
             Assert-SmokeManifestCounts -Path $restoreRecordPath
+            $restoreManifest = Get-Content -LiteralPath $restoreRecordPath -Raw | ConvertFrom-Json
+            if ($restoreManifest.PSObject.Properties['RestoreAsUser']) {
+                throw 'MigrationRestore fixture unexpectedly recorded RestoreAsUser without the parameter.'
+            }
+            $restoreItem = $restoreManifest.Items | Select-Object -First 1
+            if (-not $restoreItem -or ([string]$restoreItem.Target).IndexOf('\tester\Desktop', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                throw 'MigrationRestore fixture target did not point at the original user.'
+            }
+
+            $remapRestoreArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationRestore',
+                '-RestoreBackupPath', (Convert-SmokeArgument -Value $backupRoot),
+                '-RestoreRoot', (Convert-SmokeArgument -Value $remapRestoreRoot),
+                '-RestoreFolders', 'Desktop',
+                '-RestoreAsUser', 'newuser',
+                '-RestoreExecute'
+            )
+            $remapRestoreRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $remapRestoreArguments
+            $stdoutParts += $remapRestoreRun.Stdout
+            $stderrParts += $remapRestoreRun.Stderr
+            if ($remapRestoreRun.ExitCode -ne 0) {
+                throw ('MigrationRestore RestoreAsUser fixture exited with {0}' -f $remapRestoreRun.ExitCode)
+            }
+
+            Assert-SmokeFile -Path (Join-SmokePath -Path $remapRestoreRoot -ChildPath @('newuser', 'Desktop', 'sample.txt'))
+            $oldRemapTarget = Join-SmokePath -Path $remapRestoreRoot -ChildPath @('tester', 'Desktop', 'sample.txt')
+            if (Test-Path -LiteralPath $oldRemapTarget) {
+                throw 'MigrationRestore RestoreAsUser fixture wrote to the original user.'
+            }
+            $remapRecord = Get-ChildItem -LiteralPath (Join-Path -Path $remapRestoreRoot -ChildPath '_WinPulseRestoreRecords') -Filter 'migration-restore.json' -Recurse -ErrorAction Stop |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+            if (-not $remapRecord) {
+                throw 'MigrationRestore RestoreAsUser fixture did not write migration-restore.json.'
+            }
+            $remapRestoreRecordPath = $remapRecord.FullName
+            Assert-SmokeFile -Path $remapRestoreRecordPath
+            Assert-SmokeFile -Path (Join-Path -Path $remapRecord.DirectoryName -ChildPath 'migration-restore-report.html')
+            Assert-SmokeFile -Path (Join-Path -Path $remapRecord.DirectoryName -ChildPath 'migration-restore-report.txt')
+            Assert-SmokeFile -Path (Join-SmokePath -Path $remapRecord.DirectoryName -ChildPath @('logs', 'migration-restore.log'))
+            Assert-SmokeManifestCounts -Path $remapRestoreRecordPath
+            $remapManifest = Get-Content -LiteralPath $remapRestoreRecordPath -Raw | ConvertFrom-Json
+            if (-not $remapManifest.PSObject.Properties['RestoreAsUser'] -or [string]$remapManifest.RestoreAsUser -ne 'newuser') {
+                throw 'MigrationRestore RestoreAsUser fixture did not record RestoreAsUser=newuser.'
+            }
+            $remapItem = $remapManifest.Items | Select-Object -First 1
+            if (-not $remapItem -or ([string]$remapItem.Target).IndexOf('\newuser\Desktop', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                throw 'MigrationRestore RestoreAsUser fixture manifest target did not point at newuser.'
+            }
         }
     }
     else {
@@ -293,7 +348,9 @@ if ($fixtureRoot) {
     $summary.Add(('FixtureCleaned: {0}' -f $fixtureCleaned))
     $summary.Add(('BackupRoot: {0}' -f $backupRoot))
     if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
+    if ($remapRestoreRoot) { $summary.Add(('RemapRestoreRoot: {0}' -f $remapRestoreRoot)) }
     if ($restoreRecordPath) { $summary.Add(('RestoreRecord: {0}' -f $restoreRecordPath)) }
+    if ($remapRestoreRecordPath) { $summary.Add(('RemapRestoreRecord: {0}' -f $remapRestoreRecordPath)) }
     $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
 }
 $summary | Set-Content -Path $summaryPath -Encoding UTF8
