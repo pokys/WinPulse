@@ -40,6 +40,10 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# WinPulse UI is English. Render numbers culture-invariant (dot decimal) so the
+# dashboard and reports are consistent regardless of the machine locale.
+try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
+
 $script:WinPulseVersion = '0.9.0-20260601'
 
 function Test-WinPulseIsAdmin {
@@ -1914,8 +1918,10 @@ function Show-WinPulseDashboard {
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
-    # Top header
-    Write-Host ('  {0}{1} WinPulse {2}{3}' -f ([char]0x250C), ([string][char]0x2500 * 2), ([string][char]0x2500 * ($w - 14)), ([char]0x2510)) -ForegroundColor DarkCyan
+    # Top header (includes the build version for support/screenshots)
+    $titleBar = ' WinPulse {0} ' -f $script:WinPulseVersion
+    $titleFill = [math]::Max(1, $w - 4 - $titleBar.Length)
+    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleBar, ([string][char]0x2500 * $titleFill), ([char]0x2510)) -ForegroundColor DarkCyan
 
     # System line
     $sysLine = ' {0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime
@@ -4596,7 +4602,9 @@ function Invoke-WinPulseMigrationBackup {
 
     $computerName = Get-WinPulseSafeComputerName
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $defaultRoot = Join-Path -Path $script:WinPulsePaths.Backups -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp)
+    # Default to a persistent top-level folder, NOT under C:\ProgramData\WinPulse
+    # (which exit cleanup wipes). A real backup must survive the exit cleanup.
+    $defaultRoot = Join-Path -Path 'C:\WinPulseBackups' -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp)
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Backup'
@@ -8583,7 +8591,6 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
-            @{ Label = 'Tweaks';            Key = 'W'; Hint = 'Optimize' },
             @{ Label = 'Cleanup';           Key = 'C'; Hint = 'Remove files' },
             @{ Label = 'Export';            Key = 'X'; Hint = 'JSON / HTML' },
             @{ Separator = $true },
@@ -8598,7 +8605,6 @@ function Show-WinPulseMainMenu {
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
-            'W' { Show-WinPulseTweaksMenu }
             'C' { Show-WinPulseCleanupMenu }
             'X' { Show-WinPulseExportMenu -scan $scan }
             'E' { Invoke-WinPulseExitCleanupPrompt; return }
@@ -8785,7 +8791,7 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
             Write-Host ''
-            Write-Host '  Nacitam systemove informace...' -ForegroundColor DarkGray
+            Write-Host '  Loading system information...' -ForegroundColor DarkGray
 
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
@@ -8795,7 +8801,7 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
             Write-Host ''
-            Write-Host '  Nacitam systemove informace...' -ForegroundColor DarkGray
+            Write-Host '  Loading system information...' -ForegroundColor DarkGray
 
             Write-Log -level 'INFO' -message ('WinPulse {0} starting repair-mode scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
