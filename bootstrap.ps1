@@ -44,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.9.0-20260601'
+$script:WinPulseVersion = '0.9.1-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -4155,17 +4155,35 @@ function Invoke-WinPulseRobocopy {
         try { $savedAttributes = (Get-Item -LiteralPath $destination -Force).Attributes } catch { $savedAttributes = $null }
     }
 
-    $arguments = @($source, $destination, '/E', '/COPY:DAT', '/R:1', '/W:1', '/XJ', '/NP', '/BYTES', '/NFL', '/NDL')
+    $arguments = @($source, $destination, '/E', '/COPY:DAT', '/R:1', '/W:1', '/XJ', '/NP', '/BYTES')
     if ($copyDirMetadata) { $arguments += '/DCOPY:DAT' } else { $arguments += '/DCOPY:T' }
-    if ($DryRun) { $arguments += '/L' }
     foreach ($f in @($excludeFiles)) { $arguments += '/XF'; $arguments += $f }
     foreach ($d in @($excludeDirs)) { $arguments += '/XD'; $arguments += $d }
     $arguments += ('/LOG+:{0}' -f $logPath)
 
     $note = ''
     try {
-        & $robocopy.Source @arguments | Out-Null
-        $code = $LASTEXITCODE
+        if ($DryRun) {
+            # Quiet preview: nothing is copied, the full plan goes to the log.
+            $arguments += @('/L', '/NFL', '/NDL')
+            & $robocopy.Source @arguments | Out-Null
+            $code = $LASTEXITCODE
+        }
+        else {
+            # Live feedback so a long copy is visibly not frozen: /TEE streams
+            # robocopy's per-file output to us; we show the current file on a
+            # single rewriting status line. Full detail still goes to the log.
+            $arguments += @('/NDL', '/TEE')
+            & $robocopy.Source @arguments | ForEach-Object {
+                $line = ([string]$_).Trim()
+                if ($line.Length -eq 0) { return }
+                if ($line.Length -gt 76) { $line = '...' + $line.Substring($line.Length - 73) }
+                Write-Host (("`r    {0}" -f $line).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor DarkGray
+            }
+            $code = $LASTEXITCODE
+            # Clear the status line so the next folder's message starts clean.
+            Write-Host ("`r{0}`r" -f (' ' * 84)) -NoNewline
+        }
     }
     catch {
         $code = -2

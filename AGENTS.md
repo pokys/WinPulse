@@ -17,14 +17,16 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.0-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.9.1-20260601`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
 Working today: triage scan + dashboard, Quick Triage / Full menu, W11 readiness,
 migration preflight, migration backup + restore (interactive AND non-interactive
 params) with verification, hash sampling, and HTML/text reports, plus the
-startup-perf work and UX batch (C4-C6, C8, C10).
+startup-perf work, the UX batch (C4-C6, C8, C10), and live copy progress (the
+current file streams to a status line during a real backup/restore via robocopy
+`/TEE` in `Invoke-WinPulseRobocopy`).
 
 Pick up next, in priority order:
 
