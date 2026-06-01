@@ -30,10 +30,12 @@ current file streams to a status line during a real backup/restore via robocopy
 
 Pick up next, in priority order:
 
-1. Manual elevated live-profile check: run a real backup (dry-run, then execute
-   on a small profile) and a restore into a test root from an elevated window.
-   This is the last unautomated verification of the copy path. Backups now
-   default to `C:\WinPulseBackups` so the exit cleanup will not wipe them.
+1. Manual elevated live-profile check. BACKUP side CONFIRMED on a real elevated
+   profile (2026-06-01): all doc folders exit 1, AppData exit 9 -> correctly
+   reported Partial (Failed=0, Partial=1, Mismatch=0), /XJ skipped the
+   Documents junctions as intended. STILL TO DO: a live RESTORE into a test root
+   (and optionally MigrationVerify against an existing backup) from an elevated
+   window. Backups default to `C:\WinPulseBackups` so the exit cleanup keeps them.
 2. Interactive TUI session for the deferred UX items C7 / C9 / C11 (see
    "Work Queue - Batch 2"). These change live rendering the smoke tests cannot
    see, so build them on `dev`, confirm visually at >= 90 columns (must look
