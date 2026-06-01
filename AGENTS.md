@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.3-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.9.4-20260601`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -353,6 +353,12 @@ Acceptance (non-elevated, temp fixtures):
 Out of scope: SMB/remote sources, AppData internals, any TUI rendering changes.
 
 ### Task C13 - MigrationVerify mode: re-check an existing backup vs its manifest
+
+Status: DONE - implemented by Codex (`-Mode MigrationVerify`, `-VerifyBackupPath`,
+read-only re-measure vs manifest, Intact/Drift, JSON record outside the backup,
+Full-menu entry, smoke covering intact + drift), reviewed by Claude. Confirmed
+read-only (no robocopy/Remove-Item; `Initialize-WinPulse` skipped for this mode).
+(Kept below for reference.)
 
 Why: before wiping the source machine, a technician wants to confirm a backup on
 disk is still complete and intact - no files lost or shrunk since it was written.
