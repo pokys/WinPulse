@@ -14,6 +14,40 @@ explicit or when it conflicts with existing project rules. If Codex finds a
 problem outside the assigned task, report it and wait for direction instead of
 fixing it unilaterally.
 
+## Resume Here (next session)
+
+Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
+working `0.9.0-20260601`. Clean tree, nothing pending uncommitted. Verified:
+parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
+dashboard/scan path was confirmed on a real elevated machine.
+
+Working today: triage scan + dashboard, Quick Triage / Full menu, W11 readiness,
+migration preflight, migration backup + restore (interactive AND non-interactive
+params) with verification, hash sampling, and HTML/text reports, plus the
+startup-perf work and UX batch (C4-C6, C8, C10).
+
+Pick up next, in priority order:
+
+1. Manual elevated live-profile check: run a real backup (dry-run, then execute
+   on a small profile) and a restore into a test root from an elevated window.
+   This is the last unautomated verification of the copy path. Backups now
+   default to `C:\WinPulseBackups` so the exit cleanup will not wipe them.
+2. Interactive TUI session for the deferred UX items C7 / C9 / C11 (see
+   "Work Queue - Batch 2"). These change live rendering the smoke tests cannot
+   see, so build them on `dev`, confirm visually at >= 90 columns (must look
+   unchanged), then merge. C7 is optional/low-value; C9 and C11 are the wins.
+3. Optional perf: C3 BitLocker progressive load (~5s off time-to-dashboard;
+   touches dashboard render, so also an interactive-session item).
+
+Backlog (not scheduled): remote backup/restore over SMB C$ (Phase 1 groundwork
+already exists via `Get-WinPulseMigrationProfiles -root`), restore remap to a
+different user name, selective AppData, incremental backup. See the migration
+"Backlog" and "Candidate feature: Remote over SMB (C$)" sections below.
+
+Workflow reminder: commit identity is `pokys`; after any change run the parser
+check + ASCII check + both fixture smoke tests; do not push TUI-rendering
+changes to `main` until visually verified; Claude bumps the version and merges.
+
 ## Work Queue (assigned to Codex)
 
 Prepared by Claude (lead). Do these in order. Claude reviews each before merge.
