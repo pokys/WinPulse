@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.5-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.9.6-20260601`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -30,12 +30,15 @@ current file streams to a status line during a real backup/restore via robocopy
 
 Pick up next, in priority order:
 
-1. Manual elevated live-profile check. BACKUP side CONFIRMED on a real elevated
-   profile (2026-06-01): all doc folders exit 1, AppData exit 9 -> correctly
-   reported Partial (Failed=0, Partial=1, Mismatch=0), /XJ skipped the
-   Documents junctions as intended. STILL TO DO: a live RESTORE into a test root
-   (and optionally MigrationVerify against an existing backup) from an elevated
-   window. Backups default to `C:\WinPulseBackups` so the exit cleanup keeps them.
+1. Manual elevated live-profile check. BACKUP side CONFIRMED on a real elevated,
+   NOT-logged-in profile (2026-06-01): doc folders exit 1; AppData exit 9 was 18
+   failures, all `AppData\Local\Microsoft\WindowsApps` Store-app alias reparse
+   stubs (error 1920) - 212MB/1698 files copied fine. Fixed in 0.9.6 by excluding
+   `WindowsApps` (those stubs are uncopyable and useless in a backup), so a
+   re-test should give AppData exit 1. /XJ correctly skipped Documents junctions.
+   STILL TO DO: a live RESTORE into a test root (and optionally MigrationVerify
+   against `c:\migtt`) from an elevated window. Backups default to
+   `C:\WinPulseBackups` so the exit cleanup keeps them.
 2. Interactive TUI session for the deferred UX items C7 / C9 / C11 (see
    "Work Queue - Batch 2"). These change live rendering the smoke tests cannot
    see, so build them on `dev`, confirm visually at >= 90 columns (must look

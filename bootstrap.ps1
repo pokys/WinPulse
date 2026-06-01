@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.9.5-20260601'
+$script:WinPulseVersion = '0.9.6-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -3992,19 +3992,24 @@ function Get-WinPulseBackupExclusions {
     $keyFiles = @('*.ppk', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519')
     $hiveFiles = @('NTUSER.DAT', 'NTUSER.DAT.*', 'UsrClass.dat', 'UsrClass.dat.*')
     $keyDirs = @('.ssh', '.gnupg')
+    # WindowsApps (under AppData\Local\Microsoft) holds App Execution Alias
+    # reparse stubs for Store apps. They are 0-byte machine-specific links that
+    # robocopy cannot copy (error 1920) and that are useless in a backup, so they
+    # are always excluded. /XJ does not catch them (different reparse tag).
+    $junkDirs = @('WindowsApps')
 
     if ($includePrivateKeys) {
         return [pscustomobject][ordered]@{
             Files = @($hiveFiles)
-            Dirs  = @()
-            Note  = 'Private keys INCLUDED by explicit technician opt-in. Registry hives are still excluded.'
+            Dirs  = @($junkDirs)
+            Note  = 'Private keys INCLUDED by explicit technician opt-in. Registry hives and Store app alias stubs are still excluded.'
         }
     }
 
     return [pscustomobject][ordered]@{
         Files = @($keyFiles + $hiveFiles)
-        Dirs  = @($keyDirs)
-        Note  = 'Standalone SSH/PuTTY private keys and registry hives are excluded. Certificate files are included so they can be migrated.'
+        Dirs  = @($keyDirs + $junkDirs)
+        Note  = 'Standalone SSH/PuTTY private keys, registry hives, and Store app alias stubs (WindowsApps) are excluded. Certificate files are included so they can be migrated.'
     }
 }
 
@@ -4204,7 +4209,7 @@ function Invoke-WinPulseRobocopy {
     $success = ($code -ge 0 -and $code -lt 8)
     $partial = ($code -ge 8 -and $code -lt 16)
     if ($partial -and [string]::IsNullOrEmpty($note)) {
-        $note = 'Some files were skipped (in use or access denied) - common for a live AppData. The rest copied.'
+        $note = 'Some files could not be copied (access-denied, reparse stubs, or in-use). The rest copied.'
     }
 
     return [pscustomobject][ordered]@{
@@ -4760,7 +4765,7 @@ function Invoke-WinPulseMigrationBackup {
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
         if ($rc.Partial) {
-            Write-Host ('    some files were in use and skipped (the rest copied)') -ForegroundColor Yellow
+            Write-Host ('    some files could not be copied (access-denied/in-use); the rest copied') -ForegroundColor Yellow
         }
 
         $verify = $null
@@ -4833,7 +4838,7 @@ function Invoke-WinPulseMigrationBackup {
         Write-Host ('Migration backup finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
     }
     if ($partialItems.Count -gt 0) {
-        Write-Host ('  {0} folder(s) partial: some in-use files were skipped (normal for a live AppData). The rest copied.' -f $partialItems.Count) -ForegroundColor DarkYellow
+        Write-Host ('  {0} folder(s) partial: some files could not be copied (access-denied/in-use). The rest copied.' -f $partialItems.Count) -ForegroundColor DarkYellow
     }
     Write-Host ('  Folder:   {0}' -f $destinationRoot) -ForegroundColor Green
     Write-Host ('  Manifest: {0}' -f $manifestPath) -ForegroundColor Gray
@@ -5575,7 +5580,7 @@ function Invoke-WinPulseMigrationRestore {
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
         if ($rc.Partial) {
-            Write-Host ('    some files were in use and skipped (the rest copied)') -ForegroundColor Yellow
+            Write-Host ('    some files could not be copied (access-denied/in-use); the rest copied') -ForegroundColor Yellow
         }
 
         $verify = $null
@@ -5657,7 +5662,7 @@ function Invoke-WinPulseMigrationRestore {
         Write-Host ('Migration restore finished with {0} failed item(s) and {1} verification mismatch(es). Review logs.' -f $failed.Count, $mismatch.Count) -ForegroundColor Yellow
     }
     if ($partialItems.Count -gt 0) {
-        Write-Host ('  {0} folder(s) partial: some in-use files were skipped. The rest were restored.' -f $partialItems.Count) -ForegroundColor DarkYellow
+        Write-Host ('  {0} folder(s) partial: some files could not be copied (access-denied/in-use). The rest were restored.' -f $partialItems.Count) -ForegroundColor DarkYellow
     }
     Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
     Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray
