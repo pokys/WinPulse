@@ -417,6 +417,76 @@ Acceptance (non-elevated, temp fixtures):
 Out of scope: per-file hashing of the whole backup (manifests do not store
 per-file hashes), TUI rendering changes, anything that writes into the backup.
 
+### Task C14 - Per-application data backup targets (Chrome / Firefox / Outlook)
+
+Why: a technician usually wants a specific app's data, not the whole noisy
+AppData. Detect installed app data under the chosen profile and offer each as its
+own backup target. All product decisions below are FIXED by Claude (lead) - do
+not change them; ask if something is unclear.
+
+Targets (detect by folder existence under `<profile>`):
+
+- chrome   - if `AppData\Local\Google\Chrome\User Data` exists -> back up the
+             whole `AppData\Local\Google` folder. Label "Chrome data".
+- firefox  - if `AppData\Roaming\Mozilla\Firefox\Profiles` exists -> back up
+             `AppData\Roaming\Mozilla\Firefox`. Label "Firefox profile".
+- outlook  - if `AppData\Local\Microsoft\Outlook` exists -> back up
+             `AppData\Local\Microsoft\Outlook` but EXCLUDE `*.ost` (OST is a
+             re-downloadable cache; this keeps PST + autocomplete RoamCache
+             `*.dat` + `*.nk2`). Label "Outlook data (PST + autocomplete, no OST)".
+
+These are independent selections, separate from and in addition to the whole
+"AppData" opt-in. A user may pick Chrome data without backing up all of AppData.
+
+Scope:
+
+- New `Get-WinPulseBackupAppTargets -profileRoot <root> -userName <name>`: returns
+  the detected targets for that user, each `[ordered]@{ Key; Label; Relative;
+  ExcludeFiles }` (ExcludeFiles only set for outlook = `@('*.ost')`). Detection is
+  folder-existence under `<root>\<userName>\<Relative...>`.
+- Selection: interactive - after the existing folder multi-select, build the union
+  of detected app targets across the selected users and show a multi-select
+  "Detected application data (optional)". Non-interactive: add `-BackupApps
+  string[]` to the top param block and plumb it through (mirror `-BackupFolders`).
+  The plan includes an app target for a given user only if that user has it.
+- Plan items: add two fields to EACH backup plan item - `Relative` (the relative
+  path used; for standard folders it is the catalog Relative, for app targets the
+  app Relative) and `ExtraExcludeFiles` (per-item, e.g. `*.ost`; empty for normal
+  folders). Source = `<profile>\<Relative>`, Dest = `<destRoot>\<user>\<Relative>`
+  (so the relative structure is preserved and restore can place it back).
+- Robocopy: in the backup loop, pass the global exclusions PLUS the item's
+  `ExtraExcludeFiles` to `Invoke-WinPulseRobocopy -excludeFiles`. Do not change
+  the wrapper's signature unless needed.
+- Manifest: record the selected app keys (e.g. `Apps = @($appKeys)`) and make sure
+  each item carries its `Relative` so restore/verify can use it.
+- Restore round-trip: `New-WinPulseRestorePlan` must use the manifest item's
+  `Relative` when present for BOTH source and target (fallback to the catalog /
+  folder name when an older manifest has no Relative, so existing backups still
+  restore). App data then restores to its original relative location.
+- Verify round-trip: `Get-WinPulseManifestItemBackupPath` must also prefer the
+  item's `Relative` when present (fallback as today).
+- Safety note in the manifest: browser profiles include the user's
+  DPAPI-encrypted credential store; this is an explicit per-app opt-in and the
+  encrypted data does not decrypt on another account/machine.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Build a fixture profile with fake `AppData\Local\Google\Chrome\User Data\...`,
+  `AppData\Roaming\Mozilla\Firefox\Profiles\...`, and
+  `AppData\Local\Microsoft\Outlook\` containing a `test.pst`, a `RoamCache\x.dat`,
+  AND a `big.ost`. Run a non-interactive backup selecting `-BackupApps
+  Chrome,Firefox,Outlook` and assert: Chrome/Firefox/Outlook data copied under
+  the right relative paths in the destination, the `.ost` was NOT copied, exit 0.
+- Restore that backup into a temp root and assert the app data lands back under
+  the same relative paths (e.g. `<root>\<user>\AppData\Local\Google\...`).
+- Run MigrationVerify on the backup -> Intact.
+- Without `-BackupApps` and with no detected apps, behaviour is unchanged.
+- Extend the smoke test to cover the above. Parser + ASCII clean; existing
+  Backup/Restore/Verify smoke still exit 0.
+
+Out of scope: decrypting/transforming any app data, deduplicating Chrome cache,
+TUI rendering-engine changes (adding selection items reuses the existing menu).
+
 ## Project Direction
 
 WinPulse is the main project going forward.
