@@ -4,6 +4,16 @@ This file is the canonical working guide for AI agents working on WinPulse,
 including Codex, Claude Code, and similar coding assistants. Read this before
 making changes.
 
+## Agent Coordination
+
+Claude Code is the lead agent for product and implementation direction in this
+repository. Codex should act as an implementation assistant: do only the
+specific work assigned by the user or Claude, avoid independent product
+decisions, and ask before changing files when the requested change is not
+explicit or when it conflicts with existing project rules. If Codex finds a
+problem outside the assigned task, report it and wait for direction instead of
+fixing it unilaterally.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
@@ -89,6 +99,26 @@ PowerShell-first.
 - Existing TUI box width is 88 characters.
 - Installer flows should run in a separate PowerShell process where practical
   so an installer crash does not take down WinPulse.
+
+## Startup Performance
+
+The startup scan is split into a fast critical path and deferred work:
+
+- `Invoke-CoreScan` collects only what the dashboard and triage findings need
+  (system, hardware, security, health, network, plus drivers, startup, printers,
+  license, hardware detail, temperatures, TPM). Keep it lean.
+- `Complete-WinPulseDetailScan` lazily fills the detail-only sections (installed
+  software, scheduled tasks, user accounts, network detail, virtualization). It
+  is idempotent (guarded by `$scan.DetailScanned`) and is called by the consumers
+  that need full data (Findings detail, Export menu, HTML report). Do not move
+  these back into the startup path.
+- Triage findings and the dashboard already null-guard every extended/detail
+  section, so deferring a section is safe (it just will not surface until loaded).
+- Known slow WMI: `SoftwareLicensingProduct` MUST be queried with a WQL `-Filter`
+  (ApplicationID `55c92734-...` + `PartialProductKey IS NOT NULL`); unfiltered it
+  enumerates hundreds of SKUs and costs ~10s. The BitLocker WMI provider costs
+  ~5s to initialize regardless of query shape - do not "optimize" it by changing
+  the query; only deferral would help, and that trades dashboard accuracy.
 
 ## Migration Work
 

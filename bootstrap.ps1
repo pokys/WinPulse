@@ -25,7 +25,7 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.8.2-20260601'
+$script:WinPulseVersion = '0.8.3-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1019,8 +1019,12 @@ function Get-WinPulseLicenseInfo {
     }
 
     try {
-        $lic = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue |
-            Where-Object { $_.PartialProductKey -and $_.Name -like '*Windows*' } |
+        # Filter server-side: ApplicationID is the Windows OS licensing family,
+        # and PartialProductKey IS NOT NULL narrows to the installed product.
+        # Without this WQL filter, SoftwareLicensingProduct enumerates hundreds
+        # of SKU entries and takes ~10s; the filter brings it under a second.
+        $lic = Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID = '55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.PartialProductKey } |
             Select-Object -First 1
 
         if ($lic) {
@@ -1224,8 +1228,13 @@ function Invoke-CoreScan {
         License        = $null
         ScheduledTasks = $null
         Virtualization = $null
+        DetailScanned  = $false
         Errors      = @()
     }
+
+    # Reused across the System and Hardware collectors so Win32_OperatingSystem
+    # is queried only once.
+    $os = $null
 
     try {
         $computer = Get-CimInstance -ClassName Win32_ComputerSystem
@@ -1252,7 +1261,7 @@ function Invoke-CoreScan {
     }
 
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem
+        if (-not $os) { $os = Get-CimInstance -ClassName Win32_OperatingSystem }
         $totalMemory = [double]$os.TotalVisibleMemorySize * 1KB
         $freeMemory = [double]$os.FreePhysicalMemory * 1KB
         $usedMemory = $totalMemory - $freeMemory
@@ -1407,9 +1416,13 @@ function Invoke-CoreScan {
         $ipCfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1
         $dns = if ($ipCfg) { @($ipCfg.DNSServer.ServerAddresses) } else { @() }
 
+        # Bounded ping (800 ms) so an offline machine does not stall startup on
+        # the default Test-Connection timeout.
         $internet = $false
         try {
-            $internet = Test-Connection -ComputerName '1.1.1.1' -Count 1 -Quiet -ErrorAction Stop
+            $ping = New-Object System.Net.NetworkInformation.Ping
+            $reply = $ping.Send('1.1.1.1', 800)
+            $internet = ($reply -and $reply.Status -eq 'Success')
         }
         catch {
             $internet = $false
@@ -1452,21 +1465,6 @@ function Invoke-CoreScan {
     catch { $result.Errors += "STARTUP: $($_.Exception.Message)" }
     Write-Host ' done' -ForegroundColor DarkGray
 
-    Write-Host '  Scanning user accounts...' -ForegroundColor DarkGray -NoNewline
-    try { $result.UserAccounts = Get-WinPulseUserAccounts }
-    catch { $result.Errors += "USERS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
-
-    Write-Host '  Scanning network details...' -ForegroundColor DarkGray -NoNewline
-    try { $result.NetworkDetail = Get-WinPulseNetworkDetail }
-    catch { $result.Errors += "NETWORK DETAIL: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
-
-    Write-Host '  Scanning installed software...' -ForegroundColor DarkGray -NoNewline
-    try { $result.Software = Get-WinPulseSoftwareInventory }
-    catch { $result.Errors += "SOFTWARE: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
-
     Write-Host '  Scanning printers...' -ForegroundColor DarkGray -NoNewline
     try { $result.Printers = Get-WinPulsePrinterStatus }
     catch { $result.Errors += "PRINTERS: $($_.Exception.Message)" }
@@ -1477,17 +1475,43 @@ function Invoke-CoreScan {
     catch { $result.Errors += "LICENSE: $($_.Exception.Message)" }
     Write-Host ' done' -ForegroundColor DarkGray
 
-    Write-Host '  Scanning scheduled tasks...' -ForegroundColor DarkGray -NoNewline
-    try { $result.ScheduledTasks = Get-WinPulseScheduledTaskAnalysis }
-    catch { $result.Errors += "SCHEDULED TASKS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
-
-    Write-Host '  Scanning virtualization...' -ForegroundColor DarkGray -NoNewline
-    try { $result.Virtualization = Get-WinPulseVirtualizationInfo }
-    catch { $result.Errors += "VIRTUALIZATION: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    # Detail-only collectors (installed software, scheduled tasks, user
+    # accounts, network detail, virtualization) are NOT needed for the dashboard
+    # or the triage findings, so they are deferred to Complete-WinPulseDetailScan
+    # and loaded lazily the first time the full report is generated. This keeps
+    # startup fast.
 
     return [pscustomobject]$result
+}
+
+function Complete-WinPulseDetailScan {
+    # Lazily fills the detail-only scan sections (software inventory, scheduled
+    # tasks, user accounts, network detail, virtualization). Idempotent: it
+    # mutates the passed scan object in place and returns early once done, so it
+    # is cheap to call from every consumer that needs the full data.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$scan
+    )
+
+    if ($scan.DetailScanned) { return $scan }
+
+    Write-Host '  Loading full details (software, tasks, accounts)...' -ForegroundColor DarkGray -NoNewline
+    try { $scan.UserAccounts = Get-WinPulseUserAccounts }
+    catch { $scan.Errors += "USERS: $($_.Exception.Message)" }
+    try { $scan.NetworkDetail = Get-WinPulseNetworkDetail }
+    catch { $scan.Errors += "NETWORK DETAIL: $($_.Exception.Message)" }
+    try { $scan.Software = Get-WinPulseSoftwareInventory }
+    catch { $scan.Errors += "SOFTWARE: $($_.Exception.Message)" }
+    try { $scan.ScheduledTasks = Get-WinPulseScheduledTaskAnalysis }
+    catch { $scan.Errors += "SCHEDULED TASKS: $($_.Exception.Message)" }
+    try { $scan.Virtualization = Get-WinPulseVirtualizationInfo }
+    catch { $scan.Errors += "VIRTUALIZATION: $($_.Exception.Message)" }
+    $scan.DetailScanned = $true
+    Write-Host ' done' -ForegroundColor DarkGray
+
+    return $scan
 }
 
 function Write-Status {
@@ -2118,6 +2142,10 @@ function Export-WinPulseHtmlReport {
         [Parameter(Mandatory = $true)]
         [pscustomobject]$scan
     )
+
+    # The full HTML report includes the detail-only sections, which are deferred
+    # at startup. Make sure they are loaded before rendering.
+    $scan = Complete-WinPulseDetailScan -scan $scan
 
     Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
     $e = [System.Web.HttpUtility]
@@ -8364,6 +8392,9 @@ function Show-WinPulseExportMenu {
         [Parameter(Mandatory = $true)]
         [pscustomobject]$scan
     )
+
+    # Exports include the detail-only sections, which are deferred at startup.
+    $scan = Complete-WinPulseDetailScan -scan $scan
 
     while ($true) {
         $choice = Select-WinPulseMenuItem -Title 'Export' -Items @(
