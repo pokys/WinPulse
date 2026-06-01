@@ -25,7 +25,7 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:WinPulseVersion = '0.8.1-20260601'
+$script:WinPulseVersion = '0.8.2-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1848,6 +1848,19 @@ function Show-WinPulseDashboard {
     )
 
     Clear-Host
+    # After returning from a submenu the console buffer may be scrolled, so
+    # Clear-Host can leave the viewport (and cursor) deep in the buffer. Force
+    # both back to the top-left so the dashboard draws at row 0 and the menu
+    # below it fits, instead of overflowing and tripping the menu's clear-screen
+    # safeguard (which would wipe the dashboard - it would just flash and vanish).
+    try {
+        $rawUi = $Host.UI.RawUI
+        $topLeft = New-Object System.Management.Automation.Host.Coordinates 0, 0
+        $rawUi.WindowPosition = $topLeft
+        $rawUi.CursorPosition = $topLeft
+    }
+    catch { }
+
     $w = 88
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
