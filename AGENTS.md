@@ -14,6 +14,89 @@ explicit or when it conflicts with existing project rules. If Codex finds a
 problem outside the assigned task, report it and wait for direction instead of
 fixing it unilaterally.
 
+## Work Queue (assigned to Codex)
+
+Prepared by Claude (lead). Do these in order. Claude reviews each before merge.
+Work on branch `dev/migration-preflight-foundation`; pull latest first (current
+tip bumps the version to `0.8.3-20260601`). Do not push to `main`. Do not bump
+the version (Claude handles version + merge). After each task: run the parser
+check and the ASCII check (see Validation), keep `bootstrap.ps1` ASCII-only and
+StrictMode-safe, and report what you changed plus your test output. If anything
+is ambiguous or conflicts with a rule, stop and ask.
+
+### Task C1 - Non-interactive parameters for backup and restore
+
+Why: the backup and restore modes are fully interactive (menus + a typed `YES`),
+so they cannot be exercised by the smoke-test harness or scripted. This is the
+blocker for the "real runtime test" open item. Add a non-interactive path while
+leaving the interactive flow byte-for-byte unchanged when no params are passed.
+
+Scope:
+
+- Add parameters to the top `param()` block in `bootstrap.ps1`:
+  - Backup: `-BackupUsers string[]`, `-BackupFolders string[]`,
+    `-BackupDestination string`, `-BackupExecute switch`,
+    `-BackupIncludePrivateKeys switch`, `-BackupIncludeAppData switch`,
+    `-BackupHashSample switch`.
+  - Restore: `-RestoreBackupPath string`, `-RestoreRoot string`,
+    `-RestoreFolders string[]`, `-RestoreExecute switch`,
+    `-RestoreHashSample switch`.
+- `Invoke-WinPulseMigrationBackup` and `Invoke-WinPulseMigrationRestore` take
+  these as optional parameters. When the required ones are supplied, run
+  non-interactively: skip `Select-WinPulse*` menus, the destination/root
+  `Read-Host`, and the `YES` prompt.
+- Safety: a non-interactive run is dry-run UNLESS `-BackupExecute` /
+  `-RestoreExecute` is present. That switch IS the explicit confirmation -
+  never copy for real without it. Keep all existing safe defaults (certificates
+  kept, keys/hives excluded unless `-BackupIncludePrivateKeys`, AppData excluded
+  unless `-BackupIncludeAppData`, restore still skips desktop.ini and protects
+  known-folder attributes).
+- Plumb the values into the existing helpers (`New-WinPulseBackupPlan`,
+  `Get-WinPulseBackupExclusions -includePrivateKeys`, the folder list, the
+  `$hashSampleSize`, `Select-WinPulseRestoreItems` equivalent filtering). Reuse,
+  do not duplicate, the existing logic.
+
+Acceptance:
+
+- `bootstrap.ps1 -Mode MigrationBackup -BackupUsers <u> -BackupFolders Desktop`
+  `-BackupDestination <tmp> -BackupExecute` completes with no prompts, writes
+  `manifest.json` + reports, exit code 0.
+- `bootstrap.ps1 -Mode MigrationRestore -RestoreBackupPath <tmp> -RestoreRoot`
+  `<tmp2> -RestoreFolders Desktop -RestoreExecute` completes with no prompts and
+  writes the restore record + report.
+- With no backup/restore params, the interactive menus behave exactly as today.
+- Parser-clean, ASCII-only, StrictMode-safe.
+
+Out of scope: changing the copy/verification logic, the manifest schema, or the
+interactive UX text.
+
+### Task C2 - Smoke-test coverage for backup and restore
+
+Why: `tools/Invoke-WinPulseSmokeTest.ps1` already accepts `MigrationBackup` and
+`MigrationRestore` in its ValidateSet but cannot drive them. Use the Task C1
+parameters to actually exercise them on a throwaway fixture.
+
+Scope:
+
+- In the smoke-test, for those two modes: build a small fixture user folder under
+  a temp path, run a dry-run then an execute backup into another temp dest using
+  the new non-interactive params, then a restore into a third temp path.
+- Assert: expected output files exist (`manifest.json`, the HTML/text report,
+  logs), exit code 0, and the manifest reports zero failures and zero
+  verification mismatches. Clean up the temp fixtures afterward.
+
+Acceptance: `Invoke-WinPulseSmokeTest.ps1 -Mode MigrationBackup` and `-Mode
+MigrationRestore` run the real copy on the fixture and report pass/fail with the
+expected-files check, mirroring the existing MigrationPreflight smoke logic.
+
+Out of scope: touching production `C:\Users` or real profiles - fixtures only.
+
+### Task C3 - (optional, ask Claude first) BitLocker progressive load
+
+Do NOT start this without confirming with Claude - it touches dashboard render
+and is a UX trade-off. Goal would be to move the ~5s `Get-BitLockerVolume` call
+off the startup critical path and enrich the dashboard after first paint. Flagged
+here only so it is not forgotten.
 ## Project Direction
 
 WinPulse is the main project going forward.
