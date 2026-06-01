@@ -352,6 +352,60 @@ Acceptance (non-elevated, temp fixtures):
 
 Out of scope: SMB/remote sources, AppData internals, any TUI rendering changes.
 
+### Task C13 - MigrationVerify mode: re-check an existing backup vs its manifest
+
+Why: before wiping the source machine, a technician wants to confirm a backup on
+disk is still complete and intact - no files lost or shrunk since it was written.
+This is read-only and never copies, deletes, or modifies anything.
+
+Scope:
+
+- Add `MigrationVerify` to every `-Mode` ValidateSet: the top `param()` block,
+  `Invoke-WinPulseMode`, and the smoke wrapper's `ValidateSet`. Add it to the
+  `Invoke-WinPulseMode` switch (call `Invoke-WinPulseMigrationVerify`). Add ONE
+  menu item for it in the Full menu and its handler (a single `@{...}` line plus
+  a `switch` case - do NOT touch menu rendering/scroll logic).
+- Add `-VerifyBackupPath <string>` (non-interactive). Interactive: reuse
+  `Get-WinPulseAvailableBackups` to pick a backup, or enter a path - mirror how
+  `Invoke-WinPulseMigrationRestore` selects the backup (factor out or copy the
+  selection block; do not change restore's behaviour).
+- New `Invoke-WinPulseMigrationVerify`:
+  - Read the manifest with `Read-WinPulseBackupManifest`. If invalid, message and
+    return.
+  - For each manifest item that actually has data (its `Verification` is not null
+    and recorded `DestFiles` > 0), rebuild the backed-up folder path as
+    `<backupRoot>\<UserName>\<relative>` (map Folder->relative via
+    `Get-WinPulseBackupFolderCatalog`, fallback to the folder name - same pattern
+    as restore), then re-measure it NOW with `Measure-WinPulseFolderFiltered`
+    (NO exclusions - the backup is already filtered).
+  - Compare current Files/Bytes against the manifest's recorded `DestFiles` /
+    `DestBytes`. Status `Intact` when current files >= recorded AND current bytes
+    >= recorded; otherwise `Drift` (record how many short).
+  - Items that were dry-run (no data recorded) are reported as `Skipped`.
+  - Print a per-item result and a summary line; write a `migration-verify.json`
+    record under `C:\ProgramData\WinPulse\backups\MigrationVerify-<computer>-<stamp>`
+    (use the same non-elevated fixture-safe record location pattern the restore
+    flow already uses, so the smoke test can run unelevated). An HTML/text report
+    is optional - JSON record + on-screen output is enough.
+  - Return an object; exit/return should make a drift detectable (e.g. a
+    `DriftCount` field), but do NOT throw on drift - report it.
+- Read-only guarantee: no robocopy, no New-Item except the record folder, no
+  deletes.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Build a fixture backup (as the smoke test does), then
+  `bootstrap.ps1 -Mode MigrationVerify -VerifyBackupPath <dest>` exits 0, reports
+  every item `Intact`, and writes `migration-verify.json` with DriftCount 0.
+- Then delete (or shrink) a file inside the backup and re-run: the matching item
+  reports `Drift` and DriftCount > 0.
+- Add a `MigrationVerify` smoke mode that asserts both (intact, then drift).
+- Parser + ASCII clean; the existing MigrationBackup/MigrationRestore smoke tests
+  still exit 0.
+
+Out of scope: per-file hashing of the whole backup (manifests do not store
+per-file hashes), TUI rendering changes, anything that writes into the backup.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
