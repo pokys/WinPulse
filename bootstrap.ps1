@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.9.4-20260601'
+$script:WinPulseVersion = '0.9.5-20260601'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -8963,6 +8963,31 @@ function Show-WinPulseExportMenu {
     }
 }
 
+function Show-WinPulseMigrationMenu {
+    # Groups all migration actions under one entry. Loops until Back/Esc.
+    [CmdletBinding()]
+    param()
+
+    while ($true) {
+        Clear-Host
+        $choice = Select-WinPulseMenuItem -Title 'Migration' -Items @(
+            @{ Label = 'Preflight (read-only report)'; Key = 'P'; Hint = 'Inspect & plan' },
+            @{ Label = 'Backup (copy user data out)';  Key = 'B'; Hint = 'To a folder/drive' },
+            @{ Label = 'Restore (put data back)';      Key = 'R'; Hint = 'From a backup' },
+            @{ Label = 'Verify (re-check a backup)';   Key = 'V'; Hint = 'Integrity check' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                         Key = 'Q'; Color = 'DarkGray' }
+        )
+        switch ($choice) {
+            'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
+            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
+            'R' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
+            'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
+            default { return }
+        }
+    }
+}
+
 function Show-WinPulseMainMenu {
     [CmdletBinding()]
     param(
@@ -8975,10 +9000,7 @@ function Show-WinPulseMainMenu {
         $choice = Select-WinPulseMenuItem -Title 'Main Menu' -Items @(
             @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'System health' },
             @{ Label = 'W11 readiness';     Key = 'A'; Hint = 'Upgrade signals' },
-            @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
-            @{ Label = 'Migration backup';  Key = 'B'; Hint = 'Copy user files out' },
-            @{ Label = 'Migration restore'; Key = 'O'; Hint = 'Put files back' },
-            @{ Label = 'Migration verify';  Key = 'V'; Hint = 'Re-check backup' },
+            @{ Label = 'Migration';         Key = 'M'; Hint = 'Preflight/backup/restore/verify' },
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
@@ -8990,10 +9012,7 @@ function Show-WinPulseMainMenu {
         switch ($choice) {
             'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Wait-WinPulseKey }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
-            'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
-            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
-            'O' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
-            'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
+            'M' { Show-WinPulseMigrationMenu }
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
@@ -9107,8 +9126,8 @@ function Show-WinPulseTriageMenu {
         $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
             @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
             @{ Label = 'W11 readiness';      Key = 'A'; Hint = 'Upgrade signals' },
-            @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
-            @{ Label = 'Full menu';          Key = 'M'; Hint = 'Backup, restore, more' },
+            @{ Label = 'Migration';          Key = 'P'; Hint = 'Preflight/backup/restore/verify' },
+            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
             @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
             @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
             @{ Label = 'Safe actions';       Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
@@ -9119,7 +9138,7 @@ function Show-WinPulseTriageMenu {
             'R' { $scan = Invoke-CoreScan }
             'F' { Show-WinPulseFindingsDetail -scan $scan }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
-            'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
+            'P' { Show-WinPulseMigrationMenu }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
             'M' { Show-WinPulseMainMenu -scan $scan; return }
