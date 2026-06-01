@@ -141,13 +141,21 @@ Status (Claude did this batch since Codex was out of limit):
 - C6 DONE - English UI + InvariantCulture numbers (on main).
 - C8 DONE - responsive box width, identical at >= 90 cols (on main).
 - C10 DONE - repeat-command hint after interactive backup/restore (on main).
-- C7 DEFERRED - rewriting the single-select menu render loop (behind every menu)
-  is the highest-risk change for the lowest value (overflow only on tiny
-  windows, already handled by the Clear-Host safeguard). Hold until it can be
-  verified interactively.
-- C9 PENDING - needs interactive verification (TUI rendering not covered by the
-  smoke tests). Implement on dev, owner verifies before main.
-- C11 PENDING - same: interactive UI, verify before main.
+Deferred to a future INTERACTIVE TUI session (owner's call, option 3): C7, C9,
+and C11 all change live TUI rendering, which the smoke tests cannot verify. They
+are NOT abandoned - they are held until they can be built and checked with the
+owner watching a real terminal, so a blind change cannot quietly break the UI.
+
+- C7 - single-select menu viewport scrolling. Lowest value of the three
+  (overflow only on tiny windows, already handled by the Clear-Host safeguard)
+  and highest risk (the render loop is behind every menu). Revisit only during
+  the interactive session, if at all.
+- C9 - boxed + paged Network/Security output, consistent loop/back, breadcrumb.
+- C11 - scrollable findings list with jump-to-detail.
+
+When starting the interactive session: do these on `dev`, keep each change a
+separate commit, validate parser + ASCII + both fixture smoke tests, and confirm
+visually at >= 90 columns (must look unchanged) before merging to main.
 
 How to work this batch:
 
