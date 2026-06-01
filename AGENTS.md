@@ -127,6 +127,119 @@ Do NOT start this without confirming with Claude - it touches dashboard render
 and is a UX trade-off. Goal would be to move the ~5s `Get-BitLockerVolume` call
 off the startup critical path and enrich the dashboard after first paint. Flagged
 here only so it is not forgotten.
+
+## Work Queue - Batch 2 (UX/UI), active
+
+Approved by the owner; prepared by Claude. THE TOP RULE: do not break the
+working script. The startup scan, dashboard, the Quick Triage / Full menu flow,
+and the migration backup/restore all work today - keep them working.
+
+How to work this batch:
+
+- One task per commit, in order, on `dev/migration-preflight-foundation`. Do not
+  push to main and do not bump the version (Claude does that).
+- After EACH task: run the parser check, the ASCII check, AND both fixture smoke
+  tests (`Invoke-WinPulseSmokeTest.ps1 -Mode MigrationBackup` / `-Mode
+  MigrationRestore`) - all must stay green. Report what you changed + test output.
+- For any task that touches box drawing or menu rendering (C8, C9, C10): on a
+  normal terminal (>= 90 columns) the output MUST look identical to today. Only
+  add new behavior for the small/overflow case. If unsure, stop and ask Claude.
+- Do not refactor unrelated code. Keep diffs minimal and reviewable.
+
+### Task C4 - Default backup location outside the exit-cleanup zone (do FIRST)
+
+Why: exit cleanup (`Invoke-WinPulseFullArtifactCleanup`, run on Exit) deletes
+everything under `C:\ProgramData\WinPulse\backups`. The owner WANTS that cleanup
+to stay. So real backups must not default there or they get wiped on exit.
+
+Scope:
+
+- Change ONLY the default backup destination in `Invoke-WinPulseMigrationBackup`
+  from `$script:WinPulsePaths.Backups\MigrationBackup-...` to a persistent
+  location that exit cleanup does not touch. Use `C:\WinPulseBackups\
+  MigrationBackup-<computer>-<stamp>` as the default (create the folder if
+  missing). The interactive prompt and `-BackupDestination` still let the user
+  type any path.
+- Leave exit cleanup, the working dir under `C:\ProgramData\WinPulse`, and
+  preflight/exports behaviour unchanged (reports staying ephemeral is fine).
+- Restore records may stay where they are (they are logs, not user data).
+
+Acceptance: a default-destination backup lands under `C:\WinPulseBackups` and
+survives an Exit; smoke tests still green (they pass explicit temp destinations,
+so they are unaffected).
+
+### Task C5 - Hide Tweaks; show version in the dashboard header
+
+- Remove the `Tweaks` entry (and its `'W'` handler) from the main menu - it is a
+  disabled stub. Keep `Show-WinPulseTweaksMenu` in the file for later.
+- In the dashboard top border (`Show-WinPulseDashboard`), show `WinPulse
+  <version>` using `$script:WinPulseVersion`, without changing the box width.
+
+Acceptance: Tweaks is no longer reachable; the dashboard header shows the
+version; width/layout unchanged on a normal terminal.
+
+### Task C6 - Full English UI + culture-invariant numbers
+
+- Replace any remaining non-English UI strings (e.g. the `Nacitam systemove
+  informace...` startup line) with English.
+- Make numeric formatting culture-invariant so it shows `49.58%` not `49,58%`.
+  Fix `ConvertTo-ReadableSize` (the `{0:N2}` formats) and any percent formatting
+  to use `[System.Globalization.CultureInfo]::InvariantCulture`. Logic unchanged,
+  formatting only.
+
+Acceptance: no Czech strings in the UI; sizes/percentages use a dot; smoke green.
+
+### Task C7 - Single-select menu viewport scrolling
+
+- Port the viewport/scroll logic from `Select-WinPulseMultiMenuItem` into
+  `Select-WinPulseMenuItem` so long menus scroll instead of relying on the
+  `Clear-Host` safeguard.
+- CRITICAL: menus that already fit must render and behave EXACTLY as today,
+  including the Quick Triage dashboard-then-menu flow we just fixed. Only add
+  scrolling when items exceed the visible viewport.
+
+Acceptance: a long menu scrolls; short menus unchanged; the triage dashboard
+still shows and does not flash/disappear on return from a submenu.
+
+### Task C8 - Responsive box width (careful)
+
+- Replace the hardcoded `$w = 88` in the header, dashboard, and menus with a
+  computed width: `min(88, [Console]::WindowWidth - 2)` clamped to a floor of 60.
+- CRITICAL: on a window >= 90 columns the result MUST be 88 (identical to today).
+  Only narrow on smaller terminals. Test at 90+, 80, and 70 columns.
+
+Acceptance: identical look at >= 90 cols; no wrapping/garbling at 70 cols.
+
+### Task C9 - Unify raw submenu output + consistent loop/back + breadcrumb
+
+- Network, Security (and any other `Format-Table/Format-List | Out-Host` dumps):
+  render inside the existing boxed style and add simple paging for long output
+  (page with space/enter, Esc to stop).
+- Make these submenus loop until Esc/Back like the others, and add a one-line
+  breadcrumb (e.g. `Main > Network`) plus the standard footer help bar.
+- Keep it readable - do not over-decorate.
+
+Acceptance: Network/Security match the app style, long output pages instead of
+dumping, Esc backs out consistently; smoke green.
+
+### Task C10 - Equivalent-command hint after interactive backup/restore
+
+- After an interactive backup or restore completes, print the equivalent
+  non-interactive command line (the `-Backup*` / `-Restore*` form, including
+  `-BackupExecute`/`-RestoreExecute`) so a technician can script it.
+
+Acceptance: a copy-pasteable command is shown after an interactive run; nothing
+changes for the non-interactive path.
+
+### Task C11 - Scrollable findings list with jump-to-detail (keep it clean)
+
+- Make the triage findings reviewable: a scrollable list of all findings (not
+  just top 3 + "+N more"), and selecting one jumps to its relevant detail.
+- Priority is readability - do not clutter. Reuse existing menu/scroll helpers.
+
+Acceptance: all findings are reachable and readable; selecting one shows detail;
+the dashboard summary (top findings) is unchanged.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
