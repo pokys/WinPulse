@@ -24,6 +24,17 @@ check and the ASCII check (see Validation), keep `bootstrap.ps1` ASCII-only and
 StrictMode-safe, and report what you changed plus your test output. If anything
 is ambiguous or conflicts with a rule, stop and ask.
 
+Environment constraint (important): Codex cannot run an elevated PowerShell
+session. So everything you build here MUST be verifiable WITHOUT elevation:
+
+- Validate with the parser check, the ASCII check, and the fixture-based smoke
+  run only. All of these run non-elevated.
+- Use throwaway fixtures under the per-user temp folder (`$env:TEMP`) for both
+  the source profile data and the backup/restore destinations - never real
+  `C:\Users` profiles and never admin-only locations.
+- The real elevated end-to-end run against live profiles stays a human/Claude
+  task; do not attempt it and do not claim it was done.
+
 ### Task C1 - Non-interactive parameters for backup and restore
 
 Why: the backup and restore modes are fully interactive (menus + a typed `YES`),
@@ -37,10 +48,16 @@ Scope:
   - Backup: `-BackupUsers string[]`, `-BackupFolders string[]`,
     `-BackupDestination string`, `-BackupExecute switch`,
     `-BackupIncludePrivateKeys switch`, `-BackupIncludeAppData switch`,
-    `-BackupHashSample switch`.
+    `-BackupHashSample switch`, `-BackupProfilesRoot string`.
   - Restore: `-RestoreBackupPath string`, `-RestoreRoot string`,
     `-RestoreFolders string[]`, `-RestoreExecute switch`,
     `-RestoreHashSample switch`.
+- Parameterize the profiles root: give `Get-WinPulseMigrationProfiles` an
+  optional `-Root` parameter defaulting to `C:\Users`, and pass
+  `-BackupProfilesRoot` through to it. This is REQUIRED so the smoke test can
+  point at a temp fixture root and run without elevation (no access to real
+  `C:\Users`). Bonus: it is also the groundwork for the future SMB C$ candidate
+  feature, so keep the default behavior identical when the param is absent.
 - `Invoke-WinPulseMigrationBackup` and `Invoke-WinPulseMigrationRestore` take
   these as optional parameters. When the required ones are supplied, run
   non-interactively: skip `Select-WinPulse*` menus, the destination/root
@@ -56,14 +73,17 @@ Scope:
   `$hashSampleSize`, `Select-WinPulseRestoreItems` equivalent filtering). Reuse,
   do not duplicate, the existing logic.
 
-Acceptance:
+Acceptance (all of this must pass WITHOUT an elevated session):
 
-- `bootstrap.ps1 -Mode MigrationBackup -BackupUsers <u> -BackupFolders Desktop`
-  `-BackupDestination <tmp> -BackupExecute` completes with no prompts, writes
-  `manifest.json` + reports, exit code 0.
-- `bootstrap.ps1 -Mode MigrationRestore -RestoreBackupPath <tmp> -RestoreRoot`
-  `<tmp2> -RestoreFolders Desktop -RestoreExecute` completes with no prompts and
-  writes the restore record + report.
+- Make a temp fixture root, e.g. `$env:TEMP\wp-fix\Users\tester\Desktop` with a
+  file in it, then:
+  `bootstrap.ps1 -Mode MigrationBackup -BackupProfilesRoot <tmpFixtureUsers>`
+  `-BackupUsers tester -BackupFolders Desktop -BackupDestination <tmpDest>`
+  `-BackupExecute` completes with no prompts, writes `manifest.json` + reports,
+  exit code 0, and the manifest shows zero failures/mismatches.
+- `bootstrap.ps1 -Mode MigrationRestore -RestoreBackupPath <tmpDest>`
+  `-RestoreRoot <tmpRestore> -RestoreFolders Desktop -RestoreExecute` completes
+  with no prompts and writes the restore record + report.
 - With no backup/restore params, the interactive menus behave exactly as today.
 - Parser-clean, ASCII-only, StrictMode-safe.
 
@@ -78,16 +98,20 @@ parameters to actually exercise them on a throwaway fixture.
 
 Scope:
 
-- In the smoke-test, for those two modes: build a small fixture user folder under
-  a temp path, run a dry-run then an execute backup into another temp dest using
-  the new non-interactive params, then a restore into a third temp path.
+- In the smoke-test, for those two modes: build a small fixture user profile
+  tree under a temp path (e.g. `<tmp>\Users\tester\Desktop\sample.txt`), then run
+  an execute backup into a second temp dest via `-BackupProfilesRoot` and the
+  other Task C1 params, then a restore into a third temp path.
 - Assert: expected output files exist (`manifest.json`, the HTML/text report,
   logs), exit code 0, and the manifest reports zero failures and zero
   verification mismatches. Clean up the temp fixtures afterward.
+- Must run and pass WITHOUT elevation (temp fixtures + `-BackupProfilesRoot`
+  avoid any need for admin or access to real `C:\Users`).
 
 Acceptance: `Invoke-WinPulseSmokeTest.ps1 -Mode MigrationBackup` and `-Mode
-MigrationRestore` run the real copy on the fixture and report pass/fail with the
-expected-files check, mirroring the existing MigrationPreflight smoke logic.
+MigrationRestore`, run from a NON-elevated window, drive the real copy on the
+fixture and report pass/fail with the expected-files check, mirroring the
+existing MigrationPreflight smoke logic.
 
 Out of scope: touching production `C:\Users` or real profiles - fixtures only.
 
