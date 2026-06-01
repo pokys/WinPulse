@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'W11Readiness', 'ExportBundle')]
+    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'W11Readiness', 'ExportBundle')]
     [string]$Mode = 'MigrationPreflight',
 
     [string]$BootstrapPath = $null
@@ -102,6 +102,18 @@ function Assert-SmokeManifestCounts {
     }
 }
 
+function Get-SmokeLatestVerifyRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RecordRoot
+    )
+
+    return Get-ChildItem -LiteralPath $RecordRoot -Filter 'migration-verify.json' -Recurse -ErrorAction Stop |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -125,7 +137,7 @@ Write-Host ('WinPulse smoke test: {0}' -f $Mode) -ForegroundColor Cyan
 Write-Host ('Bootstrap: {0}' -f $BootstrapPath) -ForegroundColor Gray
 Write-Host ('Logs: {0}' -f $logRoot) -ForegroundColor Gray
 
-if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore')) {
+if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
     Write-Host ''
     Write-Host 'WARNING: run this smoke test from an elevated Windows PowerShell window.' -ForegroundColor Yellow
     Write-Host 'Parser errors will still be captured, but runtime output from auto-elevated child windows may not be captured.' -ForegroundColor Yellow
@@ -140,6 +152,8 @@ $restoreRoot = $null
 $remapRestoreRoot = $null
 $restoreRecordPath = $null
 $remapRestoreRecordPath = $null
+$verifyRecordPath = $null
+$driftVerifyRecordPath = $null
 $expectedFilesPresent = $false
 $fixtureCleaned = $false
 $processExitCode = 0
@@ -147,7 +161,7 @@ $stdoutParts = @()
 $stderrParts = @()
 
 try {
-    if ($Mode -in @('MigrationBackup', 'MigrationRestore')) {
+    if ($Mode -in @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
         $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
         $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')
         $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
@@ -182,6 +196,59 @@ try {
         Assert-SmokeFile -Path (Join-SmokePath -Path $backupRoot -ChildPath @('logs', 'migration-backup.log'))
         Assert-SmokeManifestCounts -Path $manifestPath
         $expectedFilesPresent = $true
+
+        if ($Mode -eq 'MigrationVerify') {
+            $verifyArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationVerify',
+                '-VerifyBackupPath', (Convert-SmokeArgument -Value $backupRoot)
+            )
+            $verifyRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $verifyArguments
+            $stdoutParts += $verifyRun.Stdout
+            $stderrParts += $verifyRun.Stderr
+            if ($verifyRun.ExitCode -ne 0) {
+                throw ('MigrationVerify intact fixture exited with {0}' -f $verifyRun.ExitCode)
+            }
+
+            $verifyRecordRoot = Join-Path -Path $fixtureRoot -ChildPath '_WinPulseVerifyRecords'
+            $verifyRecord = Get-SmokeLatestVerifyRecord -RecordRoot $verifyRecordRoot
+            if (-not $verifyRecord) {
+                throw 'MigrationVerify intact fixture did not write migration-verify.json.'
+            }
+            $verifyRecordPath = $verifyRecord.FullName
+            Assert-SmokeFile -Path $verifyRecordPath
+            $verifyManifest = Get-Content -LiteralPath $verifyRecordPath -Raw | ConvertFrom-Json
+            if ([int]$verifyManifest.DriftCount -ne 0 -or [int]$verifyManifest.IntactCount -lt 1) {
+                throw ('MigrationVerify intact fixture reported IntactCount={0}, DriftCount={1}.' -f $verifyManifest.IntactCount, $verifyManifest.DriftCount)
+            }
+
+            $backupSample = Join-SmokePath -Path $backupRoot -ChildPath @('tester', 'Desktop', 'sample.txt')
+            Remove-Item -LiteralPath $backupSample -Force -ErrorAction Stop
+
+            $driftRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $verifyArguments
+            $stdoutParts += $driftRun.Stdout
+            $stderrParts += $driftRun.Stderr
+            if ($driftRun.ExitCode -ne 0) {
+                throw ('MigrationVerify drift fixture exited with {0}' -f $driftRun.ExitCode)
+            }
+
+            $driftRecord = Get-SmokeLatestVerifyRecord -RecordRoot $verifyRecordRoot
+            if (-not $driftRecord) {
+                throw 'MigrationVerify drift fixture did not write migration-verify.json.'
+            }
+            $driftVerifyRecordPath = $driftRecord.FullName
+            Assert-SmokeFile -Path $driftVerifyRecordPath
+            $driftManifest = Get-Content -LiteralPath $driftVerifyRecordPath -Raw | ConvertFrom-Json
+            if ([int]$driftManifest.DriftCount -lt 1) {
+                throw ('MigrationVerify drift fixture reported DriftCount={0}.' -f $driftManifest.DriftCount)
+            }
+            $driftItem = $driftManifest.Items | Where-Object { $_.Status -eq 'Drift' } | Select-Object -First 1
+            if (-not $driftItem) {
+                throw 'MigrationVerify drift fixture did not record a Drift item.'
+            }
+        }
 
         if ($Mode -eq 'MigrationRestore') {
             $restoreArguments = @(
@@ -351,6 +418,8 @@ if ($fixtureRoot) {
     if ($remapRestoreRoot) { $summary.Add(('RemapRestoreRoot: {0}' -f $remapRestoreRoot)) }
     if ($restoreRecordPath) { $summary.Add(('RestoreRecord: {0}' -f $restoreRecordPath)) }
     if ($remapRestoreRecordPath) { $summary.Add(('RemapRestoreRecord: {0}' -f $remapRestoreRecordPath)) }
+    if ($verifyRecordPath) { $summary.Add(('VerifyRecord: {0}' -f $verifyRecordPath)) }
+    if ($driftVerifyRecordPath) { $summary.Add(('DriftVerifyRecord: {0}' -f $driftVerifyRecordPath)) }
     $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
 }
 $summary | Set-Content -Path $summaryPath -Encoding UTF8

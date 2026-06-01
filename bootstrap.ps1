@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
+    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')]
     [string]$Mode = 'Triage',
 
     [string[]]$BackupUsers = @(),
@@ -18,10 +18,12 @@ param(
     [string[]]$RestoreFolders = @(),
     [switch]$RestoreExecute,
     [switch]$RestoreHashSample,
-    [string]$RestoreAsUser = $null
+    [string]$RestoreAsUser = $null,
+
+    [string]$VerifyBackupPath = $null
 )
 
-$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')
+$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')
 $modeOverride = $null
 $globalMode = Get-Variable -Name WinPulseMode -Scope Global -ErrorAction SilentlyContinue
 if ($globalMode -and -not [string]::IsNullOrWhiteSpace([string]$globalMode.Value)) {
@@ -103,7 +105,7 @@ function Start-WinPulseElevation {
         $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $tempScript))
     }
 
-    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')) {
+    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')) {
         $args = @('-NoExit') + $args
     }
 
@@ -4977,6 +4979,242 @@ function Get-WinPulseAvailableBackups {
     return @($backups)
 }
 
+function Get-WinPulseManifestItemBackupPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$item,
+
+        [Parameter(Mandatory = $true)]
+        [string]$backupRoot
+    )
+
+    $userName = [string]$item.UserName
+    $folder = [string]$item.Folder
+    if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($folder)) {
+        return $null
+    }
+
+    $catalog = Get-WinPulseBackupFolderCatalog
+    $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
+    $relative = if ($catEntry) { $catEntry['Relative'] } else { $folder }
+    return Join-WinPulsePath -path $backupRoot -childpath @($userName, $relative)
+}
+
+function Get-WinPulseVerifyRecordBase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$backupRoot,
+
+        [bool]$nonInteractive = $false
+    )
+
+    if ($nonInteractive -and -not (Test-WinPulseIsAdmin) -and (Test-WinPulsePathUnderRoot -path $backupRoot -root ([IO.Path]::GetTempPath()))) {
+        $backupParent = Split-Path -Path $backupRoot -Parent
+        if (-not [string]::IsNullOrWhiteSpace($backupParent)) {
+            return (Join-Path -Path $backupParent -ChildPath '_WinPulseVerifyRecords')
+        }
+    }
+
+    return $script:WinPulsePaths.Backups
+}
+
+function Invoke-WinPulseMigrationVerify {
+    # Read-only backup integrity check. It only measures files already in the
+    # backup and writes a verification record outside the backup payload.
+    [CmdletBinding()]
+    param(
+        [string]$VerifyBackupPath = $null
+    )
+
+    $nonInteractive = -not [string]::IsNullOrWhiteSpace($VerifyBackupPath)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Verify'
+    Write-Host '  Re-check an existing backup against its manifest.' -ForegroundColor Cyan
+    Write-Host '  This only reads the backup and writes a verification record.' -ForegroundColor Cyan
+    Write-Host ''
+
+    $selectedBackupRoot = $null
+    if ($nonInteractive) {
+        $selectedBackupRoot = $VerifyBackupPath.Trim()
+    }
+    else {
+        $backups = @(Get-WinPulseAvailableBackups)
+
+        if ($backups.Count -gt 0) {
+            $items = @()
+            foreach ($b in $backups) {
+                $items += @{
+                    Label = ('{0}  [{1}, {2} user(s), {3}]' -f $b.Name, $b.Action, $b.UserCount, $b.TotalSize)
+                    Key   = $b.Path
+                    Hint  = $b.LastWrite
+                }
+            }
+            $items += @{ Separator = $true }
+            $items += @{ Label = 'Enter a path manually'; Key = '__manual__'; Hint = 'External drive, etc.' }
+
+            $choice = Select-WinPulseMenuItem -Title 'Which backup do you want to verify?' -Items $items
+            if (-not $choice) {
+                Write-Host '  Verify cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            if ($choice -ne '__manual__') {
+                $selectedBackupRoot = $choice
+            }
+        }
+        else {
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+        }
+
+        if (-not $selectedBackupRoot) {
+            $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+            if ([string]::IsNullOrWhiteSpace($manualInput)) {
+                Write-Host '  No path entered. Verify cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            $selectedBackupRoot = $manualInput.Trim()
+        }
+    }
+
+    $manifestPath = Join-Path -Path $selectedBackupRoot -ChildPath 'manifest.json'
+    $manifest = Read-WinPulseBackupManifest -path $manifestPath
+    if (-not $manifest) {
+        Write-Host ('  Could not read a valid manifest.json under {0}.' -f $selectedBackupRoot) -ForegroundColor Red
+        return $null
+    }
+
+    Write-Host ('  Backup: {0}' -f $selectedBackupRoot) -ForegroundColor DarkGray
+    Write-Host ''
+
+    $results = @()
+    foreach ($entry in @($manifest.Items)) {
+        $userName = [string]$entry.UserName
+        $folder = [string]$entry.Folder
+        $verification = $null
+        if ($entry.PSObject.Properties['Verification']) {
+            $verification = $entry.Verification
+        }
+
+        $recordedFiles = 0
+        $recordedBytes = [double]0
+        if ($verification -and $verification.PSObject.Properties['DestFiles']) {
+            $recordedFiles = [int]$verification.DestFiles
+        }
+        if ($verification -and $verification.PSObject.Properties['DestBytes']) {
+            $recordedBytes = [double]$verification.DestBytes
+        }
+
+        $backupPath = Get-WinPulseManifestItemBackupPath -item $entry -backupRoot $selectedBackupRoot
+        if (-not $verification -or $recordedFiles -le 0 -or [string]::IsNullOrWhiteSpace($backupPath)) {
+            Write-Host ('    [ ] {0}\{1}  skipped (no executed backup data)' -f $userName, $folder) -ForegroundColor DarkGray
+            $results += [pscustomobject][ordered]@{
+                UserName      = $userName
+                Folder        = $folder
+                BackupPath    = $backupPath
+                Status        = 'Skipped'
+                RecordedFiles = $recordedFiles
+                RecordedBytes = $recordedBytes
+                CurrentFiles  = $null
+                CurrentBytes  = $null
+                ShortFiles    = $null
+                ShortBytes    = $null
+                Note          = 'No executed backup verification data recorded.'
+            }
+            continue
+        }
+
+        $current = Measure-WinPulseFolderFiltered -path $backupPath
+        $shortFiles = [math]::Max(0, ($recordedFiles - [int]$current.Files))
+        $shortBytes = [math]::Max([double]0, ($recordedBytes - [double]$current.Bytes))
+        $status = if ($shortFiles -eq 0 -and $shortBytes -eq 0) { 'Intact' } else { 'Drift' }
+        $note = if ($status -eq 'Intact') {
+            'Current backup meets or exceeds recorded file and byte counts.'
+        }
+        else {
+            ('Short by {0} files / {1} bytes.' -f $shortFiles, $shortBytes)
+        }
+
+        $color = if ($status -eq 'Intact') { 'Green' } else { 'Yellow' }
+        $mark = if ($status -eq 'Intact') { '[OK]' } else { '[!]' }
+        Write-Host ('    {0} {1}\{2}  {3} (recorded {4} files / {5} bytes, current {6} files / {7} bytes)' -f $mark, $userName, $folder, $status, $recordedFiles, $recordedBytes, $current.Files, $current.Bytes) -ForegroundColor $color
+
+        $results += [pscustomobject][ordered]@{
+            UserName      = $userName
+            Folder        = $folder
+            BackupPath    = $backupPath
+            Status        = $status
+            RecordedFiles = $recordedFiles
+            RecordedBytes = $recordedBytes
+            CurrentFiles  = [int]$current.Files
+            CurrentBytes  = [double]$current.Bytes
+            ShortFiles    = $shortFiles
+            ShortBytes    = $shortBytes
+            Note          = $note
+        }
+    }
+
+    $intact = @($results | Where-Object { $_.Status -eq 'Intact' })
+    $drift = @($results | Where-Object { $_.Status -eq 'Drift' })
+    $skipped = @($results | Where-Object { $_.Status -eq 'Skipped' })
+    $computerName = Get-WinPulseSafeComputerName
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $recordBase = Get-WinPulseVerifyRecordBase -backupRoot $selectedBackupRoot -nonInteractive:$nonInteractive
+    $recordRoot = Join-Path -Path $recordBase -ChildPath ('MigrationVerify-{0}-{1}' -f $computerName, $stamp)
+    $recordSuffix = 1
+    while (Test-Path -LiteralPath $recordRoot) {
+        $recordSuffix++
+        $recordRoot = Join-Path -Path $recordBase -ChildPath ('MigrationVerify-{0}-{1}-{2}' -f $computerName, $stamp, $recordSuffix)
+    }
+    New-Item -Path $recordRoot -ItemType Directory -Force | Out-Null
+
+    $record = [pscustomobject][ordered]@{
+        Tool         = [pscustomobject][ordered]@{
+            Name          = 'WinPulse'
+            Version       = $script:WinPulseVersion
+            Mode          = 'MigrationVerify'
+            Action        = 'Verify'
+            GeneratedAt   = (Get-Date).ToString('o')
+            SchemaVersion = '0.1'
+        }
+        Computer     = $computerName
+        BackupRoot   = $selectedBackupRoot
+        ManifestPath = $manifestPath
+        Items        = @($results)
+        ItemCount    = @($results).Count
+        IntactCount  = $intact.Count
+        DriftCount   = $drift.Count
+        SkippedCount = $skipped.Count
+        SafetyNotes  = @(
+            'MigrationVerify is read-only for the backup payload.',
+            'It does not copy, delete, or modify backed-up files.',
+            'It compares current backup file and byte counts against the backup manifest.'
+        )
+    }
+
+    $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-verify.json'
+    $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
+
+    Write-Host ''
+    if ($drift.Count -eq 0) {
+        Write-Host ('Migration verify complete. Intact: {0}; skipped: {1}; drift: 0.' -f $intact.Count, $skipped.Count) -ForegroundColor Green
+    }
+    else {
+        Write-Host ('Migration verify complete. Drift: {0}; intact: {1}; skipped: {2}.' -f $drift.Count, $intact.Count, $skipped.Count) -ForegroundColor Yellow
+    }
+    Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
+
+    return [pscustomobject][ordered]@{
+        RecordRoot   = $recordRoot
+        RecordPath   = $recordPath
+        IntactCount  = $intact.Count
+        DriftCount   = $drift.Count
+        SkippedCount = $skipped.Count
+        Record       = $record
+    }
+}
+
 function New-WinPulseRestorePlan {
     # Builds a dry-run restore plan from a manifest. Source paths are rebuilt
     # under the selected backup root so a moved backup folder still resolves.
@@ -8740,6 +8978,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Migration preflight'; Key = 'P'; Hint = 'Read-only report' },
             @{ Label = 'Migration backup';  Key = 'B'; Hint = 'Copy user files out' },
             @{ Label = 'Migration restore'; Key = 'O'; Hint = 'Put files back' },
+            @{ Label = 'Migration verify';  Key = 'V'; Hint = 'Re-check backup' },
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
@@ -8754,6 +8993,7 @@ function Show-WinPulseMainMenu {
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
             'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
             'O' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
+            'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
@@ -8919,7 +9159,7 @@ function Invoke-WinPulseMode {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'ExportBundle')]
+        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')]
         [string]$mode,
 
         [string[]]$BackupUsers = @(),
@@ -8936,7 +9176,9 @@ function Invoke-WinPulseMode {
         [string[]]$RestoreFolders = @(),
         [switch]$RestoreExecute,
         [switch]$RestoreHashSample,
-        [string]$RestoreAsUser = $null
+        [string]$RestoreAsUser = $null,
+
+        [string]$VerifyBackupPath = $null
     )
 
     switch ($mode) {
@@ -8975,6 +9217,9 @@ function Invoke-WinPulseMode {
         'MigrationRestore' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
             Invoke-WinPulseMigrationRestore -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser | Out-Null
+        }
+        'MigrationVerify' {
+            Invoke-WinPulseMigrationVerify -VerifyBackupPath $VerifyBackupPath | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
@@ -9058,6 +9303,7 @@ if ($PSBoundParameters.ContainsKey('RestoreFolders')) {
 if ($RestoreExecute) { $elevationPassthrough += '-RestoreExecute' }
 if ($RestoreHashSample) { $elevationPassthrough += '-RestoreHashSample' }
 if ($PSBoundParameters.ContainsKey('RestoreAsUser')) { $elevationPassthrough += @('-RestoreAsUser', (ConvertTo-WinPulseCommandArgument -value $RestoreAsUser)) }
+if ($PSBoundParameters.ContainsKey('VerifyBackupPath')) { $elevationPassthrough += @('-VerifyBackupPath', (ConvertTo-WinPulseCommandArgument -value $VerifyBackupPath)) }
 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
@@ -9069,6 +9315,10 @@ $restoreNonInteractiveForElevation = (
     $Mode -eq 'MigrationRestore' -and
     -not [string]::IsNullOrWhiteSpace($RestoreBackupPath) -and
     -not [string]::IsNullOrWhiteSpace($RestoreRoot)
+)
+$verifyNonInteractiveForElevation = (
+    $Mode -eq 'MigrationVerify' -and
+    -not [string]::IsNullOrWhiteSpace($VerifyBackupPath)
 )
 $skipElevationForFixture = $false
 $perUserTempRoot = [IO.Path]::GetTempPath()
@@ -9084,6 +9334,9 @@ if ($restoreNonInteractiveForElevation -and -not [string]::IsNullOrWhiteSpace($R
         (Test-WinPulsePathUnderRoot -path $RestoreRoot -root $perUserTempRoot)
     )
 }
+if ($verifyNonInteractiveForElevation) {
+    $skipElevationForFixture = $skipElevationForFixture -or (Test-WinPulsePathUnderRoot -path $VerifyBackupPath -root $perUserTempRoot)
+}
 
 if ($skipElevationForFixture) {
     $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse'
@@ -9096,6 +9349,8 @@ if ($skipElevationForFixture) {
 }
 
 Start-WinPulseElevation -bootstrappath $bootstrapPath -bootstrapdefinition $bootstrapDefinition -bootstrapurl 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1' -mode $Mode -passthrougharguments $elevationPassthrough -skipElevation:$skipElevationForFixture
-Initialize-WinPulse
+if ($Mode -ne 'MigrationVerify') {
+    Initialize-WinPulse
+}
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath
