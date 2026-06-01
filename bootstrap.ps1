@@ -1567,6 +1567,24 @@ function Write-Status {
     Write-Host ('{0} {1,-12} {2}' -f $meta.Badge, $label, $value) -ForegroundColor $meta.Color
 }
 
+function Get-WinPulseBoxWidth {
+    # Box width for the TUI. Defaults to the historical 88. On a real console
+    # narrower than 90 columns it shrinks to fit (floor 62) so the layout does
+    # not wrap; on any window >= 90 columns it returns exactly 88 (unchanged),
+    # and it falls back to 88 in non-interactive/redirected hosts.
+    [CmdletBinding()]
+    param()
+
+    try {
+        $cols = [Console]::WindowWidth
+        if ($cols -ge 62 -and $cols -lt 90) {
+            return ($cols - 2)
+        }
+    }
+    catch { }
+    return 88
+}
+
 function Write-WinPulseHeader {
     [CmdletBinding()]
     param(
@@ -1574,7 +1592,7 @@ function Write-WinPulseHeader {
         [string]$title
     )
 
-    $w = 88
+    $w = Get-WinPulseBoxWidth
     Write-Host ''
     Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkCyan
     Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkCyan
@@ -1604,7 +1622,7 @@ function Select-WinPulseMenuItem {
     $interactive = $true
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
-    $w = 88
+    $w = Get-WinPulseBoxWidth
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
@@ -1752,7 +1770,7 @@ function Select-WinPulseMultiMenuItem {
         return $result
     }
 
-    $w = 88
+    $w = Get-WinPulseBoxWidth
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
     $sel = 0
@@ -1914,7 +1932,7 @@ function Show-WinPulseDashboard {
     }
     catch { }
 
-    $w = 88
+    $w = Get-WinPulseBoxWidth
     $hLine = [string][char]0x2500 * ($w - 2)
     $vLine = [char]0x2502
 
@@ -4775,6 +4793,21 @@ function Invoke-WinPulseMigrationBackup {
     Write-Host ('  Report:   {0}' -f $reportHtmlPath) -ForegroundColor Gray
     Write-Host ('  Log:      {0}' -f $logPath) -ForegroundColor Gray
 
+    if (-not $nonInteractive) {
+        $cmd = @('.\bootstrap.ps1 -Mode MigrationBackup')
+        $cmd += '-BackupUsers {0}' -f ((@($userKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',')
+        $cmd += '-BackupFolders {0}' -f ((@($folderKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',')
+        $cmd += '-BackupDestination "{0}"' -f $destinationRoot
+        if ($profileRoot -and $profileRoot -ne 'C:\Users') { $cmd += '-BackupProfilesRoot "{0}"' -f $profileRoot }
+        if ($includeKeys) { $cmd += '-BackupIncludePrivateKeys' }
+        if ($includeAppData) { $cmd += '-BackupIncludeAppData' }
+        if ($hashSampleSize -gt 0) { $cmd += '-BackupHashSample' }
+        if (-not $dryRun) { $cmd += '-BackupExecute' }
+        Write-Host ''
+        Write-Host '  To repeat this without prompts:' -ForegroundColor DarkGray
+        Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
+    }
+
     return [pscustomobject][ordered]@{
         DestinationRoot = $destinationRoot
         ManifestPath    = $manifestPath
@@ -5286,6 +5319,19 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
     Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray
     Write-Host ('  Log:    {0}' -f $logPath) -ForegroundColor Gray
+
+    if (-not $nonInteractive) {
+        $restoredFolders = @(@($plan.Items) | ForEach-Object { [string]$_.Folder } | Sort-Object -Unique)
+        $cmd = @('.\bootstrap.ps1 -Mode MigrationRestore')
+        $cmd += '-RestoreBackupPath "{0}"' -f $selectedBackupRoot
+        $cmd += '-RestoreRoot "{0}"' -f $restoreRoot
+        if ($restoredFolders.Count -gt 0) { $cmd += '-RestoreFolders {0}' -f (($restoredFolders | ForEach-Object { '"{0}"' -f $_ }) -join ',') }
+        if ($hashSampleSize -gt 0) { $cmd += '-RestoreHashSample' }
+        if (-not $dryRun) { $cmd += '-RestoreExecute' }
+        Write-Host ''
+        Write-Host '  To repeat this without prompts:' -ForegroundColor DarkGray
+        Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
+    }
 
     return [pscustomobject][ordered]@{
         RecordRoot   = $recordRoot
