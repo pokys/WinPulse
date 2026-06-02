@@ -3421,6 +3421,70 @@ function Get-WinPulseMigrationApplicationInventory {
     }
 }
 
+function Invoke-WinPulseBackupAppCapture {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$destinationRoot
+    )
+
+    $capture = [ordered]@{
+        WingetAvailable     = $false
+        WingetExportFile    = $null
+        WingetExportExitCode = $null
+        InventoryFile       = $null
+        Note                = 'App capture was not attempted.'
+    }
+
+    try {
+        $appsRoot = Join-Path -Path $destinationRoot -ChildPath 'apps'
+        New-Item -Path $appsRoot -ItemType Directory -Force | Out-Null
+
+        try {
+            $inventory = Get-WinPulseMigrationApplicationInventory
+            $inventoryPath = Join-Path -Path $appsRoot -ChildPath 'installed-apps.json'
+            $inventory | ConvertTo-Json -Depth 6 | Set-Content -Path $inventoryPath -Encoding UTF8
+            $capture['InventoryFile'] = 'apps\installed-apps.json'
+            $capture['WingetAvailable'] = [bool]$inventory.WingetAvailable
+        }
+        catch {
+            $capture['Note'] = ('Installed app inventory failed: {0}' -f $_.Exception.Message)
+        }
+
+        $wingetCommand = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $wingetCommand) {
+            $capture['WingetAvailable'] = $false
+            if ([string]::IsNullOrWhiteSpace([string]$capture['Note']) -or [string]$capture['Note'] -eq 'App capture was not attempted.') {
+                $capture['Note'] = 'Installed app inventory captured; winget was not available for export.'
+            }
+            return [pscustomobject]$capture
+        }
+
+        $capture['WingetAvailable'] = $true
+        $wingetExportPath = Join-Path -Path $appsRoot -ChildPath 'winget-packages.json'
+        try {
+            $wingetPath = [string]$wingetCommand.Source
+            $wingetOutput = & $wingetPath export -o $wingetExportPath --accept-source-agreements 2>&1
+            $capture['WingetExportExitCode'] = $LASTEXITCODE
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $wingetExportPath)) {
+                $capture['WingetExportFile'] = 'apps\winget-packages.json'
+                $capture['Note'] = 'Installed app inventory captured; winget export completed.'
+            }
+            else {
+                $capture['Note'] = ('Installed app inventory captured; winget export failed with exit code {0}: {1}' -f $LASTEXITCODE, (($wingetOutput | Out-String).Trim()))
+            }
+        }
+        catch {
+            $capture['Note'] = ('Installed app inventory captured; winget export failed: {0}' -f $_.Exception.Message)
+        }
+    }
+    catch {
+        $capture['Note'] = ('App capture failed: {0}' -f $_.Exception.Message)
+    }
+
+    return [pscustomobject]$capture
+}
+
 function Get-WinPulseDeveloperHints {
     [CmdletBinding()]
     param(
@@ -4993,10 +5057,18 @@ function Invoke-WinPulseMigrationBackup {
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' -and -not $_.Partial })
+    $appCapture = $null
+    if (-not $dryRun) {
+        Write-Host ''
+        Write-Host '  Capturing installed app list...' -ForegroundColor DarkGray
+        $appCapture = Invoke-WinPulseBackupAppCapture -destinationRoot $destinationRoot
+        Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('App capture: {0}' -f $appCapture.Note)
+    }
     $safetyNotes = @(
         'Explicit user and folder selection only.',
         ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
         'No passwords, DPAPI secrets, or browser secrets are exported.',
+        'The installed app capture lists software names and package IDs only; it contains no secrets.',
         $(if ($nonInteractive) { 'Copy step requires explicit -BackupExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
     )
     if ($appKeys -contains 'chrome' -or $appKeys -contains 'firefox') {
@@ -5028,6 +5100,7 @@ function Invoke-WinPulseMigrationBackup {
         FailedCount     = $failed.Count
         PartialCount    = $partialItems.Count
         MismatchCount   = $mismatch.Count
+        AppCapture      = $appCapture
         SafetyNotes     = @($safetyNotes)
     }
 

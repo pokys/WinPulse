@@ -148,6 +148,7 @@ $powershell = (Get-Command -Name powershell.exe -ErrorAction Stop).Source
 $start = Get-Date
 $fixtureRoot = $null
 $backupRoot = $null
+$dryRunBackupRoot = $null
 $appBackupRoot = $null
 $restoreRoot = $null
 $appRestoreRoot = $null
@@ -169,6 +170,7 @@ try {
         $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')
         $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
         $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Backup')
+        $dryRunBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('BackupDryRun')
         $appBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppBackup')
         $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Restore')
         $appRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppRestore')
@@ -187,6 +189,27 @@ try {
         Set-Content -Path (Join-Path -Path $outlookRoot -ChildPath 'test.pst') -Value 'pst data' -Encoding ASCII
         Set-Content -Path (Join-Path -Path $outlookRoamCache -ChildPath 'x.dat') -Value 'autocomplete' -Encoding ASCII
         Set-Content -Path (Join-Path -Path $outlookRoot -ChildPath 'big.ost') -Value 'ost cache' -Encoding ASCII
+
+        $dryRunBackupArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationBackup',
+            '-BackupProfilesRoot', (Convert-SmokeArgument -Value $usersRoot),
+            '-BackupUsers', 'tester',
+            '-BackupFolders', 'Desktop',
+            '-BackupDestination', (Convert-SmokeArgument -Value $dryRunBackupRoot)
+        )
+        $dryRunBackupRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $dryRunBackupArguments
+        $stdoutParts += $dryRunBackupRun.Stdout
+        $stderrParts += $dryRunBackupRun.Stderr
+        if ($dryRunBackupRun.ExitCode -ne 0) {
+            throw ('MigrationBackup dry-run fixture exited with {0}' -f $dryRunBackupRun.ExitCode)
+        }
+        $dryRunAppsRoot = Join-Path -Path $dryRunBackupRoot -ChildPath 'apps'
+        if (Test-Path -LiteralPath $dryRunAppsRoot) {
+            throw 'MigrationBackup dry-run fixture wrote an apps sidecar folder.'
+        }
 
         $backupArguments = @(
             '-NoProfile',
@@ -212,6 +235,24 @@ try {
         Assert-SmokeFile -Path (Join-Path -Path $backupRoot -ChildPath 'migration-backup-report.txt')
         Assert-SmokeFile -Path (Join-SmokePath -Path $backupRoot -ChildPath @('logs', 'migration-backup.log'))
         Assert-SmokeManifestCounts -Path $manifestPath
+        $backupManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if (-not $backupManifest.PSObject.Properties['AppCapture'] -or -not $backupManifest.AppCapture) {
+            throw 'MigrationBackup fixture did not record AppCapture.'
+        }
+        $installedAppsPath = Join-SmokePath -Path $backupRoot -ChildPath @('apps', 'installed-apps.json')
+        Assert-SmokeFile -Path $installedAppsPath
+        $null = Get-Content -LiteralPath $installedAppsPath -Raw | ConvertFrom-Json
+        if ([string]$backupManifest.AppCapture.InventoryFile -ne 'apps\installed-apps.json') {
+            throw 'MigrationBackup fixture did not record installed-apps.json in AppCapture.'
+        }
+        if ([bool]$backupManifest.AppCapture.WingetAvailable -and -not [string]::IsNullOrWhiteSpace([string]$backupManifest.AppCapture.WingetExportFile)) {
+            $wingetExportPath = Join-SmokePath -Path $backupRoot -ChildPath @('apps', 'winget-packages.json')
+            Assert-SmokeFile -Path $wingetExportPath
+            $null = Get-Content -LiteralPath $wingetExportPath -Raw | ConvertFrom-Json
+        }
+        if (-not [bool]$backupManifest.AppCapture.WingetAvailable -and -not [string]::IsNullOrWhiteSpace([string]$backupManifest.AppCapture.WingetExportFile)) {
+            throw 'MigrationBackup fixture recorded a winget export file while WingetAvailable was false.'
+        }
         $expectedFilesPresent = $true
 
         if ($Mode -eq 'MigrationVerify') {
@@ -519,6 +560,7 @@ if ($fixtureRoot) {
     $summary.Add(('FixtureRoot: {0}' -f $fixtureRoot))
     $summary.Add(('FixtureCleaned: {0}' -f $fixtureCleaned))
     $summary.Add(('BackupRoot: {0}' -f $backupRoot))
+    if ($dryRunBackupRoot) { $summary.Add(('DryRunBackupRoot: {0}' -f $dryRunBackupRoot)) }
     if ($appBackupRoot) { $summary.Add(('AppBackupRoot: {0}' -f $appBackupRoot)) }
     if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
     if ($appRestoreRoot) { $summary.Add(('AppRestoreRoot: {0}' -f $appRestoreRoot)) }
