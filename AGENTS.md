@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.11.0-20260602`. Clean tree, nothing pending uncommitted. Verified:
+working `0.11.1-20260602`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -615,6 +615,12 @@ Out of scope: choco/Microsoft Store reinstall, mapping winget IDs to friendly
 names, upgrading vs installing, anything that runs a real install in tests.
 
 ### Task C17 - Human reports for MigrationVerify and MigrationApps
+
+Status: DONE - implemented by Codex (HTML + text reports for both modes via a
+shared `Get-WinPulseMigrationReportCss` + the existing table/KV helpers; apps
+report driven by the dry-run path with a "nothing installed" note), reviewed by
+Claude. Additive (240 insertions, 0 deletions); smoke asserts the new reports.
+(Kept below for reference.)
 
 Why: MigrationBackup and MigrationRestore write an HTML + text report next to
 their JSON; MigrationVerify and MigrationApps only write JSON. Add matching
