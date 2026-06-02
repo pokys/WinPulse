@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.10.1-20260602'
+$script:WinPulseVersion = '0.10.2-20260602'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -4980,7 +4980,7 @@ function Invoke-WinPulseMigrationBackup {
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
             $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
-            if ($verify.Status -eq 'Mismatch') {
+            if ($verify.Status -eq 'Mismatch' -and -not $rc.Partial) {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
                 Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
             }
@@ -4992,7 +4992,7 @@ function Invoke-WinPulseMigrationBackup {
 
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
-    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
+    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' -and -not $_.Partial })
     $safetyNotes = @(
         'Explicit user and folder selection only.',
         ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
@@ -5843,7 +5843,7 @@ function Invoke-WinPulseMigrationRestore {
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
             $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Target -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -hashSampleSize $hashSampleSize
-            if ($verify.Status -eq 'Mismatch') {
+            if ($verify.Status -eq 'Mismatch' -and -not $rc.Partial) {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
                 Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
             }
@@ -5855,7 +5855,7 @@ function Invoke-WinPulseMigrationRestore {
 
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
-    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
+    $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' -and -not $_.Partial })
     $safetyNotes = @(
         'Restore only copies data that the backup chose to keep.',
         'desktop.ini and thumbs.db are not restored.',
