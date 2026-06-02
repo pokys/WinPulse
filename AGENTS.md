@@ -537,13 +537,69 @@ Acceptance (non-elevated, temp fixtures):
 Out of scope: any installing/reinstalling (that is C16), choco/Store capture,
 parsing or transforming the winget export.
 
-### Task C16 - (after C15, design pending) Offer winget reinstall at restore
+### Task C16 - Offer winget reinstall from a backup's captured app list
 
-Not yet specced. Will read a backup's `apps\winget-packages.json`, show a
-multi-select of apps, and run `winget install --id <id> -e` with explicit
-confirmation (reusing `Ensure-WinGet`). The live install needs admin + network +
-winget and is owner-verified; Codex will only build/dry-run the commands. Do NOT
-start C16 until Claude specs it.
+Why: after C15 captures `apps\winget-packages.json` at backup, let the technician
+reinstall those apps via winget on the new machine. Owner-approved decisions
+(FIXED): (1) granular multi-select of which apps to install, NOT a blind
+`winget import`; (2) a SEPARATE action in the Migration submenu, not baked into
+the file restore; (3) winget only for v1; (4) install runs only after explicit
+confirmation (dry-run by default).
+
+TESTABILITY BOUNDARY (important): the parse / selection / command-build /
+dry-run path is fully Codex-testable non-elevated and MUST be covered by smoke.
+The actual `winget install` execution needs admin + network + winget and is
+OWNER-verified - Codex must NOT run a real install in tests and must NOT claim it
+did. Structure the code so dry-run never invokes winget install.
+
+Scope:
+
+- New mode `MigrationApps` in every `-Mode` ValidateSet (top param block,
+  `Invoke-WinPulseMode`, smoke wrapper), an `Invoke-WinPulseMode` switch case, and
+  ONE item in the Migration submenu (`Show-WinPulseMigrationMenu`, e.g. key 'A'
+  "Reinstall apps"). Add `MigrationApps` to the auto-elevate list (it installs)
+  and to the elevation passthrough, mirroring the other modes.
+- Params (top block + plumbed through): `-AppsBackupPath <string>` (the backup
+  folder, the one whose `apps\winget-packages.json` to read), `-AppsExecute
+  <switch>` (install for real; absent = dry-run), optional `-AppsSelect
+  <string[]>` (package IDs to install; non-interactive default = all parsed IDs).
+- `Invoke-WinPulseMigrationAppReinstall`:
+  - Pick the backup (non-interactive `-AppsBackupPath`; interactive: reuse the
+    `Get-WinPulseAvailableBackups` selection like restore/verify).
+  - Read `<backup>\apps\winget-packages.json`, parse package IDs robustly under
+    StrictMode: iterate `$data.Sources[].Packages[].PackageIdentifier`, guarding
+    every property with `PSObject.Properties[...]`; dedupe + sort. If the file is
+    missing/empty/invalid, message and return (no throw).
+  - Show a multi-select of the IDs (interactive) or use `-AppsSelect` / all
+    (non-interactive).
+  - DRY-RUN (default): print the apps and the exact `winget install` command that
+    WOULD run for each, write a record, and DO NOT call winget. Exit cleanly.
+  - EXECUTE (`-AppsExecute` or an interactive YES): ensure winget is present
+    (reuse `Ensure-WinGet` / the existing winget detection); for each selected ID
+    run `winget install --id <id> -e --accept-package-agreements
+    --accept-source-agreements` via the call operator (capture exit code per app),
+    report per-app OK/failed, write the record. Never use Invoke-Expression.
+  - Write a `migration-apps.json` record (Action DryRun/Execute, per-app results,
+    counts) under a record folder using the same non-elevated fixture-safe record
+    location pattern restore/verify already use.
+  - Return an object with the selected/installed/failed counts.
+
+Acceptance (non-elevated, temp fixtures - DRY-RUN only):
+
+- Create a fixture backup folder containing
+  `apps\winget-packages.json` with a couple of known IDs (e.g. a minimal valid
+  winget export: `{"Sources":[{"Packages":[{"PackageIdentifier":"Foo.Bar"},
+  {"PackageIdentifier":"Baz.Qux"}]}]}`). Run
+  `bootstrap.ps1 -Mode MigrationApps -AppsBackupPath <backup>` (NO -AppsExecute):
+  it parses both IDs, writes a DryRun `migration-apps.json` listing them and the
+  would-run commands, calls NO winget install, exit 0.
+- A bad/missing `winget-packages.json` is handled gracefully (message, no throw).
+- Parser + ASCII clean; existing Backup/Restore/Verify smoke still exit 0; add a
+  `MigrationApps` dry-run smoke mode.
+- Do NOT add a smoke assertion that requires a real install.
+
+Out of scope: choco/Microsoft Store reinstall, mapping winget IDs to friendly
+names, upgrading vs installing, anything that runs a real install in tests.
 
 ## Project Direction
 
