@@ -30,15 +30,17 @@ current file streams to a status line during a real backup/restore via robocopy
 
 Pick up next, in priority order:
 
-1. Manual elevated live-profile check. BACKUP side CONFIRMED on a real elevated,
-   NOT-logged-in profile (2026-06-01): doc folders exit 1; AppData exit 9 was 18
-   failures, all `AppData\Local\Microsoft\WindowsApps` Store-app alias reparse
-   stubs (error 1920) - 212MB/1698 files copied fine. Fixed in 0.9.6 by excluding
-   `WindowsApps` (those stubs are uncopyable and useless in a backup), so a
-   re-test should give AppData exit 1. /XJ correctly skipped Documents junctions.
-   STILL TO DO: a live RESTORE into a test root (and optionally MigrationVerify
-   against `c:\migtt`) from an elevated window. Backups default to
-   `C:\WinPulseBackups` so the exit cleanup keeps them.
+1. Manual elevated live test - DONE end to end (both directions confirmed):
+   - BACKUP (2026-06-01, not-logged-in profile): doc folders OK; AppData Partial
+     from locked system DBs/caches (WebCache, Comms store, UWP settings.dat) and
+     Store-app alias stubs - benign, expected on a live machine; WindowsApps stubs
+     excluded in 0.9.6.
+   - RESTORE (2026-06-02, 0.10.2): a real CROSS-MACHINE migration (backup from a
+     notebook `d:\vokurka` restored onto `DESKTOP-UJTQHBL`), 67.79 GB, 7 folders
+     including a 5298-file Chrome profile that round-tripped exactly. Failed=0,
+     Partial=0, Mismatch=0, all Verified. Non-destructive (robocopy extras kept).
+   The copy path is now proven live in both directions. Remaining live-only ideas
+   are the backlog items below (long paths, VSS, the C16 winget reinstall).
 2. Interactive TUI session for the deferred UX items C7 / C9 / C11 (see
    "Work Queue - Batch 2"). These change live rendering the smoke tests cannot
    see, so build them on `dev`, confirm visually at >= 90 columns (must look
