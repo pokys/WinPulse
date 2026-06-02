@@ -292,6 +292,8 @@ try {
             }
             $verifyRecordPath = $verifyRecord.FullName
             Assert-SmokeFile -Path $verifyRecordPath
+            Assert-SmokeFile -Path (Join-Path -Path $verifyRecord.DirectoryName -ChildPath 'migration-verify-report.html')
+            Assert-SmokeFile -Path (Join-Path -Path $verifyRecord.DirectoryName -ChildPath 'migration-verify-report.txt')
             $verifyManifest = Get-Content -LiteralPath $verifyRecordPath -Raw | ConvertFrom-Json
             if ([int]$verifyManifest.DriftCount -ne 0 -or [int]$verifyManifest.IntactCount -lt 1) {
                 throw ('MigrationVerify intact fixture reported IntactCount={0}, DriftCount={1}.' -f $verifyManifest.IntactCount, $verifyManifest.DriftCount)
@@ -380,6 +382,8 @@ try {
                 throw 'MigrationVerify app fixture did not write migration-verify.json.'
             }
             $appVerifyRecordPath = $appVerifyRecord.FullName
+            Assert-SmokeFile -Path (Join-Path -Path $appVerifyRecord.DirectoryName -ChildPath 'migration-verify-report.html')
+            Assert-SmokeFile -Path (Join-Path -Path $appVerifyRecord.DirectoryName -ChildPath 'migration-verify-report.txt')
             $appVerifyManifest = Get-Content -LiteralPath $appVerifyRecordPath -Raw | ConvertFrom-Json
             if ([int]$appVerifyManifest.DriftCount -ne 0 -or [int]$appVerifyManifest.IntactCount -lt 3) {
                 throw ('MigrationVerify app fixture reported IntactCount={0}, DriftCount={1}.' -f $appVerifyManifest.IntactCount, $appVerifyManifest.DriftCount)
@@ -401,6 +405,8 @@ try {
             }
             $driftVerifyRecordPath = $driftRecord.FullName
             Assert-SmokeFile -Path $driftVerifyRecordPath
+            Assert-SmokeFile -Path (Join-Path -Path $driftRecord.DirectoryName -ChildPath 'migration-verify-report.html')
+            Assert-SmokeFile -Path (Join-Path -Path $driftRecord.DirectoryName -ChildPath 'migration-verify-report.txt')
             $driftManifest = Get-Content -LiteralPath $driftVerifyRecordPath -Raw | ConvertFrom-Json
             if ([int]$driftManifest.DriftCount -lt 1) {
                 throw ('MigrationVerify drift fixture reported DriftCount={0}.' -f $driftManifest.DriftCount)
@@ -527,6 +533,8 @@ try {
         }
         $appsModeRecordPath = $appsRecord.FullName
         Assert-SmokeFile -Path $appsModeRecordPath
+        Assert-SmokeFile -Path (Join-Path -Path $appsRecord.DirectoryName -ChildPath 'migration-apps-report.html')
+        Assert-SmokeFile -Path (Join-Path -Path $appsRecord.DirectoryName -ChildPath 'migration-apps-report.txt')
         $appsManifest = Get-Content -LiteralPath $appsModeRecordPath -Raw | ConvertFrom-Json
         if ($appsManifest.Tool.Action -ne 'DryRun') {
             throw ('MigrationApps fixture action was {0}, expected DryRun.' -f $appsManifest.Tool.Action)

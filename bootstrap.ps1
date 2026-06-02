@@ -4842,6 +4842,232 @@ footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margi
     $sb.ToString() | Set-Content -Path $path -Encoding UTF8
 }
 
+function Get-WinPulseMigrationReportCss {
+    [CmdletBinding()]
+    param()
+
+    return @'
+:root{--bg:#111827;--panel:#182233;--panel2:#101826;--border:#334155;--text:#e5e7eb;--muted:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--info:#38bdf8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Tahoma,sans-serif;line-height:1.45}
+.container{max-width:1180px;margin:0 auto;padding:24px}
+header{border-bottom:2px solid var(--border);padding-bottom:18px;margin-bottom:18px}
+h1{font-size:1.8rem;margin:0 0 6px;color:var(--info)}
+h2{font-size:1.05rem;margin:0 0 10px;color:var(--info)}
+section{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:16px;margin:0 0 14px}
+.subtitle,.empty,footer{color:var(--muted)}
+.badge{display:inline-block;border:1px solid var(--border);border-radius:4px;padding:4px 9px;margin:4px 8px 4px 0;font-weight:600}
+.ready{color:var(--ok);border-color:var(--ok)}.attention{color:var(--warn);border-color:var(--warn)}.notready{color:var(--crit);border-color:var(--crit)}.unknown{color:var(--muted)}
+.kv{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:5px 18px}
+.k{color:var(--muted);font-weight:600}.v{color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}
+th{background:var(--panel2);color:var(--muted);text-align:left;padding:7px;border-bottom:1px solid var(--border)}
+td{padding:7px;border-bottom:1px solid rgba(148,163,184,.16);vertical-align:top}
+tr:hover td{background:rgba(255,255,255,.025)}
+ul{margin:0;padding-left:20px}
+code{color:var(--info)}
+footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margin-top:18px}
+@media print{body{background:#fff;color:#111}.container{max-width:none;padding:10px}section{background:#fff;border-color:#ccc;break-inside:avoid}.subtitle,.empty,footer,.k,th{color:#555}th{background:#eee}.v,td{color:#111}}
+'@
+}
+
+function Export-WinPulseMigrationVerifyReportText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('WinPulse Migration Verify Report')
+    $lines.Add(('Generated: {0}' -f $record.Tool.GeneratedAt))
+    $lines.Add(('Action: {0} | WinPulse {1}' -f $record.Tool.Action, $record.Tool.Version))
+    $lines.Add(('Machine: {0}' -f $record.Computer))
+    $lines.Add(('Backup root: {0}' -f $record.BackupRoot))
+    $lines.Add('')
+    $lines.Add(('Summary: Intact {0} | Drift {1} | Skipped {2}' -f $record.IntactCount, $record.DriftCount, $record.SkippedCount))
+    $lines.Add('')
+    $lines.Add('Items:')
+    foreach ($item in @($record.Items)) {
+        $lines.Add(('- {0}\{1}: {2} | recorded {3} files / {4} bytes | current {5} files / {6} bytes | {7}' -f
+                $item.UserName,
+                $item.Folder,
+                $item.Status,
+                $item.RecordedFiles,
+                $item.RecordedBytes,
+                $item.CurrentFiles,
+                $item.CurrentBytes,
+                $item.Note))
+    }
+    if (@($record.Items).Count -eq 0) {
+        $lines.Add('- No items.')
+    }
+    $lines.Add('')
+    $lines.Add('Notes:')
+    foreach ($note in @($record.SafetyNotes)) {
+        $lines.Add(('- {0}' -f $note))
+    }
+    $lines.Add('- See migration-verify.json for full machine-readable details.')
+
+    $lines | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationVerifyReportHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $rows = @()
+    foreach ($item in @($record.Items)) {
+        $status = [string]$item.Status
+        $displayStatus = if ($status -eq 'Drift') { 'DRIFT - ATTENTION' } else { $status }
+        $rows += [pscustomobject][ordered]@{
+            User          = $item.UserName
+            Folder        = $item.Folder
+            Status        = $displayStatus
+            RecordedFiles = $item.RecordedFiles
+            RecordedBytes = $item.RecordedBytes
+            CurrentFiles  = $item.CurrentFiles
+            CurrentBytes  = $item.CurrentBytes
+            Note          = $item.Note
+        }
+    }
+
+    $statusClass = if ([int]$record.DriftCount -gt 0) { 'attention' } else { 'ready' }
+    $statusText = if ([int]$record.DriftCount -gt 0) { ('{0} drift item(s)' -f $record.DriftCount) } else { 'Backup intact' }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append(('<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>WinPulse Migration Verify Report</title><style>{0}</style></head><body><div class="container">' -f (Get-WinPulseMigrationReportCss)))
+    [void]$sb.Append(('<header><h1>WinPulse Migration Verify</h1><div class="subtitle">{0} | {1} | WinPulse {2}</div>' -f
+            (ConvertTo-WinPulseHtmlText -value $record.Computer),
+            (ConvertTo-WinPulseHtmlText -value $record.Tool.GeneratedAt),
+            (ConvertTo-WinPulseHtmlText -value $record.Tool.Version)))
+    [void]$sb.Append(('<div class="badge">Action: {0}</div>' -f (ConvertTo-WinPulseHtmlText -value $record.Tool.Action)))
+    [void]$sb.Append(('<div class="badge {0}">{1}</div></header>' -f $statusClass, (ConvertTo-WinPulseHtmlText -value $statusText)))
+
+    [void]$sb.Append('<section><h2>Summary</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Machine' -value $record.Computer
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Backup root' -value $record.BackupRoot
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Intact' -value $record.IntactCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Drift' -value $record.DriftCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Skipped' -value $record.SkippedCount
+    [void]$sb.Append('</div></section>')
+
+    [void]$sb.Append('<section><h2>Items</h2>')
+    $itemTableHtml = ConvertTo-WinPulseMigrationHtmlTable -data $rows -columns @('User', 'Folder', 'Status', 'RecordedFiles', 'RecordedBytes', 'CurrentFiles', 'CurrentBytes', 'Note')
+    $itemTableHtml = $itemTableHtml -replace '<td>DRIFT - ATTENTION</td>', '<td><span class="badge attention">DRIFT - ATTENTION</span></td>'
+    [void]$sb.Append($itemTableHtml)
+    [void]$sb.Append('</section>')
+
+    [void]$sb.Append('<section><h2>Safety Notes</h2><ul>')
+    foreach ($note in @($record.SafetyNotes)) {
+        [void]$sb.Append(('<li>{0}</li>' -f (ConvertTo-WinPulseHtmlText -value $note)))
+    }
+    [void]$sb.Append('</ul></section>')
+    [void]$sb.Append(('<footer>Generated by WinPulse {0}</footer></div></body></html>' -f (ConvertTo-WinPulseHtmlText -value $record.Tool.Version)))
+
+    $sb.ToString() | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationAppsReportText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('WinPulse Migration Apps Report')
+    $lines.Add(('Generated: {0}' -f $record.Tool.GeneratedAt))
+    $lines.Add(('Action: {0} | WinPulse {1}' -f $record.Tool.Action, $record.Tool.Version))
+    $lines.Add(('Machine: {0}' -f $record.Computer))
+    $lines.Add(('Backup root: {0}' -f $record.BackupRoot))
+    $lines.Add('')
+    $lines.Add(('Summary: Selected {0} | Installed {1} | Failed {2} | DryRun {3}' -f $record.SelectedCount, $record.InstalledCount, $record.FailedCount, $record.DryRunCount))
+    if ($record.Tool.Action -eq 'DryRun') {
+        $lines.Add('Dry-run note: Nothing was installed; commands below were not executed.')
+    }
+    $lines.Add('')
+    $lines.Add('Packages:')
+    foreach ($item in @($record.Items)) {
+        $result = if ($item.DryRun) { 'DRY-RUN' } elseif ($item.Success) { 'OK' } else { 'FAILED' }
+        $exitText = if ($null -eq $item.ExitCode) { '-' } else { [string]$item.ExitCode }
+        $lines.Add(('- {0}: {1} | exit {2} | {3}' -f $item.PackageId, $result, $exitText, $item.Command))
+    }
+    if (@($record.Items).Count -eq 0) {
+        $lines.Add('- No packages.')
+    }
+    $lines.Add('')
+    $lines.Add('- See migration-apps.json for full machine-readable details.')
+
+    $lines | Set-Content -Path $path -Encoding UTF8
+}
+
+function Export-WinPulseMigrationAppsReportHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $rows = @()
+    foreach ($item in @($record.Items)) {
+        $result = if ($item.DryRun) { 'DRY-RUN' } elseif ($item.Success) { 'OK' } else { 'FAILED' }
+        $exitText = if ($null -eq $item.ExitCode) { '-' } else { [string]$item.ExitCode }
+        $rows += [pscustomobject][ordered]@{
+            PackageId = $item.PackageId
+            Result    = $result
+            ExitCode  = $exitText
+            Command   = $item.Command
+        }
+    }
+
+    $statusClass = if ([int]$record.FailedCount -gt 0) { 'attention' } elseif ($record.Tool.Action -eq 'DryRun') { 'unknown' } else { 'ready' }
+    $statusText = if ([int]$record.FailedCount -gt 0) { ('{0} failed' -f $record.FailedCount) } elseif ($record.Tool.Action -eq 'DryRun') { 'Dry run - nothing installed' } else { 'Install complete' }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append(('<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>WinPulse Migration Apps Report</title><style>{0}</style></head><body><div class="container">' -f (Get-WinPulseMigrationReportCss)))
+    [void]$sb.Append(('<header><h1>WinPulse Migration Apps</h1><div class="subtitle">{0} | {1} | WinPulse {2}</div>' -f
+            (ConvertTo-WinPulseHtmlText -value $record.Computer),
+            (ConvertTo-WinPulseHtmlText -value $record.Tool.GeneratedAt),
+            (ConvertTo-WinPulseHtmlText -value $record.Tool.Version)))
+    [void]$sb.Append(('<div class="badge">Action: {0}</div>' -f (ConvertTo-WinPulseHtmlText -value $record.Tool.Action)))
+    [void]$sb.Append(('<div class="badge {0}">{1}</div></header>' -f $statusClass, (ConvertTo-WinPulseHtmlText -value $statusText)))
+
+    [void]$sb.Append('<section><h2>Summary</h2><div class="kv">')
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Machine' -value $record.Computer
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Backup root' -value $record.BackupRoot
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Selected' -value $record.SelectedCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Installed' -value $record.InstalledCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'Failed' -value $record.FailedCount
+    Add-WinPulseMigrationHtmlKv -builder $sb -key 'DryRun' -value $record.DryRunCount
+    if ($record.Tool.Action -eq 'DryRun') {
+        Add-WinPulseMigrationHtmlKv -builder $sb -key 'Dry-run note' -value 'Nothing was installed; commands below were not executed.'
+    }
+    [void]$sb.Append('</div></section>')
+
+    [void]$sb.Append('<section><h2>Packages</h2>')
+    [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $rows -columns @('PackageId', 'Result', 'ExitCode', 'Command')))
+    [void]$sb.Append('</section>')
+    [void]$sb.Append(('<footer>Generated by WinPulse {0}</footer></div></body></html>' -f (ConvertTo-WinPulseHtmlText -value $record.Tool.Version)))
+
+    $sb.ToString() | Set-Content -Path $path -Encoding UTF8
+}
+
 function Invoke-WinPulseMigrationBackup {
     # Orchestrates the backup skeleton: select users, select folders, choose a
     # destination, build a dry-run plan, then optionally execute the copy and
@@ -5646,6 +5872,10 @@ function Invoke-WinPulseMigrationAppReinstall {
 
     $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-apps.json'
     $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
+    $reportTextPath = Join-Path -Path $recordRoot -ChildPath 'migration-apps-report.txt'
+    $reportHtmlPath = Join-Path -Path $recordRoot -ChildPath 'migration-apps-report.html'
+    Export-WinPulseMigrationAppsReportText -record $record -path $reportTextPath
+    Export-WinPulseMigrationAppsReportHtml -record $record -path $reportHtmlPath
 
     Write-Host ''
     if ($dryRun) {
@@ -5658,11 +5888,14 @@ function Invoke-WinPulseMigrationAppReinstall {
         Write-Host ('Migration apps install finished with {0} failure(s). Installed: {1}.' -f $failed.Count, $installed.Count) -ForegroundColor Yellow
     }
     Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
+    Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray
 
     return [pscustomobject][ordered]@{
         BackupRoot     = $selectedBackupRoot
         PackageFile    = $packageFile
         RecordPath     = $recordPath
+        ReportTextPath  = $reportTextPath
+        ReportHtmlPath  = $reportHtmlPath
         SelectedCount  = @($results).Count
         InstalledCount = $installed.Count
         FailedCount    = $failed.Count
@@ -5846,6 +6079,10 @@ function Invoke-WinPulseMigrationVerify {
 
     $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-verify.json'
     $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
+    $reportTextPath = Join-Path -Path $recordRoot -ChildPath 'migration-verify-report.txt'
+    $reportHtmlPath = Join-Path -Path $recordRoot -ChildPath 'migration-verify-report.html'
+    Export-WinPulseMigrationVerifyReportText -record $record -path $reportTextPath
+    Export-WinPulseMigrationVerifyReportHtml -record $record -path $reportHtmlPath
 
     Write-Host ''
     if ($drift.Count -eq 0) {
@@ -5855,10 +6092,13 @@ function Invoke-WinPulseMigrationVerify {
         Write-Host ('Migration verify complete. Drift: {0}; intact: {1}; skipped: {2}.' -f $drift.Count, $intact.Count, $skipped.Count) -ForegroundColor Yellow
     }
     Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
+    Write-Host ('  Report: {0}' -f $reportHtmlPath) -ForegroundColor Gray
 
     return [pscustomobject][ordered]@{
         RecordRoot   = $recordRoot
         RecordPath   = $recordPath
+        ReportTextPath = $reportTextPath
+        ReportHtmlPath = $reportHtmlPath
         IntactCount  = $intact.Count
         DriftCount   = $drift.Count
         SkippedCount = $skipped.Count
