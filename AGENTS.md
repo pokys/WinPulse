@@ -614,6 +614,47 @@ Acceptance (non-elevated, temp fixtures - DRY-RUN only):
 Out of scope: choco/Microsoft Store reinstall, mapping winget IDs to friendly
 names, upgrading vs installing, anything that runs a real install in tests.
 
+### Task C17 - Human reports for MigrationVerify and MigrationApps
+
+Why: MigrationBackup and MigrationRestore write an HTML + text report next to
+their JSON; MigrationVerify and MigrationApps only write JSON. Add matching
+human-readable reports so a technician can read the outcome at a glance.
+
+Scope:
+
+- MigrationVerify (`Invoke-WinPulseMigrationVerify`): next to
+  `migration-verify.json`, also write `migration-verify-report.html` and
+  `migration-verify-report.txt`. Content: header (machine, generated time,
+  WinPulse version, backup root), a summary (Intact / Drift / Skipped counts),
+  and a per-item table (User, Folder, Status, recorded vs current files/bytes,
+  Note). Drift rows should stand out (e.g. the attention/warn style).
+- MigrationApps (`Invoke-WinPulseMigrationAppReinstall`): next to
+  `migration-apps.json`, also write `migration-apps-report.html` and
+  `migration-apps-report.txt`. Content: header (machine, time, version, backup
+  root, Action DryRun/Execute), a summary (Selected / Installed / Failed /
+  DryRun counts), and a per-package table (PackageId, Result OK/FAILED/DRY-RUN,
+  ExitCode, the winget command). For a dry run make clear nothing was installed.
+- REUSE the existing report helpers/styling: `ConvertTo-WinPulseHtmlText`,
+  `ConvertTo-WinPulseMigrationHtmlTable`, `Add-WinPulseMigrationHtmlKv`, and the
+  same CSS chrome the backup/restore HTML report uses (a small shared page
+  wrapper helper is fine if it avoids copy-paste). Keep it ASCII-only and
+  StrictMode-safe. Do not change the JSON records, the copy/verify/install
+  logic, or any counts.
+
+Acceptance (non-elevated, temp fixtures):
+
+- After a MigrationVerify run the verify record folder contains
+  `migration-verify-report.html` and `.txt`; both reflect the intact/drift items.
+- After a MigrationApps DRY-RUN run the apps record folder contains
+  `migration-apps-report.html` and `.txt` listing the selected packages and the
+  would-run commands, and stating nothing was installed.
+- Extend the MigrationVerify and MigrationApps smoke modes to assert the two new
+  report files exist. Parser + ASCII clean; all existing smoke modes still exit 0.
+- Do NOT run a real winget install; the apps report must be produced from the
+  dry-run path.
+
+Out of scope: changing the JSON schema, TUI rendering, the copy/install logic.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
