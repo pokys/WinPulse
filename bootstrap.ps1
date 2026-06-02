@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')]
+    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')]
     [string]$Mode = 'Triage',
 
     [string[]]$BackupUsers = @(),
@@ -21,10 +21,14 @@ param(
     [switch]$RestoreHashSample,
     [string]$RestoreAsUser = $null,
 
-    [string]$VerifyBackupPath = $null
+    [string]$VerifyBackupPath = $null,
+
+    [string]$AppsBackupPath = $null,
+    [switch]$AppsExecute,
+    [string[]]$AppsSelect = @()
 )
 
-$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')
+$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')
 $modeOverride = $null
 $globalMode = Get-Variable -Name WinPulseMode -Scope Global -ErrorAction SilentlyContinue
 if ($globalMode -and -not [string]::IsNullOrWhiteSpace([string]$globalMode.Value)) {
@@ -106,7 +110,7 @@ function Start-WinPulseElevation {
         $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $tempScript))
     }
 
-    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')) {
+    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')) {
         $args = @('-NoExit') + $args
     }
 
@@ -5345,6 +5349,328 @@ function Get-WinPulseVerifyRecordBase {
     return $script:WinPulsePaths.Backups
 }
 
+function ConvertTo-WinPulseStringList {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$values = @()
+    )
+
+    $items = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($rawValue in @($values)) {
+        if ([string]::IsNullOrWhiteSpace($rawValue)) { continue }
+        foreach ($part in ([string]$rawValue -split ',')) {
+            if ([string]::IsNullOrWhiteSpace($part)) { continue }
+            $value = $part.Trim()
+            $key = $value.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            [void]$items.Add($value)
+        }
+    }
+
+    return $items.ToArray()
+}
+
+function Get-WinPulseWingetExportPackageIds {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    $ids = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return $ids.ToArray()
+    }
+
+    $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $ids.ToArray()
+    }
+
+    $data = $raw | ConvertFrom-Json -ErrorAction Stop
+    if (-not $data -or -not $data.PSObject.Properties['Sources']) {
+        return $ids.ToArray()
+    }
+
+    $seen = @{}
+    foreach ($source in @($data.Sources)) {
+        if (-not $source -or -not $source.PSObject.Properties['Packages']) { continue }
+        foreach ($package in @($source.Packages)) {
+            if (-not $package -or -not $package.PSObject.Properties['PackageIdentifier']) { continue }
+            $id = [string]$package.PackageIdentifier
+            if ([string]::IsNullOrWhiteSpace($id)) { continue }
+            $id = $id.Trim()
+            $key = $id.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            [void]$ids.Add($id)
+        }
+    }
+
+    $sorted = New-Object System.Collections.Generic.List[string]
+    foreach ($id in ($ids.ToArray() | Sort-Object)) {
+        [void]$sorted.Add([string]$id)
+    }
+    return $sorted.ToArray()
+}
+
+function Get-WinPulseMigrationAppsRecordBase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$backupRoot,
+
+        [bool]$nonInteractive = $false
+    )
+
+    if ($nonInteractive -and -not (Test-WinPulseIsAdmin) -and (Test-WinPulsePathUnderRoot -path $backupRoot -root ([IO.Path]::GetTempPath()))) {
+        $backupParent = Split-Path -Path $backupRoot -Parent
+        if (-not [string]::IsNullOrWhiteSpace($backupParent)) {
+            return (Join-Path -Path $backupParent -ChildPath '_WinPulseAppRecords')
+        }
+    }
+
+    return $script:WinPulsePaths.Backups
+}
+
+function New-WinPulseWingetInstallCommandText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$packageId
+    )
+
+    return ('winget install --id {0} -e --accept-package-agreements --accept-source-agreements' -f $packageId)
+}
+
+function Invoke-WinPulseMigrationAppReinstall {
+    [CmdletBinding()]
+    param(
+        [string]$AppsBackupPath = $null,
+        [switch]$AppsExecute,
+        [string[]]$AppsSelect = @()
+    )
+
+    $nonInteractive = -not [string]::IsNullOrWhiteSpace($AppsBackupPath)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Migration Apps'
+    Write-Host '  Reinstall apps from a backup winget export.' -ForegroundColor Cyan
+    Write-Host '  Dry-run is the default; installs require explicit confirmation.' -ForegroundColor Cyan
+    Write-Host ''
+
+    $selectedBackupRoot = $null
+    if ($nonInteractive) {
+        $selectedBackupRoot = $AppsBackupPath.Trim()
+    }
+    else {
+        $backups = @(Get-WinPulseAvailableBackups)
+        if ($backups.Count -gt 0) {
+            $items = @()
+            foreach ($b in $backups) {
+                $items += @{
+                    Label = ('{0}  [{1}, {2} user(s), {3}]' -f $b.Name, $b.Action, $b.UserCount, $b.TotalSize)
+                    Key   = $b.Path
+                    Hint  = $b.LastWrite
+                }
+            }
+            $items += @{ Separator = $true }
+            $items += @{ Label = 'Enter a path manually'; Key = '__manual__'; Hint = 'External drive, etc.' }
+
+            $choice = Select-WinPulseMenuItem -Title 'Which backup has the app capture?' -Items $items
+            if (-not $choice) {
+                Write-Host '  App reinstall cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            if ($choice -ne '__manual__') {
+                $selectedBackupRoot = $choice
+            }
+        }
+        else {
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+        }
+
+        if (-not $selectedBackupRoot) {
+            $manualInput = Read-Host '  Path to the backup folder (the one with apps\winget-packages.json)'
+            if ([string]::IsNullOrWhiteSpace($manualInput)) {
+                Write-Host '  No path entered. App reinstall cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+            $selectedBackupRoot = $manualInput.Trim()
+        }
+    }
+
+    $packageFile = Join-WinPulsePath -path $selectedBackupRoot -childpath @('apps', 'winget-packages.json')
+    if (-not (Test-Path -LiteralPath $packageFile)) {
+        Write-Host ('  winget export not found: {0}' -f $packageFile) -ForegroundColor Yellow
+        return [pscustomobject][ordered]@{ BackupRoot = $selectedBackupRoot; PackageFile = $packageFile; SelectedCount = 0; InstalledCount = 0; FailedCount = 0; RecordPath = $null }
+    }
+
+    try {
+        $packageIds = @(Get-WinPulseWingetExportPackageIds -path $packageFile)
+    }
+    catch {
+        Write-Host ('  Could not parse winget export: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
+        return [pscustomobject][ordered]@{ BackupRoot = $selectedBackupRoot; PackageFile = $packageFile; SelectedCount = 0; InstalledCount = 0; FailedCount = 0; RecordPath = $null }
+    }
+
+    if ($packageIds.Count -eq 0) {
+        Write-Host '  winget export did not contain package IDs.' -ForegroundColor Yellow
+        return [pscustomobject][ordered]@{ BackupRoot = $selectedBackupRoot; PackageFile = $packageFile; SelectedCount = 0; InstalledCount = 0; FailedCount = 0; RecordPath = $null }
+    }
+
+    if ($nonInteractive) {
+        $requested = @(ConvertTo-WinPulseStringList -values $AppsSelect)
+        if ($requested.Count -gt 0) {
+            $requestedSet = @{}
+            foreach ($id in @($requested)) {
+                $requestedSet[$id.ToLowerInvariant()] = $true
+            }
+            $selectedIds = @($packageIds | Where-Object { $requestedSet.ContainsKey(([string]$_).ToLowerInvariant()) })
+        }
+        else {
+            $selectedIds = @($packageIds)
+        }
+    }
+    else {
+        $items = @()
+        foreach ($id in @($packageIds)) {
+            $items += @{ Label = $id; Key = $id; Hint = 'winget package ID' }
+        }
+        $selectedIds = @(Select-WinPulseMultiMenuItem -Title 'Which apps should be reinstalled?' -Items $items)
+    }
+
+    if ($selectedIds.Count -eq 0) {
+        Write-Host '  No apps selected. App reinstall cancelled.' -ForegroundColor Yellow
+        return [pscustomobject][ordered]@{ BackupRoot = $selectedBackupRoot; PackageFile = $packageFile; SelectedCount = 0; InstalledCount = 0; FailedCount = 0; RecordPath = $null }
+    }
+
+    if ($nonInteractive) {
+        $dryRun = -not $AppsExecute
+    }
+    else {
+        $action = Select-WinPulseMenuItem -Title 'Dry run or install selected apps?' -Items @(
+            @{ Label = 'Dry run - print commands only'; Key = 'D'; Hint = 'Default/safe' },
+            @{ Label = 'Install selected apps now';     Key = 'X'; Hint = 'Runs winget install' },
+            @{ Separator = $true },
+            @{ Label = 'Cancel';                        Key = 'C'; Color = 'DarkGray' }
+        )
+        if ($action -ne 'D' -and $action -ne 'X') {
+            Write-Host '  App reinstall cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        $dryRun = ($action -eq 'D')
+        if (-not $dryRun) {
+            $confirm = Read-Host '  Type YES to install selected apps'
+            if ($confirm -ne 'YES') {
+                Write-Host '  Not confirmed. App reinstall cancelled.' -ForegroundColor Yellow
+                return $null
+            }
+        }
+    }
+
+    Write-Host ''
+    $wingetReady = $false
+    $wingetCommand = $null
+    if (-not $dryRun) {
+        $wingetReady = Ensure-WinGet
+        if ($wingetReady) {
+            $wingetCommand = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+    }
+
+    $results = @()
+    foreach ($id in @($selectedIds)) {
+        $commandText = New-WinPulseWingetInstallCommandText -packageId $id
+        if ($dryRun) {
+            Write-Host ('  DRY RUN: {0}' -f $commandText) -ForegroundColor Cyan
+            $results += [pscustomobject][ordered]@{ PackageId = $id; Command = $commandText; DryRun = $true; Success = $true; ExitCode = $null; Note = 'Dry run only; winget install was not invoked.' }
+            continue
+        }
+
+        if (-not $wingetReady -or -not $wingetCommand) {
+            Write-Host ('  FAILED: {0} (winget not available)' -f $id) -ForegroundColor Red
+            $results += [pscustomobject][ordered]@{ PackageId = $id; Command = $commandText; DryRun = $false; Success = $false; ExitCode = $null; Note = 'winget is not available.' }
+            continue
+        }
+
+        Write-Host ('  Installing {0}...' -f $id) -ForegroundColor DarkGray
+        $wingetPath = [string]$wingetCommand.Source
+        $output = & $wingetPath install --id $id -e --accept-package-agreements --accept-source-agreements 2>&1
+        $exitCode = $LASTEXITCODE
+        $success = ($exitCode -eq 0)
+        if ($success) {
+            Write-Host ('    OK: {0}' -f $id) -ForegroundColor Green
+        }
+        else {
+            Write-Host ('    FAILED: {0} (exit {1})' -f $id, $exitCode) -ForegroundColor Red
+        }
+        $results += [pscustomobject][ordered]@{ PackageId = $id; Command = $commandText; DryRun = $false; Success = $success; ExitCode = $exitCode; Note = (($output | Out-String).Trim()) }
+    }
+
+    $failed = @($results | Where-Object { -not $_.Success })
+    $installed = @($results | Where-Object { $_.Success -and -not $_.DryRun })
+    $dryRunItems = @($results | Where-Object { $_.DryRun })
+    $computerName = Get-WinPulseSafeComputerName
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $recordBase = Get-WinPulseMigrationAppsRecordBase -backupRoot $selectedBackupRoot -nonInteractive:$nonInteractive
+    $recordRoot = Join-Path -Path $recordBase -ChildPath ('MigrationApps-{0}-{1}' -f $computerName, $stamp)
+    $recordSuffix = 1
+    while (Test-Path -LiteralPath $recordRoot) {
+        $recordSuffix++
+        $recordRoot = Join-Path -Path $recordBase -ChildPath ('MigrationApps-{0}-{1}-{2}' -f $computerName, $stamp, $recordSuffix)
+    }
+    New-Item -Path $recordRoot -ItemType Directory -Force | Out-Null
+
+    $record = [pscustomobject][ordered]@{
+        Tool           = [pscustomobject][ordered]@{
+            Name          = 'WinPulse'
+            Version       = $script:WinPulseVersion
+            Mode          = 'MigrationApps'
+            Action        = if ($dryRun) { 'DryRun' } else { 'Execute' }
+            GeneratedAt   = (Get-Date).ToString('o')
+            SchemaVersion = '0.1'
+        }
+        Computer       = $computerName
+        BackupRoot     = $selectedBackupRoot
+        PackageFile    = 'apps\winget-packages.json'
+        SelectedCount  = @($results).Count
+        InstalledCount = $installed.Count
+        FailedCount    = $failed.Count
+        DryRunCount    = $dryRunItems.Count
+        Items          = @($results)
+    }
+
+    $recordPath = Join-Path -Path $recordRoot -ChildPath 'migration-apps.json'
+    $record | ConvertTo-Json -Depth 6 | Set-Content -Path $recordPath -Encoding UTF8
+
+    Write-Host ''
+    if ($dryRun) {
+        Write-Host ('Migration apps dry-run complete. {0} command(s) written; nothing was installed.' -f $dryRunItems.Count) -ForegroundColor Green
+    }
+    elseif ($failed.Count -eq 0) {
+        Write-Host ('Migration apps install complete. Installed: {0}.' -f $installed.Count) -ForegroundColor Green
+    }
+    else {
+        Write-Host ('Migration apps install finished with {0} failure(s). Installed: {1}.' -f $failed.Count, $installed.Count) -ForegroundColor Yellow
+    }
+    Write-Host ('  Record: {0}' -f $recordPath) -ForegroundColor Gray
+
+    return [pscustomobject][ordered]@{
+        BackupRoot     = $selectedBackupRoot
+        PackageFile    = $packageFile
+        RecordPath     = $recordPath
+        SelectedCount  = @($results).Count
+        InstalledCount = $installed.Count
+        FailedCount    = $failed.Count
+        DryRunCount    = $dryRunItems.Count
+        Record         = $record
+    }
+}
+
 function Invoke-WinPulseMigrationVerify {
     # Read-only backup integrity check. It only measures files already in the
     # backup and writes a verification record outside the backup payload.
@@ -9322,6 +9648,7 @@ function Show-WinPulseMigrationMenu {
             @{ Label = 'Backup (copy user data out)';  Key = 'B'; Hint = 'To a folder/drive' },
             @{ Label = 'Restore (put data back)';      Key = 'R'; Hint = 'From a backup' },
             @{ Label = 'Verify (re-check a backup)';   Key = 'V'; Hint = 'Integrity check' },
+            @{ Label = 'Reinstall apps';                Key = 'A'; Hint = 'winget from backup' },
             @{ Separator = $true },
             @{ Label = 'Back';                         Key = 'Q'; Color = 'DarkGray' }
         )
@@ -9330,6 +9657,7 @@ function Show-WinPulseMigrationMenu {
             'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
             'R' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
             'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
+            'A' { Invoke-WinPulseMigrationAppReinstall | Out-Null; Wait-WinPulseKey }
             default { return }
         }
     }
@@ -9525,7 +9853,7 @@ function Invoke-WinPulseMode {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'ExportBundle')]
+        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')]
         [string]$mode,
 
         [string[]]$BackupUsers = @(),
@@ -9545,7 +9873,11 @@ function Invoke-WinPulseMode {
         [switch]$RestoreHashSample,
         [string]$RestoreAsUser = $null,
 
-        [string]$VerifyBackupPath = $null
+        [string]$VerifyBackupPath = $null,
+
+        [string]$AppsBackupPath = $null,
+        [switch]$AppsExecute,
+        [string[]]$AppsSelect = @()
     )
 
     switch ($mode) {
@@ -9587,6 +9919,9 @@ function Invoke-WinPulseMode {
         }
         'MigrationVerify' {
             Invoke-WinPulseMigrationVerify -VerifyBackupPath $VerifyBackupPath | Out-Null
+        }
+        'MigrationApps' {
+            Invoke-WinPulseMigrationAppReinstall -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
@@ -9677,6 +10012,14 @@ if ($RestoreExecute) { $elevationPassthrough += '-RestoreExecute' }
 if ($RestoreHashSample) { $elevationPassthrough += '-RestoreHashSample' }
 if ($PSBoundParameters.ContainsKey('RestoreAsUser')) { $elevationPassthrough += @('-RestoreAsUser', (ConvertTo-WinPulseCommandArgument -value $RestoreAsUser)) }
 if ($PSBoundParameters.ContainsKey('VerifyBackupPath')) { $elevationPassthrough += @('-VerifyBackupPath', (ConvertTo-WinPulseCommandArgument -value $VerifyBackupPath)) }
+if ($PSBoundParameters.ContainsKey('AppsBackupPath')) { $elevationPassthrough += @('-AppsBackupPath', (ConvertTo-WinPulseCommandArgument -value $AppsBackupPath)) }
+if ($AppsExecute) { $elevationPassthrough += '-AppsExecute' }
+if ($PSBoundParameters.ContainsKey('AppsSelect')) {
+    $appsSelectArgument = (ConvertTo-WinPulseStringList -values $AppsSelect) -join ','
+    if (-not [string]::IsNullOrWhiteSpace($appsSelectArgument)) {
+        $elevationPassthrough += @('-AppsSelect', (ConvertTo-WinPulseCommandArgument -value $appsSelectArgument))
+    }
+}
 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
@@ -9692,6 +10035,10 @@ $restoreNonInteractiveForElevation = (
 $verifyNonInteractiveForElevation = (
     $Mode -eq 'MigrationVerify' -and
     -not [string]::IsNullOrWhiteSpace($VerifyBackupPath)
+)
+$appsNonInteractiveForElevation = (
+    $Mode -eq 'MigrationApps' -and
+    -not [string]::IsNullOrWhiteSpace($AppsBackupPath)
 )
 $skipElevationForFixture = $false
 $perUserTempRoot = [IO.Path]::GetTempPath()
@@ -9710,6 +10057,9 @@ if ($restoreNonInteractiveForElevation -and -not [string]::IsNullOrWhiteSpace($R
 if ($verifyNonInteractiveForElevation) {
     $skipElevationForFixture = $skipElevationForFixture -or (Test-WinPulsePathUnderRoot -path $VerifyBackupPath -root $perUserTempRoot)
 }
+if ($appsNonInteractiveForElevation -and -not $AppsExecute) {
+    $skipElevationForFixture = $skipElevationForFixture -or (Test-WinPulsePathUnderRoot -path $AppsBackupPath -root $perUserTempRoot)
+}
 
 if ($skipElevationForFixture) {
     $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse'
@@ -9726,4 +10076,4 @@ if ($Mode -ne 'MigrationVerify') {
     Initialize-WinPulse
 }
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect

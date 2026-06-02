@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'W11Readiness', 'ExportBundle')]
+    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'W11Readiness', 'ExportBundle')]
     [string]$Mode = 'MigrationPreflight',
 
     [string]$BootstrapPath = $null
@@ -114,6 +114,18 @@ function Get-SmokeLatestVerifyRecord {
         Select-Object -First 1
 }
 
+function Get-SmokeLatestAppsRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RecordRoot
+    )
+
+    return Get-ChildItem -LiteralPath $RecordRoot -Filter 'migration-apps.json' -Recurse -ErrorAction Stop |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -137,7 +149,7 @@ Write-Host ('WinPulse smoke test: {0}' -f $Mode) -ForegroundColor Cyan
 Write-Host ('Bootstrap: {0}' -f $BootstrapPath) -ForegroundColor Gray
 Write-Host ('Logs: {0}' -f $logRoot) -ForegroundColor Gray
 
-if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
+if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps')) {
     Write-Host ''
     Write-Host 'WARNING: run this smoke test from an elevated Windows PowerShell window.' -ForegroundColor Yellow
     Write-Host 'Parser errors will still be captured, but runtime output from auto-elevated child windows may not be captured.' -ForegroundColor Yellow
@@ -158,6 +170,9 @@ $remapRestoreRecordPath = $null
 $verifyRecordPath = $null
 $driftVerifyRecordPath = $null
 $appVerifyRecordPath = $null
+$appsModeBackupRoot = $null
+$appsModeRecordPath = $null
+$appsModeMissingBackupRoot = $null
 $expectedFilesPresent = $false
 $fixtureCleaned = $false
 $processExitCode = 0
@@ -481,6 +496,73 @@ try {
             }
         }
     }
+    elseif ($Mode -eq 'MigrationApps') {
+        $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
+        $appsModeBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppBackup')
+        $appsModeMissingBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('MissingAppBackup')
+        $appsFolder = Join-SmokePath -Path $appsModeBackupRoot -ChildPath @('apps')
+        New-Item -Path $appsFolder -ItemType Directory -Force | Out-Null
+        New-Item -Path $appsModeMissingBackupRoot -ItemType Directory -Force | Out-Null
+        $wingetFixture = '{"Sources":[{"Packages":[{"PackageIdentifier":"Foo.Bar"},{"PackageIdentifier":"Baz.Qux"},{"PackageIdentifier":"Foo.Bar"}]}]}'
+        Set-Content -Path (Join-Path -Path $appsFolder -ChildPath 'winget-packages.json') -Value $wingetFixture -Encoding ASCII
+
+        $appsArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationApps',
+            '-AppsBackupPath', (Convert-SmokeArgument -Value $appsModeBackupRoot)
+        )
+        $appsRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $appsArguments
+        $stdoutParts += $appsRun.Stdout
+        $stderrParts += $appsRun.Stderr
+        if ($appsRun.ExitCode -ne 0) {
+            throw ('MigrationApps dry-run fixture exited with {0}' -f $appsRun.ExitCode)
+        }
+
+        $appsRecordRoot = Join-Path -Path $fixtureRoot -ChildPath '_WinPulseAppRecords'
+        $appsRecord = Get-SmokeLatestAppsRecord -RecordRoot $appsRecordRoot
+        if (-not $appsRecord) {
+            throw 'MigrationApps dry-run fixture did not write migration-apps.json.'
+        }
+        $appsModeRecordPath = $appsRecord.FullName
+        Assert-SmokeFile -Path $appsModeRecordPath
+        $appsManifest = Get-Content -LiteralPath $appsModeRecordPath -Raw | ConvertFrom-Json
+        if ($appsManifest.Tool.Action -ne 'DryRun') {
+            throw ('MigrationApps fixture action was {0}, expected DryRun.' -f $appsManifest.Tool.Action)
+        }
+        if ([int]$appsManifest.SelectedCount -ne 2 -or [int]$appsManifest.DryRunCount -ne 2 -or [int]$appsManifest.FailedCount -ne 0 -or [int]$appsManifest.InstalledCount -ne 0) {
+            throw ('MigrationApps fixture counts were Selected={0}, DryRun={1}, Installed={2}, Failed={3}.' -f $appsManifest.SelectedCount, $appsManifest.DryRunCount, $appsManifest.InstalledCount, $appsManifest.FailedCount)
+        }
+        foreach ($expectedId in @('Baz.Qux', 'Foo.Bar')) {
+            $item = $appsManifest.Items | Where-Object { $_.PackageId -eq $expectedId } | Select-Object -First 1
+            if (-not $item) {
+                throw ('MigrationApps fixture did not record package {0}.' -f $expectedId)
+            }
+            if (-not [bool]$item.DryRun -or [string]$item.Note -notmatch 'not invoked') {
+                throw ('MigrationApps fixture package {0} was not recorded as dry-run only.' -f $expectedId)
+            }
+            if ([string]$item.Command -notmatch '^winget install --id .+ -e --accept-package-agreements --accept-source-agreements$') {
+                throw ('MigrationApps fixture command was not the expected winget install shape: {0}' -f $item.Command)
+            }
+        }
+
+        $missingAppsArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationApps',
+            '-AppsBackupPath', (Convert-SmokeArgument -Value $appsModeMissingBackupRoot)
+        )
+        $missingAppsRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $missingAppsArguments
+        $stdoutParts += $missingAppsRun.Stdout
+        $stderrParts += $missingAppsRun.Stderr
+        if ($missingAppsRun.ExitCode -ne 0) {
+            throw ('MigrationApps missing-export fixture exited with {0}' -f $missingAppsRun.ExitCode)
+        }
+
+        $expectedFilesPresent = $true
+    }
     else {
         $arguments = @(
             '-NoProfile',
@@ -564,11 +646,14 @@ if ($fixtureRoot) {
     if ($appBackupRoot) { $summary.Add(('AppBackupRoot: {0}' -f $appBackupRoot)) }
     if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
     if ($appRestoreRoot) { $summary.Add(('AppRestoreRoot: {0}' -f $appRestoreRoot)) }
+    if ($appsModeBackupRoot) { $summary.Add(('AppsModeBackupRoot: {0}' -f $appsModeBackupRoot)) }
+    if ($appsModeMissingBackupRoot) { $summary.Add(('AppsModeMissingBackupRoot: {0}' -f $appsModeMissingBackupRoot)) }
     if ($remapRestoreRoot) { $summary.Add(('RemapRestoreRoot: {0}' -f $remapRestoreRoot)) }
     if ($restoreRecordPath) { $summary.Add(('RestoreRecord: {0}' -f $restoreRecordPath)) }
     if ($remapRestoreRecordPath) { $summary.Add(('RemapRestoreRecord: {0}' -f $remapRestoreRecordPath)) }
     if ($verifyRecordPath) { $summary.Add(('VerifyRecord: {0}' -f $verifyRecordPath)) }
     if ($appVerifyRecordPath) { $summary.Add(('AppVerifyRecord: {0}' -f $appVerifyRecordPath)) }
+    if ($appsModeRecordPath) { $summary.Add(('AppsModeRecord: {0}' -f $appsModeRecordPath)) }
     if ($driftVerifyRecordPath) { $summary.Add(('DriftVerifyRecord: {0}' -f $driftVerifyRecordPath)) }
     $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
 }
