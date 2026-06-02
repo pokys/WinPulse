@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.10.0-20260602`. Clean tree, nothing pending uncommitted. Verified:
+working `0.11.0-20260602`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -498,6 +498,11 @@ TUI rendering-engine changes (adding selection items reuses the existing menu).
 
 ### Task C15 - Capture the installed-app list at backup (for winget reinstall)
 
+Status: DONE - implemented by Codex (`Invoke-WinPulseBackupAppCapture`: non-fatal
+`apps\installed-apps.json` + best-effort `winget export`, manifest `AppCapture`,
+execute-only, additive - not in plan/items/counts), reviewed by Claude. (Kept
+below for reference.)
+
 Why: at backup time, capture which apps are installed so a later restore can
 offer to reinstall them via winget on the new machine. This task is ONLY the
 capture (read-only inventory + `winget export`). The reinstall offer is C16.
@@ -540,6 +545,12 @@ Out of scope: any installing/reinstalling (that is C16), choco/Store capture,
 parsing or transforming the winget export.
 
 ### Task C16 - Offer winget reinstall from a backup's captured app list
+
+Status: DONE - implemented by Codex (`MigrationApps` mode, `-AppsBackupPath/
+-AppsExecute/-AppsSelect`, parse winget export, multi-select, dry-run default
+that provably never invokes winget install, execute only after -AppsExecute/YES,
+call operator not Invoke-Expression), reviewed by Claude. The live `winget
+install` is owner-verified; dry-run is smoke-covered. (Kept below for reference.)
 
 Why: after C15 captures `apps\winget-packages.json` at backup, let the technician
 reinstall those apps via winget on the new machine. Owner-approved decisions
