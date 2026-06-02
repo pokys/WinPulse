@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.10.0-20260602'
+$script:WinPulseVersion = '0.10.1-20260602'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -4954,7 +4954,12 @@ function Invoke-WinPulseMigrationBackup {
 
     Write-Host ''
     $results = @()
+    $totalItems = @($plan.Items).Count
+    $itemIndex = 0
     foreach ($item in $plan.Items) {
+        $itemIndex++
+        $pct = if ($totalItems -gt 0) { [int]([math]::Floor(($itemIndex - 1) * 100 / $totalItems)) } else { 0 }
+        Write-Progress -Activity 'Migration backup' -Status ('Folder {0} of {1}: {2}\{3}' -f $itemIndex, $totalItems, $item.UserName, $item.Folder) -PercentComplete $pct
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip missing source: {0}' -f $item.Source)
             $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
@@ -4983,6 +4988,7 @@ function Invoke-WinPulseMigrationBackup {
 
         $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
+    Write-Progress -Activity 'Migration backup' -Completed
 
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
@@ -5033,6 +5039,20 @@ function Invoke-WinPulseMigrationBackup {
     Export-WinPulseMigrationCopyReportHtml -manifest $manifest -path $reportHtmlPath
     Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup completed. Failed={0}, Partial={1}, Mismatch={2}' -f $failed.Count, $partialItems.Count, $mismatch.Count)
 
+    # Clean result screen so the outcome is always visible after the copy scrolls
+    # by. The per-folder list also reveals a folder that was skipped because its
+    # source did not exist (e.g. a redirected/empty Downloads).
+    if (-not $nonInteractive) {
+        Clear-Host
+        Write-WinPulseHeader -title 'Migration Backup - Result'
+    }
+    Write-Host ''
+    foreach ($r in $results) {
+        $st = if ($r.Skipped) { 'SKIPPED' } elseif ($r.Partial) { 'PARTIAL' } elseif ($r.Success) { 'OK' } else { 'FAILED' }
+        $stColor = if ($r.Skipped) { 'DarkYellow' } elseif ($r.Partial) { 'Yellow' } elseif ($r.Success) { 'Green' } else { 'Red' }
+        $detail = if ($r.Skipped) { 'source not found / empty' } elseif ($r.Verification) { '{0} files' -f $r.Verification.DestFiles } else { '' }
+        Write-Host ('    {0,-8} {1}\{2}  {3}' -f $st, $r.UserName, $r.Folder, $detail) -ForegroundColor $stColor
+    }
     Write-Host ''
     if ($dryRun) {
         Write-Host 'Dry-run plan complete. No files were copied.' -ForegroundColor Green
@@ -5798,7 +5818,12 @@ function Invoke-WinPulseMigrationRestore {
 
     Write-Host ''
     $results = @()
+    $totalItems = @($plan.Items).Count
+    $itemIndex = 0
     foreach ($item in $plan.Items) {
+        $itemIndex++
+        $pct = if ($totalItems -gt 0) { [int]([math]::Floor(($itemIndex - 1) * 100 / $totalItems)) } else { 0 }
+        Write-Progress -Activity 'Migration restore' -Status ('Folder {0} of {1}: {2}\{3}' -f $itemIndex, $totalItems, $item.UserName, $item.Folder) -PercentComplete $pct
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip empty source: {0}' -f $item.Source)
             $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
@@ -5826,6 +5851,7 @@ function Invoke-WinPulseMigrationRestore {
 
         $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
+    Write-Progress -Activity 'Migration restore' -Completed
 
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
@@ -5880,6 +5906,17 @@ function Invoke-WinPulseMigrationRestore {
     Export-WinPulseMigrationCopyReportHtml -manifest $record -path $reportHtmlPath
     Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration restore completed. Failed={0}, Partial={1}, Mismatch={2}' -f $failed.Count, $partialItems.Count, $mismatch.Count)
 
+    if (-not $nonInteractive) {
+        Clear-Host
+        Write-WinPulseHeader -title 'Migration Restore - Result'
+    }
+    Write-Host ''
+    foreach ($r in $results) {
+        $st = if ($r.Skipped) { 'SKIPPED' } elseif ($r.Partial) { 'PARTIAL' } elseif ($r.Success) { 'OK' } else { 'FAILED' }
+        $stColor = if ($r.Skipped) { 'DarkYellow' } elseif ($r.Partial) { 'Yellow' } elseif ($r.Success) { 'Green' } else { 'Red' }
+        $detail = if ($r.Skipped) { 'no data in backup' } elseif ($r.Verification) { '{0} files' -f $r.Verification.DestFiles } else { '' }
+        Write-Host ('    {0,-8} {1}\{2}  {3}' -f $st, $r.UserName, $r.Folder, $detail) -ForegroundColor $stColor
+    }
     Write-Host ''
     if ($dryRun) {
         Write-Host 'Dry-run restore plan complete. No files were copied.' -ForegroundColor Green
