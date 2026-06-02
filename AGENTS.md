@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.9.6-20260601`. Clean tree, nothing pending uncommitted. Verified:
+working `0.10.0-20260602`. Clean tree, nothing pending uncommitted. Verified:
 parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
 dashboard/scan path was confirmed on a real elevated machine.
 
@@ -418,6 +418,13 @@ Out of scope: per-file hashing of the whole backup (manifests do not store
 per-file hashes), TUI rendering changes, anything that writes into the backup.
 
 ### Task C14 - Per-application data backup targets (Chrome / Firefox / Outlook)
+
+Status: DONE - implemented by Codex (`-BackupApps`, detection, app targets with
+`Relative` + per-item `ExtraExcludeFiles`, Outlook `*.ost` excluded from copy AND
+verification, manifest `Apps`, Relative-aware restore/verify round-trip with
+catalog fallback for old manifests), reviewed by Claude. Smoke covers the
+Chrome/Firefox/Outlook backup -> restore -> verify round-trip and asserts the
+`.ost` is neither copied nor restored. (Kept below for reference.)
 
 Why: a technician usually wants a specific app's data, not the whole noisy
 AppData. Detect installed app data under the chosen profile and offer each as its

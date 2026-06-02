@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.9.6-20260601'
+$script:WinPulseVersion = '0.10.0-20260602'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
