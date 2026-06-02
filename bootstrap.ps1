@@ -6,6 +6,7 @@ param(
 
     [string[]]$BackupUsers = @(),
     [string[]]$BackupFolders = @(),
+    [string[]]$BackupApps = @(),
     [string]$BackupDestination = $null,
     [switch]$BackupExecute,
     [switch]$BackupIncludePrivateKeys,
@@ -3974,6 +3975,99 @@ function Get-WinPulseBackupFolderCatalog {
     )
 }
 
+function Get-WinPulseBackupAppTargetDefinitions {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [ordered]@{
+            Key            = 'chrome'
+            Label          = 'Chrome data'
+            Relative       = 'AppData\Local\Google'
+            DetectRelative = 'AppData\Local\Google\Chrome\User Data'
+            ExcludeFiles   = @()
+        },
+        [ordered]@{
+            Key            = 'firefox'
+            Label          = 'Firefox profile'
+            Relative       = 'AppData\Roaming\Mozilla\Firefox'
+            DetectRelative = 'AppData\Roaming\Mozilla\Firefox\Profiles'
+            ExcludeFiles   = @()
+        },
+        [ordered]@{
+            Key            = 'outlook'
+            Label          = 'Outlook data (PST + autocomplete, no OST)'
+            Relative       = 'AppData\Local\Microsoft\Outlook'
+            DetectRelative = 'AppData\Local\Microsoft\Outlook'
+            ExcludeFiles   = @('*.ost')
+        }
+    )
+}
+
+function Get-WinPulseBackupAppTargets {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$profileRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$userName
+    )
+
+    $targets = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrWhiteSpace($profileRoot) -or [string]::IsNullOrWhiteSpace($userName)) {
+        return $targets.ToArray()
+    }
+
+    $profilePath = Join-WinPulsePath -path $profileRoot -childpath @($userName)
+    foreach ($definition in (Get-WinPulseBackupAppTargetDefinitions)) {
+        $detectPath = Join-Path -Path $profilePath -ChildPath $definition['DetectRelative']
+        if (-not (Test-Path -LiteralPath $detectPath -PathType Container)) {
+            continue
+        }
+
+        [void]$targets.Add([ordered]@{
+            Key          = $definition['Key']
+            Label        = $definition['Label']
+            Relative     = $definition['Relative']
+            ExcludeFiles = @($definition['ExcludeFiles'])
+        })
+    }
+
+    return $targets.ToArray()
+}
+
+function ConvertTo-WinPulseBackupAppKeys {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$appKeys = @()
+    )
+
+    $known = @{}
+    foreach ($definition in (Get-WinPulseBackupAppTargetDefinitions)) {
+        $known[[string]$definition['Key']] = [string]$definition['Key']
+    }
+
+    $normalized = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($rawAppKey in @($appKeys)) {
+        if ([string]::IsNullOrWhiteSpace($rawAppKey)) { continue }
+        foreach ($appKey in ([string]$rawAppKey -split ',')) {
+            if ([string]::IsNullOrWhiteSpace($appKey)) { continue }
+            $key = $appKey.Trim().ToLowerInvariant()
+            if (-not $known.ContainsKey($key)) {
+                throw ('Unknown -BackupApps value "{0}". Valid values: {1}' -f $appKey, ((Get-WinPulseBackupAppTargetDefinitions | ForEach-Object { $_['Key'] }) -join ', '))
+            }
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            [void]$normalized.Add($known[$key])
+        }
+    }
+
+    return $normalized.ToArray()
+}
+
 function Get-WinPulseBackupExclusions {
     # Default safe exclusions. Standalone private keys (SSH/PuTTY) and the
     # registry hive files are not backed up by default. Certificate files
@@ -4066,6 +4160,64 @@ function Select-WinPulseBackupFolders {
     return @(Select-WinPulseMultiMenuItem -Title 'Which folders?  (AppData is excluded unless you opt in next)' -Items $items)
 }
 
+function Select-WinPulseBackupApps {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$profileRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$userKeys
+    )
+
+    $targetsByKey = [ordered]@{}
+    foreach ($userKey in @($userKeys)) {
+        foreach ($target in (Get-WinPulseBackupAppTargets -profileRoot $profileRoot -userName $userKey)) {
+            $key = [string]$target['Key']
+            if (-not $targetsByKey.Contains($key)) {
+                $targetsByKey[$key] = $target
+            }
+        }
+    }
+
+    if ($targetsByKey.Count -eq 0) {
+        return @()
+    }
+
+    $items = @()
+    foreach ($key in @($targetsByKey.Keys)) {
+        $target = $targetsByKey[$key]
+        $items += @{ Label = $target['Label']; Key = $target['Key']; Hint = $target['Relative'] }
+    }
+
+    return @(Select-WinPulseMultiMenuItem -Title 'Detected application data (optional)' -Items $items)
+}
+
+function Measure-WinPulseBackupPlanItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path,
+
+        [string[]]$extraExcludeFiles = @()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject][ordered]@{ Exists = $false; Bytes = [double]0; Size = '0 B' }
+    }
+
+    if (@($extraExcludeFiles).Count -eq 0) {
+        return Get-WinPulsePathSize -path $path
+    }
+
+    $measure = Measure-WinPulseFolderFiltered -path $path -excludeFiles $extraExcludeFiles
+    return [pscustomobject][ordered]@{
+        Exists = $true
+        Bytes  = [double]$measure.Bytes
+        Size   = ConvertTo-ReadableSize -bytes ([double]$measure.Bytes)
+    }
+}
+
 function New-WinPulseBackupPlan {
     # Builds a dry-run copy plan. Read-only: it only measures source folders
     # and computes destination paths. No files are copied here.
@@ -4078,13 +4230,22 @@ function New-WinPulseBackupPlan {
         [string[]]$userKeys,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[]]$folderKeys,
 
         [Parameter(Mandatory = $true)]
-        [string]$destinationRoot
+        [string]$destinationRoot,
+
+        [AllowEmptyCollection()]
+        [string[]]$appKeys = @(),
+
+        [string]$profileRoot = $null
     )
 
     $catalog = Get-WinPulseBackupFolderCatalog
+    $selectedAppKeys = @(ConvertTo-WinPulseBackupAppKeys -appKeys $appKeys)
+    $appKeySet = @{}
+    foreach ($appKey in @($selectedAppKeys)) { $appKeySet[[string]$appKey] = $true }
     $items = @()
     $totalBytes = [double]0
 
@@ -4101,15 +4262,45 @@ function New-WinPulseBackupPlan {
             $size = Get-WinPulsePathSize -path $source
 
             $items += [pscustomobject][ordered]@{
-                UserName    = $userKey
-                Folder      = $folderKey
-                Source      = $source
-                Destination = $dest
-                Exists      = [bool]$size.Exists
-                Bytes       = [double]$size.Bytes
-                Size        = $size.Size
+                UserName          = $userKey
+                Folder            = $folderKey
+                Relative          = $relative
+                ExtraExcludeFiles = @()
+                Source            = $source
+                Destination       = $dest
+                Exists            = [bool]$size.Exists
+                Bytes             = [double]$size.Bytes
+                Size              = $size.Size
             }
             if ($size.Exists) { $totalBytes += [double]$size.Bytes }
+        }
+
+        if ($appKeySet.Count -gt 0) {
+            $rootForApps = if ([string]::IsNullOrWhiteSpace($profileRoot)) { Split-Path -Path $profile.ProfilePath -Parent } else { $profileRoot }
+            foreach ($target in (Get-WinPulseBackupAppTargets -profileRoot $rootForApps -userName $userKey)) {
+                $appKey = [string]$target['Key']
+                if (-not $appKeySet.ContainsKey($appKey)) { continue }
+
+                $relative = [string]$target['Relative']
+                $extraExcludeFiles = @($target['ExcludeFiles'])
+                $source = Join-Path -Path $profile.ProfilePath -ChildPath $relative
+                $dest = Join-WinPulsePath -path $destinationRoot -childpath @($userKey, $relative)
+                $size = Measure-WinPulseBackupPlanItem -path $source -extraExcludeFiles $extraExcludeFiles
+
+                $items += [pscustomobject][ordered]@{
+                    UserName          = $userKey
+                    Folder            = [string]$target['Label']
+                    AppKey            = $appKey
+                    Relative          = $relative
+                    ExtraExcludeFiles = @($extraExcludeFiles)
+                    Source            = $source
+                    Destination       = $dest
+                    Exists            = [bool]$size.Exists
+                    Bytes             = [double]$size.Bytes
+                    Size              = $size.Size
+                }
+                if ($size.Exists) { $totalBytes += [double]$size.Bytes }
+            }
         }
     }
 
@@ -4429,6 +4620,9 @@ function Export-WinPulseMigrationCopyReportText {
         $lines.Add(('Destination: {0}' -f $manifest.DestinationRoot))
         $lines.Add(('Users: {0}' -f (@($manifest.Users) -join ', ')))
         $lines.Add(('Folders: {0}' -f (@($manifest.Folders) -join ', ')))
+        if ($manifest.PSObject.Properties['Apps'] -and @($manifest.Apps).Count -gt 0) {
+            $lines.Add(('Apps: {0}' -f (@($manifest.Apps) -join ', ')))
+        }
     }
     else {
         $lines.Add(('Backup source: {0}' -f $manifest.BackupRoot))
@@ -4546,6 +4740,9 @@ footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margi
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Destination' -value $manifest.DestinationRoot
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Users' -value (@($manifest.Users) -join ', ')
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Folders' -value (@($manifest.Folders) -join ', ')
+        if ($manifest.PSObject.Properties['Apps'] -and @($manifest.Apps).Count -gt 0) {
+            Add-WinPulseMigrationHtmlKv -builder $sb -key 'Apps' -value (@($manifest.Apps) -join ', ')
+        }
     }
     else {
         Add-WinPulseMigrationHtmlKv -builder $sb -key 'Backup source' -value $manifest.BackupRoot
@@ -4585,6 +4782,7 @@ function Invoke-WinPulseMigrationBackup {
     param(
         [string[]]$BackupUsers = @(),
         [string[]]$BackupFolders = @(),
+        [string[]]$BackupApps = @(),
         [string]$BackupDestination = $null,
         [switch]$BackupExecute,
         [switch]$BackupIncludePrivateKeys,
@@ -4596,6 +4794,7 @@ function Invoke-WinPulseMigrationBackup {
     $hasBackupParameters = (
         @($BackupUsers).Count -gt 0 -or
         @($BackupFolders).Count -gt 0 -or
+        @($BackupApps).Count -gt 0 -or
         -not [string]::IsNullOrWhiteSpace($BackupDestination) -or
         -not [string]::IsNullOrWhiteSpace($BackupProfilesRoot) -or
         $BackupExecute -or
@@ -4605,11 +4804,11 @@ function Invoke-WinPulseMigrationBackup {
     )
     $nonInteractive = (
         @($BackupUsers).Count -gt 0 -and
-        @($BackupFolders).Count -gt 0 -and
+        (@($BackupFolders).Count -gt 0 -or @($BackupApps).Count -gt 0) -and
         -not [string]::IsNullOrWhiteSpace($BackupDestination)
     )
     if ($hasBackupParameters -and -not $nonInteractive) {
-        throw 'Non-interactive MigrationBackup requires -BackupUsers, -BackupFolders, and -BackupDestination.'
+        throw 'Non-interactive MigrationBackup requires -BackupUsers, -BackupDestination, and -BackupFolders or -BackupApps.'
     }
 
     Clear-Host
@@ -4634,8 +4833,9 @@ function Invoke-WinPulseMigrationBackup {
     }
 
     $folderKeys = @(if ($nonInteractive) { @($BackupFolders) } else { @(Select-WinPulseBackupFolders) })
-    if ($folderKeys.Count -eq 0) {
-        Write-Host '  No folders selected. Backup cancelled.' -ForegroundColor Yellow
+    $appKeys = @(if ($nonInteractive) { @(ConvertTo-WinPulseBackupAppKeys -appKeys $BackupApps) } else { @(Select-WinPulseBackupApps -profileRoot $profileRoot -userKeys $userKeys) })
+    if ($folderKeys.Count -eq 0 -and $appKeys.Count -eq 0) {
+        Write-Host '  No folders or application data selected. Backup cancelled.' -ForegroundColor Yellow
         return $null
     }
 
@@ -4682,7 +4882,7 @@ function Invoke-WinPulseMigrationBackup {
     Write-Host ''
     Write-Host '  Building dry-run copy plan...' -ForegroundColor DarkGray
     $exclusions = Get-WinPulseBackupExclusions -includePrivateKeys:$includeKeys
-    $plan = New-WinPulseBackupPlan -profiles $profiles -userKeys $userKeys -folderKeys $folderKeys -destinationRoot $destinationRoot
+    $plan = New-WinPulseBackupPlan -profiles $profiles -userKeys $userKeys -folderKeys $folderKeys -destinationRoot $destinationRoot -appKeys $appKeys -profileRoot $profileRoot
 
     Write-Host ''
     Write-Host ('  Plan: {0} items, {1} exist, total {2}' -f $plan.ItemCount, $plan.ExistingCount, $plan.TotalSize) -ForegroundColor Cyan
@@ -4700,6 +4900,9 @@ function Invoke-WinPulseMigrationBackup {
     }
     if ($includeKeys -or $includeAppData) {
         Write-Host ('  Opt-in scope:   {0}' -f ($optIns -join ', ')) -ForegroundColor Yellow
+    }
+    if ($appKeys.Count -gt 0) {
+        Write-Host ('  App targets:    {0}' -f ($appKeys -join ', ')) -ForegroundColor Yellow
     }
 
     Write-Host ''
@@ -4754,14 +4957,15 @@ function Invoke-WinPulseMigrationBackup {
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip missing source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
             continue
         }
 
         $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
         $verb = if ($dryRun) { 'Planning' } else { 'Copying' }
         Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
-        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -DryRun:$dryRun
+        $itemExcludeFiles = @($exclusions.Files) + @($item.ExtraExcludeFiles)
+        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
         if ($rc.Partial) {
@@ -4770,19 +4974,28 @@ function Invoke-WinPulseMigrationBackup {
 
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
-            $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $exclusions.Files -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
+            $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
             if ($verify.Status -eq 'Mismatch') {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
                 Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
 
     $partialItems = @($results | Where-Object { $_.Partial })
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' })
+    $safetyNotes = @(
+        'Explicit user and folder selection only.',
+        ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
+        'No passwords, DPAPI secrets, or browser secrets are exported.',
+        $(if ($nonInteractive) { 'Copy step requires explicit -BackupExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
+    )
+    if ($appKeys -contains 'chrome' -or $appKeys -contains 'firefox') {
+        $safetyNotes += 'Browser profiles include the user DPAPI-encrypted credential store; this is an explicit per-app opt-in and encrypted data does not decrypt on another account or machine.'
+    }
     $manifest = [pscustomobject][ordered]@{
         Tool            = [pscustomobject][ordered]@{
             Name          = 'WinPulse'
@@ -4796,6 +5009,7 @@ function Invoke-WinPulseMigrationBackup {
         DestinationRoot = $destinationRoot
         Users           = @($userKeys)
         Folders         = @($folderKeys)
+        Apps            = @($appKeys)
         OptInCategories = @($optIns)
         Exclusions      = $exclusions
         Plan            = [pscustomobject][ordered]@{
@@ -4808,12 +5022,7 @@ function Invoke-WinPulseMigrationBackup {
         FailedCount     = $failed.Count
         PartialCount    = $partialItems.Count
         MismatchCount   = $mismatch.Count
-        SafetyNotes     = @(
-            'Explicit user and folder selection only.',
-            ('Private keys: {0}; AppData: {1} (opt-in widens scope).' -f $(if ($includeKeys) { 'INCLUDED' } else { 'excluded' }), $(if ($includeAppData) { 'INCLUDED' } else { 'excluded' })),
-            'No passwords, DPAPI secrets, or browser secrets are exported.',
-            $(if ($nonInteractive) { 'Copy step requires explicit -BackupExecute confirmation.' } else { 'Copy step requires explicit YES confirmation.' })
-        )
+        SafetyNotes     = @($safetyNotes)
     }
 
     $manifestPath = Join-Path -Path $destinationRoot -ChildPath 'manifest.json'
@@ -4848,7 +5057,8 @@ function Invoke-WinPulseMigrationBackup {
     if (-not $nonInteractive) {
         $cmd = @('.\bootstrap.ps1 -Mode MigrationBackup')
         $cmd += '-BackupUsers {0}' -f ((@($userKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',')
-        $cmd += '-BackupFolders {0}' -f ((@($folderKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',')
+        if ($folderKeys.Count -gt 0) { $cmd += '-BackupFolders {0}' -f ((@($folderKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',') }
+        if ($appKeys.Count -gt 0) { $cmd += '-BackupApps {0}' -f ((@($appKeys) | ForEach-Object { '"{0}"' -f $_ }) -join ',') }
         $cmd += '-BackupDestination "{0}"' -f $destinationRoot
         if ($profileRoot -and $profileRoot -ne 'C:\Users') { $cmd += '-BackupProfilesRoot "{0}"' -f $profileRoot }
         if ($includeKeys) { $cmd += '-BackupIncludePrivateKeys' }
@@ -4984,6 +5194,26 @@ function Get-WinPulseAvailableBackups {
     return @($backups)
 }
 
+function Get-WinPulseManifestItemRelative {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$item
+    )
+
+    $folder = [string]$item.Folder
+    if ($item.PSObject.Properties['Relative'] -and -not [string]::IsNullOrWhiteSpace([string]$item.Relative)) {
+        return [string]$item.Relative
+    }
+    if ([string]::IsNullOrWhiteSpace($folder)) {
+        return $null
+    }
+
+    $catalog = Get-WinPulseBackupFolderCatalog
+    $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
+    return $(if ($catEntry) { $catEntry['Relative'] } else { $folder })
+}
+
 function Get-WinPulseManifestItemBackupPath {
     [CmdletBinding()]
     param(
@@ -4995,14 +5225,11 @@ function Get-WinPulseManifestItemBackupPath {
     )
 
     $userName = [string]$item.UserName
-    $folder = [string]$item.Folder
-    if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($folder)) {
+    $relative = Get-WinPulseManifestItemRelative -item $item
+    if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($relative)) {
         return $null
     }
 
-    $catalog = Get-WinPulseBackupFolderCatalog
-    $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
-    $relative = if ($catEntry) { $catEntry['Relative'] } else { $folder }
     return Join-WinPulsePath -path $backupRoot -childpath @($userName, $relative)
 }
 
@@ -5239,7 +5466,6 @@ function New-WinPulseRestorePlan {
     )
 
     $targetUserName = Get-WinPulseRestoreTargetUserName -userName $targetUserName
-    $catalog = Get-WinPulseBackupFolderCatalog
     $items = @()
     $totalBytes = [double]0
 
@@ -5248,8 +5474,8 @@ function New-WinPulseRestorePlan {
         $folder = [string]$entry.Folder
         if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($folder)) { continue }
 
-        $catEntry = $catalog | Where-Object { $_['Key'] -eq $folder } | Select-Object -First 1
-        $relative = if ($catEntry) { $catEntry['Relative'] } else { $folder }
+        $relative = Get-WinPulseManifestItemRelative -item $entry
+        if ([string]::IsNullOrWhiteSpace($relative)) { continue }
         $targetUser = if ([string]::IsNullOrWhiteSpace($targetUserName)) { $userName } else { $targetUserName }
 
         $source = Join-WinPulsePath -path $backupRoot -childpath @($userName, $relative)
@@ -5260,6 +5486,7 @@ function New-WinPulseRestorePlan {
         $items += [pscustomobject][ordered]@{
             UserName    = $userName
             Folder      = $folder
+            Relative    = $relative
             Source      = $source
             Target      = $target
             Exists      = [bool]$size.Exists
@@ -5466,12 +5693,17 @@ function Invoke-WinPulseMigrationRestore {
         return $null
     }
 
-    if ($nonInteractive -and @($RestoreFolders).Count -gt 0) {
+    $restoreFolderFilter = New-Object System.Collections.Generic.List[string]
+    foreach ($folder in $RestoreFolders) {
+        if (-not [string]::IsNullOrWhiteSpace($folder)) {
+            [void]$restoreFolderFilter.Add([string]$folder)
+        }
+    }
+
+    if ($nonInteractive -and $restoreFolderFilter.Count -gt 0) {
         $folderSet = @{}
-        foreach ($folder in @($RestoreFolders)) {
-            if (-not [string]::IsNullOrWhiteSpace($folder)) {
-                $folderSet[[string]$folder] = $true
-            }
+        foreach ($folder in $restoreFolderFilter.ToArray()) {
+            $folderSet[[string]$folder] = $true
         }
         $filtered = @($plan.Items | Where-Object { $folderSet.ContainsKey([string]$_.Folder) })
         $plan = New-WinPulseRestorePlanObject -items $filtered -restoreRoot $plan.RestoreRoot -targetUserName $plan.RestoreAsUser
@@ -5569,7 +5801,7 @@ function Invoke-WinPulseMigrationRestore {
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip empty source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
             continue
         }
 
@@ -5592,7 +5824,7 @@ function Invoke-WinPulseMigrationRestore {
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
     }
 
     $partialItems = @($results | Where-Object { $_.Partial })
@@ -9188,6 +9420,7 @@ function Invoke-WinPulseMode {
 
         [string[]]$BackupUsers = @(),
         [string[]]$BackupFolders = @(),
+        [string[]]$BackupApps = @(),
         [string]$BackupDestination = $null,
         [switch]$BackupExecute,
         [switch]$BackupIncludePrivateKeys,
@@ -9236,7 +9469,7 @@ function Invoke-WinPulseMode {
         }
         'MigrationBackup' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration backup mode.' -f $script:WinPulseVersion)
-            Invoke-WinPulseMigrationBackup -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot | Out-Null
+            Invoke-WinPulseMigrationBackup -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot | Out-Null
         }
         'MigrationRestore' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
@@ -9313,6 +9546,12 @@ if ($PSBoundParameters.ContainsKey('BackupUsers')) {
 if ($PSBoundParameters.ContainsKey('BackupFolders')) {
     foreach ($value in @($BackupFolders)) { $elevationPassthrough += @('-BackupFolders', (ConvertTo-WinPulseCommandArgument -value $value)) }
 }
+if ($PSBoundParameters.ContainsKey('BackupApps')) {
+    $backupAppsArgument = (ConvertTo-WinPulseBackupAppKeys -appKeys $BackupApps) -join ','
+    if (-not [string]::IsNullOrWhiteSpace($backupAppsArgument)) {
+        $elevationPassthrough += @('-BackupApps', (ConvertTo-WinPulseCommandArgument -value $backupAppsArgument))
+    }
+}
 if ($PSBoundParameters.ContainsKey('BackupDestination')) { $elevationPassthrough += @('-BackupDestination', (ConvertTo-WinPulseCommandArgument -value $BackupDestination)) }
 if ($BackupExecute) { $elevationPassthrough += '-BackupExecute' }
 if ($BackupIncludePrivateKeys) { $elevationPassthrough += '-BackupIncludePrivateKeys' }
@@ -9332,7 +9571,7 @@ if ($PSBoundParameters.ContainsKey('VerifyBackupPath')) { $elevationPassthrough 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
     @($BackupUsers).Count -gt 0 -and
-    @($BackupFolders).Count -gt 0 -and
+    (@($BackupFolders).Count -gt 0 -or @($BackupApps).Count -gt 0) -and
     -not [string]::IsNullOrWhiteSpace($BackupDestination)
 )
 $restoreNonInteractiveForElevation = (
@@ -9377,4 +9616,4 @@ if ($Mode -ne 'MigrationVerify') {
     Initialize-WinPulse
 }
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath

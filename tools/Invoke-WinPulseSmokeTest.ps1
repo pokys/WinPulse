@@ -148,12 +148,15 @@ $powershell = (Get-Command -Name powershell.exe -ErrorAction Stop).Source
 $start = Get-Date
 $fixtureRoot = $null
 $backupRoot = $null
+$appBackupRoot = $null
 $restoreRoot = $null
+$appRestoreRoot = $null
 $remapRestoreRoot = $null
 $restoreRecordPath = $null
 $remapRestoreRecordPath = $null
 $verifyRecordPath = $null
 $driftVerifyRecordPath = $null
+$appVerifyRecordPath = $null
 $expectedFilesPresent = $false
 $fixtureCleaned = $false
 $processExitCode = 0
@@ -166,10 +169,24 @@ try {
         $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')
         $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
         $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Backup')
+        $appBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppBackup')
         $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Restore')
+        $appRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppRestore')
         $remapRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('RestoreRemap')
         New-Item -Path $desktop -ItemType Directory -Force | Out-Null
         Set-Content -Path (Join-Path -Path $desktop -ChildPath 'sample.txt') -Value 'WinPulse smoke fixture' -Encoding ASCII
+        $chromeProfile = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default')
+        $firefoxProfile = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Roaming', 'Mozilla', 'Firefox', 'Profiles', 'abc.default-release')
+        $outlookRoot = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook')
+        $outlookRoamCache = Join-SmokePath -Path $outlookRoot -ChildPath @('RoamCache')
+        New-Item -Path $chromeProfile -ItemType Directory -Force | Out-Null
+        New-Item -Path $firefoxProfile -ItemType Directory -Force | Out-Null
+        New-Item -Path $outlookRoamCache -ItemType Directory -Force | Out-Null
+        Set-Content -Path (Join-Path -Path $chromeProfile -ChildPath 'Bookmarks') -Value 'chrome bookmarks' -Encoding ASCII
+        Set-Content -Path (Join-Path -Path $firefoxProfile -ChildPath 'prefs.js') -Value 'firefox prefs' -Encoding ASCII
+        Set-Content -Path (Join-Path -Path $outlookRoot -ChildPath 'test.pst') -Value 'pst data' -Encoding ASCII
+        Set-Content -Path (Join-Path -Path $outlookRoamCache -ChildPath 'x.dat') -Value 'autocomplete' -Encoding ASCII
+        Set-Content -Path (Join-Path -Path $outlookRoot -ChildPath 'big.ost') -Value 'ost cache' -Encoding ASCII
 
         $backupArguments = @(
             '-NoProfile',
@@ -222,6 +239,94 @@ try {
             $verifyManifest = Get-Content -LiteralPath $verifyRecordPath -Raw | ConvertFrom-Json
             if ([int]$verifyManifest.DriftCount -ne 0 -or [int]$verifyManifest.IntactCount -lt 1) {
                 throw ('MigrationVerify intact fixture reported IntactCount={0}, DriftCount={1}.' -f $verifyManifest.IntactCount, $verifyManifest.DriftCount)
+            }
+
+            $appBackupArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationBackup',
+                '-BackupProfilesRoot', (Convert-SmokeArgument -Value $usersRoot),
+                '-BackupUsers', 'tester',
+                '-BackupApps', 'Chrome,Firefox,Outlook',
+                '-BackupDestination', (Convert-SmokeArgument -Value $appBackupRoot),
+                '-BackupExecute'
+            )
+            $appBackupRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $appBackupArguments
+            $stdoutParts += $appBackupRun.Stdout
+            $stderrParts += $appBackupRun.Stderr
+            if ($appBackupRun.ExitCode -ne 0) {
+                throw ('MigrationBackup app fixture exited with {0}' -f $appBackupRun.ExitCode)
+            }
+
+            $appManifestPath = Join-Path -Path $appBackupRoot -ChildPath 'manifest.json'
+            Assert-SmokeFile -Path $appManifestPath
+            Assert-SmokeManifestCounts -Path $appManifestPath
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appBackupRoot -ChildPath @('tester', 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default', 'Bookmarks'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appBackupRoot -ChildPath @('tester', 'AppData', 'Roaming', 'Mozilla', 'Firefox', 'Profiles', 'abc.default-release', 'prefs.js'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appBackupRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'test.pst'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appBackupRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'RoamCache', 'x.dat'))
+            $backupOst = Join-SmokePath -Path $appBackupRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'big.ost')
+            if (Test-Path -LiteralPath $backupOst) {
+                throw 'MigrationBackup app fixture copied an OST file.'
+            }
+            $appManifest = Get-Content -LiteralPath $appManifestPath -Raw | ConvertFrom-Json
+            foreach ($expectedApp in @('chrome', 'firefox', 'outlook')) {
+                if (@($appManifest.Apps) -notcontains $expectedApp) {
+                    throw ('MigrationBackup app fixture did not record app key {0}.' -f $expectedApp)
+                }
+            }
+            $appRelativeItem = $appManifest.Items | Where-Object { $_.AppKey -eq 'outlook' } | Select-Object -First 1
+            if (-not $appRelativeItem -or [string]$appRelativeItem.Relative -ne 'AppData\Local\Microsoft\Outlook' -or @($appRelativeItem.ExtraExcludeFiles) -notcontains '*.ost') {
+                throw 'MigrationBackup app fixture did not record Outlook Relative/ExtraExcludeFiles.'
+            }
+
+            $appRestoreArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationRestore',
+                '-RestoreBackupPath', (Convert-SmokeArgument -Value $appBackupRoot),
+                '-RestoreRoot', (Convert-SmokeArgument -Value $appRestoreRoot),
+                '-RestoreExecute'
+            )
+            $appRestoreRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $appRestoreArguments
+            $stdoutParts += $appRestoreRun.Stdout
+            $stderrParts += $appRestoreRun.Stderr
+            if ($appRestoreRun.ExitCode -ne 0) {
+                throw ('MigrationRestore app fixture exited with {0}' -f $appRestoreRun.ExitCode)
+            }
+
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appRestoreRoot -ChildPath @('tester', 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default', 'Bookmarks'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appRestoreRoot -ChildPath @('tester', 'AppData', 'Roaming', 'Mozilla', 'Firefox', 'Profiles', 'abc.default-release', 'prefs.js'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appRestoreRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'test.pst'))
+            Assert-SmokeFile -Path (Join-SmokePath -Path $appRestoreRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'RoamCache', 'x.dat'))
+            $restoreOst = Join-SmokePath -Path $appRestoreRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook', 'big.ost')
+            if (Test-Path -LiteralPath $restoreOst) {
+                throw 'MigrationRestore app fixture restored an OST file.'
+            }
+
+            $appVerifyArguments = @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+                '-Mode', 'MigrationVerify',
+                '-VerifyBackupPath', (Convert-SmokeArgument -Value $appBackupRoot)
+            )
+            $appVerifyRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $appVerifyArguments
+            $stdoutParts += $appVerifyRun.Stdout
+            $stderrParts += $appVerifyRun.Stderr
+            if ($appVerifyRun.ExitCode -ne 0) {
+                throw ('MigrationVerify app fixture exited with {0}' -f $appVerifyRun.ExitCode)
+            }
+            $appVerifyRecord = Get-SmokeLatestVerifyRecord -RecordRoot $verifyRecordRoot
+            if (-not $appVerifyRecord) {
+                throw 'MigrationVerify app fixture did not write migration-verify.json.'
+            }
+            $appVerifyRecordPath = $appVerifyRecord.FullName
+            $appVerifyManifest = Get-Content -LiteralPath $appVerifyRecordPath -Raw | ConvertFrom-Json
+            if ([int]$appVerifyManifest.DriftCount -ne 0 -or [int]$appVerifyManifest.IntactCount -lt 3) {
+                throw ('MigrationVerify app fixture reported IntactCount={0}, DriftCount={1}.' -f $appVerifyManifest.IntactCount, $appVerifyManifest.DriftCount)
             }
 
             $backupSample = Join-SmokePath -Path $backupRoot -ChildPath @('tester', 'Desktop', 'sample.txt')
@@ -414,11 +519,14 @@ if ($fixtureRoot) {
     $summary.Add(('FixtureRoot: {0}' -f $fixtureRoot))
     $summary.Add(('FixtureCleaned: {0}' -f $fixtureCleaned))
     $summary.Add(('BackupRoot: {0}' -f $backupRoot))
+    if ($appBackupRoot) { $summary.Add(('AppBackupRoot: {0}' -f $appBackupRoot)) }
     if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
+    if ($appRestoreRoot) { $summary.Add(('AppRestoreRoot: {0}' -f $appRestoreRoot)) }
     if ($remapRestoreRoot) { $summary.Add(('RemapRestoreRoot: {0}' -f $remapRestoreRoot)) }
     if ($restoreRecordPath) { $summary.Add(('RestoreRecord: {0}' -f $restoreRecordPath)) }
     if ($remapRestoreRecordPath) { $summary.Add(('RemapRestoreRecord: {0}' -f $remapRestoreRecordPath)) }
     if ($verifyRecordPath) { $summary.Add(('VerifyRecord: {0}' -f $verifyRecordPath)) }
+    if ($appVerifyRecordPath) { $summary.Add(('AppVerifyRecord: {0}' -f $appVerifyRecordPath)) }
     if ($driftVerifyRecordPath) { $summary.Add(('DriftVerifyRecord: {0}' -f $driftVerifyRecordPath)) }
     $summary.Add(('ExpectedFilesPresent: {0}' -f $expectedFilesPresent))
 }
