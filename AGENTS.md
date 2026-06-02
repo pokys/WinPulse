@@ -494,6 +494,57 @@ Acceptance (non-elevated, temp fixtures):
 Out of scope: decrypting/transforming any app data, deduplicating Chrome cache,
 TUI rendering-engine changes (adding selection items reuses the existing menu).
 
+### Task C15 - Capture the installed-app list at backup (for winget reinstall)
+
+Why: at backup time, capture which apps are installed so a later restore can
+offer to reinstall them via winget on the new machine. This task is ONLY the
+capture (read-only inventory + `winget export`). The reinstall offer is C16.
+
+Scope:
+
+- On an EXECUTED backup only (not dry-run), best-effort capture into a new
+  `<destinationRoot>\apps\` folder:
+  - `winget-packages.json` via `winget export -o <file> --accept-source-agreements`
+    (this is the importable list with package IDs). Only if winget is available
+    (reuse the existing winget detection, e.g. `Test-WinGetAvailable` /
+    `Find-WinPulseExecutable`). winget export does NOT require elevation.
+  - `installed-apps.json` from the existing inventory
+    (`Get-WinPulseMigrationApplicationInventory` or `Get-WinPulseSoftwareInventory`)
+    - this covers apps winget does not know, for manual follow-up.
+- Make the whole capture wrapped in try/catch and NON-FATAL: a failure (winget
+  missing, export error) must not fail the backup. Record the outcome in the
+  manifest as e.g. `AppCapture = [pscustomobject]@{ WingetAvailable=$bool;
+  WingetExportFile='apps\winget-packages.json' or $null; InventoryFile=
+  'apps\installed-apps.json' or $null; Note='...' }`.
+- Do not change the file-copy flow, the existing `-BackupApps` (app DATA) feature,
+  or any verification. This is additive: a sidecar `apps\` folder + one manifest
+  field. The apps folder is NOT a copied user folder, so it must not appear in
+  the plan/items or counts.
+- Note in a manifest SafetyNote that the captured list reveals installed software
+  names but contains no secrets.
+
+Acceptance (non-elevated, temp fixtures):
+
+- An executed fixture backup creates `<dest>\apps\installed-apps.json` and, when
+  winget is present, `<dest>\apps\winget-packages.json` that parses as JSON; the
+  manifest has an `AppCapture` field. When winget is absent, the backup still
+  succeeds, `WingetAvailable=$false`, and `WingetExportFile=$null` (no throw).
+- A dry-run backup does NOT write the apps folder.
+- Existing Backup/Restore/Verify smoke still exit 0 (the new apps sidecar must not
+  break verification counts). Extend the backup smoke to assert the AppCapture
+  field and the installed-apps.json file.
+
+Out of scope: any installing/reinstalling (that is C16), choco/Store capture,
+parsing or transforming the winget export.
+
+### Task C16 - (after C15, design pending) Offer winget reinstall at restore
+
+Not yet specced. Will read a backup's `apps\winget-packages.json`, show a
+multi-select of apps, and run `winget install --id <id> -e` with explicit
+confirmation (reusing `Ensure-WinGet`). The live install needs admin + network +
+winget and is owner-verified; Codex will only build/dry-run the commands. Do NOT
+start C16 until Claude specs it.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
