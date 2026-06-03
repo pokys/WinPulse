@@ -2329,6 +2329,26 @@ function Show-WinPulseDashboard {
         Write-WinPulseDashboardLine -Label 'Drivers' -Value ('Problems {0} | Unsigned {1} | Recent {2}' -f $probCount, $unsignedCount, $scan.Drivers.RecentlyChanged.Count) -State $drvState
     }
 
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery.Present) {
+        $bat = $scan.HardwareDetail.Battery
+        $batState = if (-not $bat.HealthPercent) { 'OK' } elseif ($bat.HealthPercent -lt 60) { 'Critical' } elseif ($bat.HealthPercent -lt 80) { 'Warning' } else { 'OK' }
+        $batHColor = switch ($batState) { 'Critical' { 'Red' } 'Warning' { 'Yellow' } default { 'Gray' } }
+        $batSegs = [System.Collections.Generic.List[hashtable]]::new()
+        if ($bat.HealthPercent) {
+            $batSegs.Add(@{ Text = ('Health {0}%' -f $bat.HealthPercent); Color = $batHColor })
+        }
+        if ($bat.DesignCapacityWh -and $bat.FullChargeCapacityWh) {
+            $batSegs.Add(@{ Text = ' | '; Color = 'Gray' })
+            $batSegs.Add(@{ Text = ('{0} / {1} Wh' -f $bat.FullChargeCapacityWh, $bat.DesignCapacityWh); Color = 'Gray' })
+        }
+        if ($bat.CycleCount) {
+            $batSegs.Add(@{ Text = (' | Cycles {0}' -f $bat.CycleCount); Color = 'Gray' })
+        }
+        if ($batSegs.Count -gt 0) {
+            Write-WinPulseDashboardSegLine -Label 'Battery' -State $batState -Segments $batSegs.ToArray()
+        }
+    }
+
     # Findings separator
     Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor Yellow
 
@@ -2352,7 +2372,7 @@ function Show-WinPulseDashboard {
         }
     }
 
-    # Scanned timestamp — inside box, last line before bottom border
+    # Scanned timestamp - inside box, last line before bottom border
     $scanText = ' Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')
     Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
     Write-Host -NoNewline ($scanText.PadRight($w - 4)) -ForegroundColor Gray
@@ -2414,8 +2434,13 @@ function Get-WinPulseTriageFindings {
     if ($scan.License -and $scan.License.ActivationStatus -ne 'Activated') {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Windows license: {0}' -f $scan.License.ActivationStatus) }
     }
-    if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery.Present -and $scan.HardwareDetail.Battery.HealthPercent -and $scan.HardwareDetail.Battery.HealthPercent -lt 50) {
-        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Battery health is low: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery.Present -and $scan.HardwareDetail.Battery.HealthPercent) {
+        if ($scan.HardwareDetail.Battery.HealthPercent -lt 30) {
+            $findings += [pscustomobject]@{ Severity = 'Critical'; Message = ('Battery critically degraded: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
+        }
+        if ($scan.HardwareDetail.Battery.HealthPercent -lt 50) {
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Battery health is low: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
+        }
     }
     if ($scan.Temperatures -and $scan.Temperatures.CPUTempCelsius) {
         if ($scan.Temperatures.CPUTempCelsius -gt 85) {
