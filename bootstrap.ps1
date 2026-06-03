@@ -551,10 +551,12 @@ function Get-WinPulseHardwareDetail {
         }
     }
 
-    $batteryInfo = [ordered]@{ Present = $false; HealthPercent = $null; CycleCount = $null; DesignCapacityWh = $null; FullChargeCapacityWh = $null }
+    $batteryInfo = [ordered]@{ Present = $false; HealthPercent = $null; CycleCount = $null; DesignCapacityWh = $null; FullChargeCapacityWh = $null; ChargePercent = $null }
     $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
     if ($battery) {
         $batteryInfo.Present = $true
+        $chg = $battery | Select-Object -ExpandProperty EstimatedChargeRemaining -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $chg) { $batteryInfo.ChargePercent = [int]$chg }
         try {
             $bStatic = Get-CimInstance -Namespace root\WMI -ClassName BatteryStaticData -ErrorAction SilentlyContinue | Select-Object -First 1
             $bFull = Get-CimInstance -Namespace root\WMI -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -2427,13 +2429,19 @@ function Show-WinPulseDashboard {
         if ($batSegs.Count -eq 0) {
             $batSegs.Add(@{ Text = 'Present (wear data unavailable)'; Color = 'Gray' })
         }
+        if ($null -ne $bat.ChargePercent) {
+            $chgColor = if ($bat.ChargePercent -le 20) { 'Red' } elseif ($bat.ChargePercent -le 40) { 'Yellow' } else { 'Gray' }
+            $batSegs.Add(@{ Text = (' | {0}% charged' -f $bat.ChargePercent); Color = $chgColor })
+        }
         Write-WinPulseDashboardSegLine -Label 'Battery' -State $batState -Segments $batSegs.ToArray()
     }
 
-    # Findings separator
-    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor Yellow
-
     $findings = @(Get-WinPulseTriageFindings -scan $scan)
+    $fLabel = if ($findings.Count -gt 0) { ' Findings ({0}) ' -f $findings.Count } else { ' No findings ' }
+    $fLine = '{0}{1}{2}' -f ([string][char]0x2550 * 2), $fLabel, ([string][char]0x2550 * [math]::Max(1, $w - 4 - $fLabel.Length))
+    $fSepColor = if ($findings.Count -gt 0) { 'Yellow' } else { 'Gray' }
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $fLine, ([char]0x2563)) -ForegroundColor $fSepColor
+
     if ($findings.Count -eq 0) {
         $fLine = ' No issues detected'
         Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
