@@ -1708,7 +1708,7 @@ function Select-WinPulseMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isSelected) {
-                    Write-Host -NoNewline $line -ForegroundColor White
+                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor DarkYellow
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor Gray
@@ -1868,7 +1868,7 @@ function Select-WinPulseMultiMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isActive) {
-                    Write-Host -NoNewline $line -ForegroundColor White
+                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor DarkYellow
                 } else {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
