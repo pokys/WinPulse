@@ -1276,6 +1276,7 @@ function Invoke-CoreScan {
             }
             Disks = @()
             SmartHealthy = $true
+            CpuLoadPercent = $null
         }
         Security    = [ordered]@{
             Defender = [ordered]@{
@@ -1362,6 +1363,14 @@ function Invoke-CoreScan {
         $freeMemory = [double]$os.FreePhysicalMemory * 1KB
         $usedMemory = $totalMemory - $freeMemory
         $ramPercent = if ($totalMemory -gt 0) { [math]::Round(($usedMemory / $totalMemory) * 100, 2) } else { 0 }
+        $cpuLoad = $null
+        try {
+            $cpuObj = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($cpuObj -and $cpuObj.PSObject.Properties['LoadPercentage'] -and $null -ne $cpuObj.LoadPercentage) {
+                $cpuLoad = [int]$cpuObj.LoadPercentage
+            }
+        }
+        catch { }
 
         $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3"
         $diskStates = foreach ($disk in $disks) {
@@ -1394,6 +1403,7 @@ function Invoke-CoreScan {
             }
             Disks = $diskStates
             SmartHealthy = $smartHealthy
+            CpuLoadPercent = $cpuLoad
         }
     }
     catch {
@@ -2316,6 +2326,10 @@ function Show-WinPulseDashboard {
         $tempColor = if ($tempC -gt 85) { 'Red' } elseif ($tempC -gt 70) { 'Yellow' } else { 'Gray' }
         $hwSegs.Add(@{ Text = ' | CPU {0}C' -f $tempC; Color = $tempColor })
     }
+    if ($null -ne $scan.Hardware.CpuLoadPercent) {
+        $cpuLColor = if ($scan.Hardware.CpuLoadPercent -ge 80) { 'Red' } elseif ($scan.Hardware.CpuLoadPercent -ge 60) { 'Yellow' } else { 'Gray' }
+        $hwSegs.Add(@{ Text = (' | CPU {0}%' -f $scan.Hardware.CpuLoadPercent); Color = $cpuLColor })
+    }
     Write-WinPulseDashboardSegLine -Label 'Hardware' -State $hwState -Segments $hwSegs.ToArray()
 
     # Security row
@@ -2349,7 +2363,22 @@ function Show-WinPulseDashboard {
 
     # Network
     $netState = if ($scan.Network.Internet) { 'OK' } else { 'Warning' }
-    Write-WinPulseDashboardLine -Label 'Network' -Value ('{0} | GW {1} | Net {2}' -f $scan.Network.IPv4, $scan.Network.Gateway, $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' })) -State $netState
+    $netSegs = [System.Collections.Generic.List[hashtable]]::new()
+    $netSegs.Add(@{ Text = [string]$scan.Network.IPv4; Color = 'Gray' })
+    $netSegs.Add(@{ Text = (' | GW {0}' -f $scan.Network.Gateway); Color = 'Gray' })
+    $netSegs.Add(@{ Text = (' | Net {0}' -f $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' })); Color = $(if ($scan.Network.Internet) { 'Gray' } else { 'Red' }) })
+    if ($scan.NetworkDetail -and $scan.NetworkDetail.WiFi -and $scan.NetworkDetail.WiFi.SSID) {
+        $ssid = [string]$scan.NetworkDetail.WiFi.SSID
+        if ($ssid.Length -gt 15) { $ssid = $ssid.Substring(0, 15) }
+        $sig = $scan.NetworkDetail.WiFi.SignalPercent
+        $wifiText = if ($sig) { ' | WiFi: {0} {1}%' -f $ssid, $sig } else { ' | WiFi: {0}' -f $ssid }
+        $wifiColor = if ($sig -and $sig -lt 40) { 'Red' } elseif ($sig -and $sig -lt 70) { 'Yellow' } else { 'Gray' }
+        $baseLen = ($netSegs | ForEach-Object { ([string]$_['Text']).Length } | Measure-Object -Sum).Sum
+        if (($baseLen + $wifiText.Length) -le 62) {
+            $netSegs.Add(@{ Text = $wifiText; Color = $wifiColor })
+        }
+    }
+    Write-WinPulseDashboardSegLine -Label 'Network' -State $netState -Segments $netSegs.ToArray()
 
     # Health row
     $healthState  = if ($scan.Health.CriticalLast24Hours -eq 0 -and -not $scan.Health.PendingReboot -and $scan.Health.BsodRecentCount -eq 0) { 'OK' } elseif ($scan.Health.BsodRecentCount -gt 0 -or $scan.Health.CriticalLast24Hours -gt 0) { 'Critical' } else { 'Warning' }
