@@ -1610,11 +1610,11 @@ function Write-WinPulseHeader {
 
     $w = Get-WinPulseBoxWidth
     Write-Host ''
-    Write-Host ('  {0}{1}{2}' -f ([char]0x250C), ([string][char]0x2500 * ($w - 2)), ([char]0x2510)) -ForegroundColor DarkYellow
-    Write-Host -NoNewline ('  {0} ' -f ([char]0x2502)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2554), ([string][char]0x2550 * ($w - 2)), ([char]0x2557)) -ForegroundColor DarkYellow
+    Write-Host -NoNewline ('  {0} ' -f ([char]0x2551)) -ForegroundColor DarkYellow
     Write-Host -NoNewline ('{0}' -f $title.PadRight($w - 4)) -ForegroundColor Cyan
-    Write-Host (' {0}' -f ([char]0x2502)) -ForegroundColor DarkYellow
-    Write-Host ('  {0}{1}{2}' -f ([char]0x2514), ([string][char]0x2500 * ($w - 2)), ([char]0x2518)) -ForegroundColor DarkYellow
+    Write-Host (' {0}' -f ([char]0x2551)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), ([string][char]0x2550 * ($w - 2)), ([char]0x255D)) -ForegroundColor DarkYellow
 }
 
 function Select-WinPulseMenuItem {
@@ -1639,8 +1639,8 @@ function Select-WinPulseMenuItem {
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
     $w = Get-WinPulseBoxWidth
-    $hLine = [string][char]0x2500 * ($w - 2)
-    $vLine = [char]0x2502
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $vLine = [char]0x2551
 
     if (-not $interactive) {
         Write-WinPulseHeader -title $Title
@@ -1677,7 +1677,7 @@ function Select-WinPulseMenuItem {
             $drawnLines = 0
 
             # Top border
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $Title, ([string][char]0x2500 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2510)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $Title, ([string][char]0x2550 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2557)) -ForegroundColor DarkYellow
             $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -1708,7 +1708,7 @@ function Select-WinPulseMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isSelected) {
-                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor DarkYellow
+                    Write-Host -NoNewline $line -ForegroundColor Yellow
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor $color
@@ -1718,7 +1718,7 @@ function Select-WinPulseMenuItem {
             }
 
             # Bottom border
-            Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor DarkYellow
             $drawnLines++
             # Help bar
             $helpText = '  {0}/{1} Navigate  Enter Select  Esc Back' -f ([char]0x2191), ([char]0x2193)
@@ -1790,8 +1790,8 @@ function Select-WinPulseMultiMenuItem {
     }
 
     $w = Get-WinPulseBoxWidth
-    $hLine = [string][char]0x2500 * ($w - 2)
-    $vLine = [char]0x2502
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $vLine = [char]0x2551
     $sel = 0
     $viewTop = 0   # first visible item index in $Items
 
@@ -1825,7 +1825,7 @@ function Select-WinPulseMultiMenuItem {
             # Top border + scroll indicator
             $scrollInfo = if ($Items.Count -gt $maxViewport) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
             $titleFull = if ($scrollInfo) { '{0}  {1}' -f $Title, $scrollInfo } else { $Title }
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleFull, ([string][char]0x2500 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2510)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor DarkYellow
             $drawnLines++
 
             # Render only items in viewport window
@@ -1868,7 +1868,7 @@ function Select-WinPulseMultiMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isActive) {
-                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor DarkYellow
+                    Write-Host -NoNewline $line -ForegroundColor Yellow
                 } else {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
@@ -1877,7 +1877,7 @@ function Select-WinPulseMultiMenuItem {
                 $rendered++
             }
 
-            Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor DarkYellow
             $drawnLines++
             $helpText = '  {0}/{1} Navigate  Space Toggle  Enter Confirm  Esc Cancel    {2} selected' -f ([char]0x2191), ([char]0x2193), $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
@@ -1923,8 +1923,8 @@ function Select-WinPulseFolderPath {
     }
 
     $w = Get-WinPulseBoxWidth
-    $hLine = [string][char]0x2500 * ($w - 2)
-    $vLine = [char]0x2502
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $vLine = [char]0x2551
     $sel = 0
     $viewTop = 0
 
@@ -2040,7 +2040,7 @@ function Select-WinPulseFolderPath {
                 $titleFull = $titleFull.Substring(0, $titleMax - 3) + '...'
             }
 
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleFull, ([string][char]0x2500 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2510)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor DarkYellow
             $drawnLines++
 
             $rendered = 0
@@ -2076,7 +2076,7 @@ function Select-WinPulseFolderPath {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isSelected) {
-                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor DarkYellow
+                    Write-Host -NoNewline $line -ForegroundColor Yellow
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor White
@@ -2086,7 +2086,7 @@ function Select-WinPulseFolderPath {
                 $rendered++
             }
 
-            Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkYellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor DarkYellow
             $drawnLines++
             $helpText = '  {0}/{1} Navigate  Enter Select/Open  T Type path  Esc Cancel' -f ([char]0x2191), ([char]0x2193)
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
@@ -2159,7 +2159,7 @@ function Write-WinPulseDashboardLine {
         'Critical' { @{ Text = 'CRIT'; Color = 'Red' } }
         default    { @{ Text = 'INFO'; Color = 'DarkCyan' } }
     }
-    $vLine = [char]0x2502
+    $vLine = [char]0x2551
 
     $inner = $BoxWidth - 3
     $content = ' [{0}] {1,-10} {2}' -f $badge.Text, $Label, $Value
@@ -2197,13 +2197,13 @@ function Show-WinPulseDashboard {
     catch { }
 
     $w = Get-WinPulseBoxWidth
-    $hLine = [string][char]0x2500 * ($w - 2)
-    $vLine = [char]0x2502
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $vLine = [char]0x2551
 
     # Top header (includes the build version for support/screenshots)
     $titleBar = ' WinPulse {0} ' -f $script:WinPulseVersion
     $titleFill = [math]::Max(1, $w - 4 - $titleBar.Length)
-    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleBar, ([string][char]0x2500 * $titleFill), ([char]0x2510)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleBar, ([string][char]0x2550 * $titleFill), ([char]0x2557)) -ForegroundColor DarkYellow
 
     # System line
     $sysLine = ' {0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime
@@ -2213,7 +2213,7 @@ function Show-WinPulseDashboard {
     Write-Host (' {0}' -f $vLine) -ForegroundColor DarkYellow
 
     # Separator
-    Write-Host ('  {0}{1}{2}' -f ([char]0x251C), $hLine, ([char]0x2524)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor DarkYellow
 
     # Hardware
     $ramState  = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
@@ -2263,7 +2263,7 @@ function Show-WinPulseDashboard {
     }
 
     # Findings separator
-    Write-Host ('  {0}{1}{2}' -f ([char]0x251C), $hLine, ([char]0x2524)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor DarkYellow
 
     $findings = @(Get-WinPulseTriageFindings -scan $scan)
     if ($findings.Count -eq 0) {
@@ -2276,7 +2276,7 @@ function Show-WinPulseDashboard {
         $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })
         foreach ($f in $ordered) {
             $fColor = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
-            $fBadge = if ($f.Severity -eq 'Critical') { '!!' } else { '! ' }
+            $fBadge = if ($f.Severity -eq 'Critical') { '[CRIT]' } else { '[WARN]' }
             $fText = ' {0} {1}' -f $fBadge, $f.Message
             if ($fText.Length -gt ($w - 4)) { $fText = $fText.Substring(0, $w - 7) + '...' }
             Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
@@ -2286,7 +2286,8 @@ function Show-WinPulseDashboard {
     }
 
     # Bottom border
-    Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkYellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor DarkYellow
+    Write-Host ''
     Write-Host ('  Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor Gray
 }
 
