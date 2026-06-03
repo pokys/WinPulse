@@ -950,6 +950,10 @@ drive labels/sizes, clipboard paste, any non-path prompt.
 
 ### Task C22 - Fix powercfg battery report parsing (replace fragile regex)
 
+Status: DONE - implemented by Codex (simpler all-mWh approach), reviewed by
+Claude, verified on a real laptop: shows `[CRIT] Battery  Health 36.7% | 17.4 / 47.5 Wh`.
+
+
 Why: the current powercfg fallback in `Get-WinPulseHardwareDetail` (inside
 `bootstrap.ps1`, around line 587) consistently fails on real laptops and shows
 "wear data unavailable". The root cause is a fragile regex that requires the
