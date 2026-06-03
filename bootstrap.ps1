@@ -1708,10 +1708,10 @@ function Select-WinPulseMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isSelected) {
-                    Write-Host -NoNewline $line -ForegroundColor Yellow
+                    Write-Host -NoNewline $line -ForegroundColor White
                 }
                 else {
-                    Write-Host -NoNewline $line -ForegroundColor $color
+                    Write-Host -NoNewline $line -ForegroundColor Gray
                 }
                 Write-Host (' {0}' -f $vLine) -ForegroundColor DarkYellow
                 $drawnLines++
@@ -1856,7 +1856,7 @@ function Select-WinPulseMultiMenuItem {
                 $pointer   = if ($isActive) { '>' } else { ' ' }
                 $box       = if ($isChecked) { '[x]' } else { '[ ]' }
                 $hint      = if ($item['Hint']) { $item['Hint'] } else { '' }
-                $color     = if ($isChecked) { 'Cyan' } else { 'White' }
+                $color     = if ($isChecked) { 'Cyan' } else { 'Gray' }
 
                 $left = ' {0} {1} {2}' -f $pointer, $box, $item['Label']
                 $avail = $w - 4
@@ -1868,7 +1868,7 @@ function Select-WinPulseMultiMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
                 if ($isActive) {
-                    Write-Host -NoNewline $line -ForegroundColor Yellow
+                    Write-Host -NoNewline $line -ForegroundColor White
                 } else {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
@@ -2174,6 +2174,34 @@ function Write-WinPulseDashboardLine {
     Write-Host (' {0}' -f $vLine) -ForegroundColor DarkYellow
 }
 
+function Write-WinPulseDashboardSegLine {
+    # Like Write-WinPulseDashboardLine but Value is an array of @{Text;Color} segments.
+    param([string]$Label, [string]$State = 'Info', [array]$Segments, [int]$BoxWidth = 88)
+    $badge = switch ($State) {
+        'OK'       { @{ Text = ' OK '; Color = 'Green' } }
+        'Warning'  { @{ Text = 'WARN'; Color = 'Yellow' } }
+        'Critical' { @{ Text = 'CRIT'; Color = 'Red' } }
+        default    { @{ Text = 'INFO'; Color = 'Gray' } }
+    }
+    $vLine   = [char]0x2551
+    $inner   = $BoxWidth - 3
+    # Fixed chars before segments: ' ' + '[STAT]'(6) + ' Label     '(12) = 19; segArea = inner - 19
+    $segArea = $inner - $badge.Text.Length - 3 - 12
+    $totalLen = 0
+    foreach ($s in $Segments) { $totalLen += ([string]$s['Text']).Length }
+    $pad = [math]::Max(0, $segArea - $totalLen)
+    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor DarkYellow
+    Write-Host -NoNewline ' ' -ForegroundColor DarkYellow
+    Write-Host -NoNewline ('[{0}]' -f $badge.Text) -ForegroundColor $badge.Color
+    Write-Host -NoNewline (' {0,-10} ' -f $Label) -ForegroundColor Gray
+    for ($i = 0; $i -lt $Segments.Count; $i++) {
+        $t = [string]$Segments[$i]['Text']
+        if ($i -eq $Segments.Count - 1) { $t = $t + (' ' * $pad) }
+        Write-Host -NoNewline $t -ForegroundColor ([string]$Segments[$i]['Color'])
+    }
+    Write-Host (' {0}' -f $vLine) -ForegroundColor DarkYellow
+}
+
 function Show-WinPulseDashboard {
     [CmdletBinding()]
     param(
@@ -2216,37 +2244,76 @@ function Show-WinPulseDashboard {
     Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor DarkYellow
 
     # Hardware
-    $ramState  = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
-    $cDisk     = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
+    # Hardware row
+    $ramState   = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
+    $cDisk      = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
     $cDiskState = if ($cDisk) { Get-WinPulseStateFromPercent -percent $cDisk.UsedPercent } else { 'OK' }
-    $hwState   = if ($cDiskState -eq 'Critical' -or $ramState -eq 'Critical') { 'Critical' } elseif ($cDiskState -eq 'Warning' -or $ramState -eq 'Warning') { 'Warning' } else { 'OK' }
-    $cDiskBar  = if ($cDisk) { 'C: {0} {1}% {2}' -f (Get-WinPulseDiskBar -Percent $cDisk.UsedPercent), $cDisk.UsedPercent, $cDisk.Free } else { 'C: N/A' }
+    $hwState    = if ($cDiskState -eq 'Critical' -or $ramState -eq 'Critical') { 'Critical' } elseif ($cDiskState -eq 'Warning' -or $ramState -eq 'Warning') { 'Warning' } else { 'OK' }
+    $ramColor   = switch ($ramState)   { 'Critical' { 'Red' } 'Warning' { 'Yellow' } default { 'Gray' } }
+    $diskColor  = switch ($cDiskState) { 'Critical' { 'Red' } 'Warning' { 'Yellow' } default { 'Gray' } }
+    $smartColor = if ($scan.Hardware.SmartHealthy) { 'Gray' } else { 'Red' }
     $smartLabel = if ($scan.Hardware.SmartHealthy) { 'SMART OK' } else { 'SMART FAIL' }
-    Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskBar, $smartLabel) -State $hwState
+    $cDiskText  = if ($cDisk) { 'C: {0}% {1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C: N/A' }
+    $hwSegs = [System.Collections.Generic.List[hashtable]]::new()
+    $hwSegs.Add(@{ Text = 'RAM {0}%' -f $scan.Hardware.Ram.UsedPercent; Color = $ramColor })
+    $hwSegs.Add(@{ Text = ' | '; Color = 'Gray' })
+    $hwSegs.Add(@{ Text = $cDiskText; Color = $diskColor })
+    $hwSegs.Add(@{ Text = ' | '; Color = 'Gray' })
+    $hwSegs.Add(@{ Text = $smartLabel; Color = $smartColor })
+    if ($scan.Temperatures -and $scan.Temperatures.CPUTempCelsius) {
+        $tempC     = [int]$scan.Temperatures.CPUTempCelsius
+        $tempColor = if ($tempC -gt 85) { 'Red' } elseif ($tempC -gt 70) { 'Yellow' } else { 'Gray' }
+        $hwSegs.Add(@{ Text = ' | CPU {0}C' -f $tempC; Color = $tempColor })
+    }
+    Write-WinPulseDashboardSegLine -Label 'Hardware' -State $hwState -Segments $hwSegs.ToArray()
 
-    # Security
+    # Security row
     $avNames = @()
     if ($scan.Security.Antivirus -and $scan.Security.Antivirus.Products) {
         $avNames = @($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
     }
-    $avLabel = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'None' }
-    if ($avLabel.Length -gt 18) { $avLabel = $avLabel.Substring(0, 18) }
-    $fwLabel = if ($scan.Security.FirewallEnabled) { 'Firewall ON' } else { 'Firewall OFF' }
+    # Remove Windows Defender short label when a third-party AV is also present
+    if ($avNames.Count -gt 1) {
+        $avNames = @($avNames | Where-Object { $_ -notmatch '^Win$|^Windows Defender$|^WinDefender$' })
+    }
+    $avLabel   = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'None' }
+    if ($avLabel.Length -gt 20) { $avLabel = $avLabel.Substring(0, 20) }
+    $fwLabel   = if ($scan.Security.FirewallEnabled) { 'Firewall ON' } else { 'Firewall OFF' }
+    $fwColor   = if ($scan.Security.FirewallEnabled) { 'Gray' } else { 'Red' }
     $bitLockerOn = $false
     if ($scan.Security.BitLocker -and $scan.Security.BitLocker.Count -gt 0) {
         $bitLockerOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0
     }
-    $blLabel = if ($bitLockerOn) { 'BitLocker ON' } else { 'BitLocker OFF' }
-    $secState = if ($scan.Security.Antivirus.EffectiveRealtimeProtection -and $scan.Security.FirewallEnabled) { 'OK' } else { 'Critical' }
-    Write-WinPulseDashboardLine -Label 'Security' -Value ('AV {0} | {1} | {2}' -f $avLabel, $fwLabel, $blLabel) -State $secState
+    $blLabel   = if ($bitLockerOn) { 'BitLocker ON' } else { 'BitLocker OFF' }
+    $blColor   = if ($bitLockerOn) { 'Cyan' } else { 'Gray' }
+    $secState  = if ($scan.Security.Antivirus.EffectiveRealtimeProtection -and $scan.Security.FirewallEnabled) { 'OK' } else { 'Critical' }
+    $secSegs   = @(
+        @{ Text = 'AV {0}' -f $avLabel; Color = 'Gray' }
+        @{ Text = ' | '; Color = 'Gray' }
+        @{ Text = $fwLabel; Color = $fwColor }
+        @{ Text = ' | '; Color = 'Gray' }
+        @{ Text = $blLabel; Color = $blColor }
+    )
+    Write-WinPulseDashboardSegLine -Label 'Security' -State $secState -Segments $secSegs
 
     # Network
     $netState = if ($scan.Network.Internet) { 'OK' } else { 'Warning' }
     Write-WinPulseDashboardLine -Label 'Network' -Value ('{0} | GW {1} | Net {2}' -f $scan.Network.IPv4, $scan.Network.Gateway, $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' })) -State $netState
 
-    # Health
-    $healthState = if ($scan.Health.CriticalLast24Hours -eq 0 -and -not $scan.Health.PendingReboot -and $scan.Health.BsodRecentCount -eq 0) { 'OK' } elseif ($scan.Health.BsodRecentCount -gt 0 -or $scan.Health.CriticalLast24Hours -gt 0) { 'Critical' } else { 'Warning' }
-    Write-WinPulseDashboardLine -Label 'Health' -Value ('BSOD {0} | Events(24h) {1} | Reboot {2}' -f $scan.Health.BsodRecentCount, $scan.Health.CriticalLast24Hours, $(if ($scan.Health.PendingReboot) { 'YES' } else { 'No' })) -State $healthState
+    # Health row
+    $healthState  = if ($scan.Health.CriticalLast24Hours -eq 0 -and -not $scan.Health.PendingReboot -and $scan.Health.BsodRecentCount -eq 0) { 'OK' } elseif ($scan.Health.BsodRecentCount -gt 0 -or $scan.Health.CriticalLast24Hours -gt 0) { 'Critical' } else { 'Warning' }
+    $bsodColor    = if ($scan.Health.BsodRecentCount -gt 0) { 'Red' } else { 'Gray' }
+    $critColor    = if ($scan.Health.CriticalLast24Hours -gt 0) { 'Red' } else { 'Gray' }
+    $rebootText   = if ($scan.Health.PendingReboot) { 'Reboot YES' } else { 'Reboot No' }
+    $rebootColor  = if ($scan.Health.PendingReboot) { 'Yellow' } else { 'Gray' }
+    $healthSegs   = @(
+        @{ Text = 'BSOD {0}' -f $scan.Health.BsodRecentCount; Color = $bsodColor }
+        @{ Text = ' | '; Color = 'Gray' }
+        @{ Text = 'Events(24h) {0}' -f $scan.Health.CriticalLast24Hours; Color = $critColor }
+        @{ Text = ' | '; Color = 'Gray' }
+        @{ Text = $rebootText; Color = $rebootColor }
+    )
+    Write-WinPulseDashboardSegLine -Label 'Health' -State $healthState -Segments $healthSegs
 
     # License
     if ($scan.License) {
@@ -2285,10 +2352,14 @@ function Show-WinPulseDashboard {
         }
     }
 
+    # Scanned timestamp — inside box, last line before bottom border
+    $scanText = ' Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')
+    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkYellow
+    Write-Host -NoNewline ($scanText.PadRight($w - 4)) -ForegroundColor Gray
+    Write-Host (' {0}' -f $vLine) -ForegroundColor DarkYellow
+
     # Bottom border
     Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor DarkYellow
-    Write-Host ''
-    Write-Host ('  Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor Gray
 }
 
 function Get-WinPulseTriageFindings {
