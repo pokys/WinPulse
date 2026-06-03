@@ -1041,6 +1041,122 @@ if ($pcfgOk -and (Test-Path -LiteralPath $tmpHtml)) { ... }
 Visual laptop check remains for Claude/owner: confirm battery row shows
 `Health XX% | YY.Y / ZZ.Z Wh` instead of "wear data unavailable".
 
+### Task C25 - Diagnostics menu replacing Findings & Details
+
+Why: `Show-WinPulseFindingsDetail` (called by [F] in the Quick Triage menu) is
+a flat wall of raw `Write-Host` output with no navigation, no consistent style,
+and no way to drill into a specific section. Replace it with a proper navigable
+diagnostics menu that reuses the existing WinPulse TUI infrastructure.
+
+**IMPORTANT — visual verification required.** This task changes live TUI
+rendering. Build on `dev`, run parser + ASCII + all smoke modes, then report.
+Claude will confirm visually on a real terminal before merging to main.
+Do NOT push to main until Claude approves.
+
+#### New function: `Show-WinPulseDiagnosticsMenu`
+
+Replace `Show-WinPulseFindingsDetail` entirely. Wire the new function in its
+place (find all call sites of `Show-WinPulseFindingsDetail` and replace with
+`Show-WinPulseDiagnosticsMenu -scan $scan`).
+
+The function shows a `Select-WinPulseMenuItem`-based menu of 7 sections.
+Each item has a badge-prefixed Label and a Hint with the one-line summary.
+Loop until the user presses Esc or selects Back.
+
+**Menu items** (Key, Label pattern, Hint content, badge state logic):
+
+| Key | Label prefix | Hint | State |
+|-----|-------------|------|-------|
+| `F` | Findings | `N critical · M warning` or `No issues` | Critical if any Critical; Warning if any Warning; OK if none |
+| `D` | Drivers | `N problematic · M unsigned` or `OK` | Warning if Problematic.Count > 0; OK otherwise |
+| `V` | Services | `N failed auto-start` or `OK` | Warning if > 3; OK if ≤ 3 (noisy threshold) |
+| `S` | System | `Hostname · OS build · Uptime` | OK |
+| `H` | Hardware | `CPU model short · RAM · C:XX% · Battery XX%` | Critical/Warning based on disk/battery |
+| `X` | Security | `AV name · FW ON/OFF · BL ON/OFF` | Critical if no AV/FW; OK otherwise |
+| `N` | Network | `IP · GW · Net OK/FAIL` + WiFi if available | Warning if no internet |
+
+Use `[CRIT]`/`[WARN]`/`[ OK ]` as the label prefix (NOT as the `Key` field —
+Key is the single letter above). Example item:
+```powershell
+@{ Label = '[WARN] Drivers'; Key = 'D'; Hint = '2 problematic · 1 unsigned' }
+```
+
+Add a separator then:
+```powershell
+@{ Separator = $true }
+@{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+```
+
+When the user selects a section (Enter), call the corresponding detail function
+(see below). When Esc or 'B' → return.
+
+#### Detail functions (one per section)
+
+Each detail function:
+- `Clear-Host`
+- `Write-WinPulseHeader -title '<Section Name>'`
+- Outputs content using plain `Write-Host` (keep existing formatting style —
+  do NOT try to put everything in boxes, that would be a rendering-complexity
+  risk)
+- Calls `Wait-WinPulseKey` at the end
+
+**`Show-WinPulseDiagnosticsFindings -scan $scan`**
+Show ALL findings from `Get-WinPulseTriageFindings -scan $scan`, grouped:
+Critical first (red `[CRIT]`), then Warning (yellow `[WARN]`). Format:
+```
+  [CRIT] System drive C: usage is above 90%.
+  [WARN] Problematic device drivers: 2
+  ...
+  No issues detected.   ← if empty, green
+```
+
+**`Show-WinPulseDiagnosticsDrivers -scan $scan`**
+Existing Problematic drivers + Unsigned drivers list from `$scan.Drivers`.
+
+**`Show-WinPulseDiagnosticsServices -scan $scan`**
+Existing FailedAutoServices list from `$scan.Startup`.
+
+**`Show-WinPulseDiagnosticsSystem -scan $scan`**
+Existing System Details block: Hostname, OS, Build, Uptime, CPU (cleaned model
+name), RAM type/total, TPM version, BIOS version/date from
+`$scan.HardwareDetail.Motherboard`.
+
+**`Show-WinPulseDiagnosticsHardware -scan $scan`**
+RAM usage, all disks (drive, size, free, used%), SMART status, temperatures if
+available, battery health + charge + cycles if present.
+
+**`Show-WinPulseDiagnosticsSecurity -scan $scan`**
+AV products list, Firewall state, BitLocker volumes, Secure Boot state from
+`$scan.Security` / `$scan.W11Readiness`.
+
+**`Show-WinPulseDiagnosticsNetwork -scan $scan`**
+IPv4, gateway, DNS servers, internet reachability, WiFi SSID/signal/channel/
+band if available, all from `$scan.Network` and `$scan.NetworkDetail`.
+
+#### Wire-up
+
+Find all call sites of `Show-WinPulseFindingsDetail` and replace with
+`Show-WinPulseDiagnosticsMenu -scan $scan` (there should be 1-2 call sites in
+`Show-WinPulseTriageMenu`). Keep `Show-WinPulseFindingsDetail` in the file
+as a fallback/reference but stop calling it.
+
+#### Constraints
+
+- Do NOT change the dashboard, the Quick Triage menu structure, or any other
+  existing function.
+- ASCII-only, StrictMode-safe, PS 5.1 compatible.
+- All detail functions must null-guard every scan field (some may be null if
+  collection failed).
+- Do not add new WMI calls or scan logic — only use data already in `$scan`.
+
+#### Acceptance
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0.
+- Visual check (Claude/owner): menu shows 7 sections with badges; each section
+  opens a detail view; Esc/Back returns to menu; Esc from menu returns to
+  Quick Triage; no crashes on sections with null data.
+
 ### Task C24 - Findings count in separator + current battery charge in Battery row
 
 Two small additive dashboard improvements. Both are visually safe — no layout
