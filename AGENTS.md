@@ -1041,6 +1041,82 @@ if ($pcfgOk -and (Test-Path -LiteralPath $tmpHtml)) { ... }
 Visual laptop check remains for Claude/owner: confirm battery row shows
 `Health XX% | YY.Y / ZZ.Z Wh` instead of "wear data unavailable".
 
+### Task C24 - Findings count in separator + current battery charge in Battery row
+
+Two small additive dashboard improvements. Both are visually safe — no layout
+risk. Do them in one commit.
+
+#### Part A — Findings count in the separator line
+
+Currently the separator between status rows and findings is:
+```
+╠══════════════════════════════════════════════╣
+```
+Change it to show the findings count:
+```
+╠══ Findings (5) ══════════════════════════════╣
+```
+When there are no findings: `╠══ No findings ══════════════════════════════╣`
+
+In `Show-WinPulseDashboard` (around line 2366 — the findings separator
+`Write-Host`), replace the plain `$hLine` with a labeled separator that embeds
+the count. The findings array `$findings` is populated just after this line,
+so compute the label AFTER `$findings = @(Get-WinPulseTriageFindings -scan $scan)`.
+Move the separator `Write-Host` to just after that line.
+
+```powershell
+$findings = @(Get-WinPulseTriageFindings -scan $scan)
+$fLabel   = if ($findings.Count -gt 0) { ' Findings ({0}) ' -f $findings.Count } else { ' No findings ' }
+$fLine    = '{0}{1}{2}' -f ([string][char]0x2550 * 2), $fLabel, ([string][char]0x2550 * [math]::Max(1, $w - 4 - $fLabel.Length))
+Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $fLine, ([char]0x2563)) -ForegroundColor Yellow
+```
+
+Color: Yellow when `$findings.Count -gt 0`, Gray when 0.
+Do NOT change anything else about the findings rendering.
+
+#### Part B — Current charge % in Battery row
+
+`Win32_Battery.EstimatedChargeRemaining` is the current charge level (0-100 %).
+This is DIFFERENT from health — health is wear, charge is how full right now.
+
+In `Get-WinPulseHardwareDetail` (`bootstrap.ps1`, in the battery collection
+block around line 555), add `ChargePercent` to `$batteryInfo`:
+
+```powershell
+$batteryInfo['ChargePercent'] = $null
+if ($battery) {
+    ...existing code...
+    $chg = $battery | Select-Object -ExpandProperty EstimatedChargeRemaining -ErrorAction SilentlyContinue
+    if ($null -ne $chg) { $batteryInfo.ChargePercent = [int]$chg }
+}
+```
+
+Also add `ChargePercent = $null` to the default stub at the top of
+`$batteryInfo`.
+
+In `Show-WinPulseDashboard`, in the Battery row block, append a charge segment
+ONLY when non-null, AFTER the existing segments:
+
+```powershell
+if ($null -ne $bat.ChargePercent) {
+    $chgColor = if ($bat.ChargePercent -le 20) { 'Red' } `
+                elseif ($bat.ChargePercent -le 40) { 'Yellow' } `
+                else { 'Gray' }
+    $batSegs.Add(@{ Text = ' | {0}% charged' -f $bat.ChargePercent; Color = $chgColor })
+}
+```
+
+Length: `| X% charged` = max 14 chars. Battery row base is ~35 chars max.
+Combined stays well under 66. Safe.
+
+**Acceptance:**
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0.
+- On a desktop (no battery), Battery row does not appear — unchanged.
+- Findings separator shows `╠══ Findings (N) ══...╣` with count.
+- Visual check (Claude/owner): separator label visible; battery charge visible
+  on a laptop; no layout breakage.
+
 ### Task C23 - Add CPU load to Hardware row; add WiFi SSID+signal to Network row
 
 **CRITICAL layout constraint:** Both additions must NEVER push the right box
