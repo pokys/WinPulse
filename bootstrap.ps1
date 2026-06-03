@@ -168,6 +168,14 @@ function Resolve-WinPulsePath {
     return (Join-Path -Path $script:WinPulsePaths.Root -ChildPath $childpath)
 }
 
+function Get-WinPulseDiskBar {
+    param([double]$Percent, [int]$Width = 10)
+    $filled = [math]::Min($Width, [math]::Round($Width * $Percent / 100))
+    $empty  = $Width - $filled
+    $bar    = ([string][char]0x2588 * $filled) + ([string][char]0x2591 * $empty)
+    return '[{0}]' -f $bar
+}
+
 function Get-WinPulseStateFromPercent {
     [CmdletBinding()]
     param(
@@ -1478,40 +1486,40 @@ function Invoke-CoreScan {
     }
 
     # -- Extended diagnostic sections -----------------------------------------
-    Write-Host '  Scanning hardware details...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning hardware details...' -ForegroundColor Gray -NoNewline
     try { $result.HardwareDetail = Get-WinPulseHardwareDetail }
     catch { $result.Errors += "HW DETAIL: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning temperatures...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning temperatures...' -ForegroundColor Gray -NoNewline
     try { $result.Temperatures = Get-WinPulseTemperatures }
     catch { $result.Errors += "TEMPERATURES: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning TPM...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning TPM...' -ForegroundColor Gray -NoNewline
     try { $result.TPM = Get-WinPulseTPMStatus }
     catch { $result.Errors += "TPM: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning drivers (this may take a moment)...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning drivers (this may take a moment)...' -ForegroundColor Gray -NoNewline
     try { $result.Drivers = Get-WinPulseDriverAnalysis }
     catch { $result.Errors += "DRIVERS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning startup items...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning startup items...' -ForegroundColor Gray -NoNewline
     try { $result.Startup = Get-WinPulseStartupAnalysis }
     catch { $result.Errors += "STARTUP: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning printers...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning printers...' -ForegroundColor Gray -NoNewline
     try { $result.Printers = Get-WinPulsePrinterStatus }
     catch { $result.Errors += "PRINTERS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
-    Write-Host '  Scanning license...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Scanning license...' -ForegroundColor Gray -NoNewline
     try { $result.License = Get-WinPulseLicenseInfo }
     catch { $result.Errors += "LICENSE: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
     # Detail-only collectors (installed software, scheduled tasks, user
     # accounts, network detail, virtualization) are NOT needed for the dashboard
@@ -1535,7 +1543,7 @@ function Complete-WinPulseDetailScan {
 
     if ($scan.DetailScanned) { return $scan }
 
-    Write-Host '  Loading full details (software, tasks, accounts)...' -ForegroundColor DarkGray -NoNewline
+    Write-Host '  Loading full details (software, tasks, accounts)...' -ForegroundColor Gray -NoNewline
     try { $scan.UserAccounts = Get-WinPulseUserAccounts }
     catch { $scan.Errors += "USERS: $($_.Exception.Message)" }
     try { $scan.NetworkDetail = Get-WinPulseNetworkDetail }
@@ -1547,7 +1555,7 @@ function Complete-WinPulseDetailScan {
     try { $scan.Virtualization = Get-WinPulseVirtualizationInfo }
     catch { $scan.Errors += "VIRTUALIZATION: $($_.Exception.Message)" }
     $scan.DetailScanned = $true
-    Write-Host ' done' -ForegroundColor DarkGray
+    Write-Host ' done' -ForegroundColor Gray
 
     return $scan
 }
@@ -1715,7 +1723,7 @@ function Select-WinPulseMenuItem {
             $drawnLines++
             # Help bar
             $helpText = '  {0}/{1} Navigate  Enter Select  Esc Back' -f ([char]0x2191), ([char]0x2193)
-            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
 
             $lastLineCount = $drawnLines
@@ -1873,7 +1881,7 @@ function Select-WinPulseMultiMenuItem {
             Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
             $drawnLines++
             $helpText = '  {0}/{1} Navigate  Space Toggle  Enter Confirm  Esc Cancel    {2} selected' -f ([char]0x2191), ([char]0x2193), $checked.Count
-            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
 
             $lastLineCount = $drawnLines
@@ -2082,7 +2090,7 @@ function Select-WinPulseFolderPath {
             Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
             $drawnLines++
             $helpText = '  {0}/{1} Navigate  Enter Select/Open  T Type path  Esc Cancel' -f ([char]0x2191), ([char]0x2193)
-            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
 
             $lastLineCount = $drawnLines
@@ -2174,6 +2182,7 @@ function Show-WinPulseDashboard {
         [pscustomobject]$scan
     )
 
+    try { $Host.UI.RawUI.BackgroundColor = 'DarkGray' } catch {}
     Clear-Host
     # After returning from a submenu the console buffer may be scrolled, so
     # Clear-Host can leave the viewport (and cursor) deep in the buffer. Force
@@ -2208,11 +2217,13 @@ function Show-WinPulseDashboard {
     Write-Host ('  {0}{1}{2}' -f ([char]0x251C), $hLine, ([char]0x2524)) -ForegroundColor DarkCyan
 
     # Hardware
-    $ramState = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
-    $cDisk = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
-    $cDiskText = if ($cDisk) { 'C:{0}% {1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C:N/A' }
+    $ramState  = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
+    $cDisk     = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
+    $cDiskState = if ($cDisk) { Get-WinPulseStateFromPercent -percent $cDisk.UsedPercent } else { 'OK' }
+    $hwState   = if ($cDiskState -eq 'Critical' -or $ramState -eq 'Critical') { 'Critical' } elseif ($cDiskState -eq 'Warning' -or $ramState -eq 'Warning') { 'Warning' } else { 'OK' }
+    $cDiskBar  = if ($cDisk) { 'C: {0} {1}% {2}' -f (Get-WinPulseDiskBar -Percent $cDisk.UsedPercent), $cDisk.UsedPercent, $cDisk.Free } else { 'C: N/A' }
     $smartLabel = if ($scan.Hardware.SmartHealthy) { 'SMART OK' } else { 'SMART FAIL' }
-    Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskText, $smartLabel) -State $ramState
+    Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskBar, $smartLabel) -State $hwState
 
     # Security
     $avNames = @()
@@ -2263,8 +2274,8 @@ function Show-WinPulseDashboard {
         Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
     }
     else {
-        $top = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } } | Select-Object -First 3)
-        foreach ($f in $top) {
+        $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })
+        foreach ($f in $ordered) {
             $fColor = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
             $fBadge = if ($f.Severity -eq 'Critical') { '!!' } else { '! ' }
             $fText = ' {0} {1}' -f $fBadge, $f.Message
@@ -2273,17 +2284,11 @@ function Show-WinPulseDashboard {
             Write-Host -NoNewline ($fText.PadRight($w - 4)) -ForegroundColor $fColor
             Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
         }
-        if ($findings.Count -gt 3) {
-            $moreText = ' ... +{0} more findings' -f ($findings.Count - 3)
-            Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkCyan
-            Write-Host -NoNewline ($moreText.PadRight($w - 4)) -ForegroundColor DarkYellow
-            Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
-        }
     }
 
     # Bottom border
     Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
-    Write-Host ('  Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor DarkGray
+    Write-Host ('  Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor Gray
 }
 
 function Get-WinPulseTriageFindings {
@@ -4097,7 +4102,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     Write-WinPulseHeader -title 'Migration Preflight'
     Write-Host '  Read-only collection. No files, credentials, keys, or browser secrets will be exported.' -ForegroundColor Cyan
-    Write-Host ('  Output: {0}' -f $exportFolder) -ForegroundColor DarkGray
+    Write-Host ('  Output: {0}' -f $exportFolder) -ForegroundColor Gray
     Write-Host ''
     Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message 'Migration preflight started.'
 
@@ -4106,7 +4111,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $computer = $null
     try {
-        Write-Host '  Collecting system identity...' -ForegroundColor DarkGray
+        Write-Host '  Collecting system identity...' -ForegroundColor Gray
         $computer = Get-WinPulseSystemIdentity
         $checks += New-WinPulseCheckResult -id 'Migration.SystemIdentity' -category 'Migration' -name 'System identity' -status 'Pass' -severity 'Low' -summary ('Collected identity for {0}.' -f $computer.ComputerName) -recommendation 'Use this to identify the exported report folder.'
     }
@@ -4118,7 +4123,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $readiness = $null
     try {
-        Write-Host '  Collecting Windows 11 readiness signals...' -ForegroundColor DarkGray
+        Write-Host '  Collecting Windows 11 readiness signals...' -ForegroundColor Gray
         $readiness = Get-WinPulseWindows11Readiness
         $status = if ($readiness.Recommendation -eq 'Ready') { 'Pass' } elseif ($readiness.Recommendation -eq 'Not ready') { 'Fail' } else { 'Warning' }
         $severity = if ($status -eq 'Fail') { 'High' } elseif ($status -eq 'Warning') { 'Medium' } else { 'Low' }
@@ -4132,7 +4137,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $profiles = @()
     try {
-        Write-Host '  Scanning user profiles and known folders...' -ForegroundColor DarkGray
+        Write-Host '  Scanning user profiles and known folders...' -ForegroundColor Gray
         $profiles = @(Get-WinPulseMigrationProfiles)
         $checks += New-WinPulseCheckResult -id 'Migration.ProfileScan' -category 'Migration' -name 'User profile scan' -status 'Pass' -severity 'Low' -summary ('Found {0} user profiles.' -f $profiles.Count) -evidence ([ordered]@{ Count = $profiles.Count }) -recommendation 'Review large profiles before backup.'
     }
@@ -4143,7 +4148,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $oneDrive = @()
     try {
-        Write-Host '  Detecting OneDrive/KFM signals...' -ForegroundColor DarkGray
+        Write-Host '  Detecting OneDrive/KFM signals...' -ForegroundColor Gray
         $oneDrive = @(Get-WinPulseOneDriveSignals -profiles $profiles)
         $likelyCount = @($oneDrive | Where-Object { $_.PotentialKFMStatus -eq 'Likely enabled' }).Count
         $checks += New-WinPulseCheckResult -id 'Migration.OneDriveKFM' -category 'Migration' -name 'OneDrive/KFM detection' -status 'Info' -severity 'Low' -summary ('OneDrive/KFM likely enabled for {0} profiles.' -f $likelyCount) -recommendation 'Verify cloud sync health before wiping or reinstalling.'
@@ -4155,7 +4160,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $email = $null
     try {
-        Write-Host '  Detecting PST/OST and Thunderbird data...' -ForegroundColor DarkGray
+        Write-Host '  Detecting PST/OST and Thunderbird data...' -ForegroundColor Gray
         $email = Get-WinPulseEmailDataSignals -profiles $profiles
         $emailStatus = if ($email.PstCount -gt 0) { 'Warning' } else { 'Info' }
         $checks += New-WinPulseCheckResult -id 'Migration.EmailData' -category 'Migration' -name 'Email data detection' -status $emailStatus -severity 'Medium' -summary ('Found {0} PST files, {1} OST files, and {2} Thunderbird profiles.' -f $email.PstCount, $email.OstCount, $email.ThunderbirdCount) -recommendation 'Treat PST files as migration targets. OST files are usually cache data.'
@@ -4168,7 +4173,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $browsers = @()
     try {
-        Write-Host '  Detecting browser profile roots...' -ForegroundColor DarkGray
+        Write-Host '  Detecting browser profile roots...' -ForegroundColor Gray
         $browsers = @(Get-WinPulseBrowserSignals -profiles $profiles)
         $browserCount = @($browsers | Where-Object { $_.Exists }).Count
         $checks += New-WinPulseCheckResult -id 'Migration.Browsers' -category 'Migration' -name 'Browser profile detection' -status 'Info' -severity 'Low' -summary ('Found {0} browser profile roots.' -f $browserCount) -recommendation 'Do not export browser passwords or DPAPI secrets.'
@@ -4180,7 +4185,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $network = $null
     try {
-        Write-Host '  Detecting Wi-Fi names and VPN phonebooks...' -ForegroundColor DarkGray
+        Write-Host '  Detecting Wi-Fi names and VPN phonebooks...' -ForegroundColor Gray
         $network = Get-WinPulseNetworkMigrationSignals -profiles $profiles
         $checks += New-WinPulseCheckResult -id 'Migration.NetworkProfiles' -category 'Migration' -name 'Network profile detection' -status 'Info' -severity 'Low' -summary ('Found {0} Wi-Fi profiles and {1} VPN phonebooks.' -f $network.WiFiProfileCount, $network.VpnPhonebookCount) -recommendation 'Wi-Fi keys and VPN credentials are intentionally not exported.'
     }
@@ -4192,7 +4197,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $applications = $null
     try {
-        Write-Host '  Reading installed application inventory...' -ForegroundColor DarkGray
+        Write-Host '  Reading installed application inventory...' -ForegroundColor Gray
         $applications = Get-WinPulseMigrationApplicationInventory
         $checks += New-WinPulseCheckResult -id 'Migration.ApplicationInventory' -category 'Migration' -name 'Application inventory' -status 'Info' -severity 'Low' -summary ('Found {0} installed application entries. winget available: {1}.' -f $applications.Count, $applications.WingetAvailable) -recommendation 'Use inventory to plan reinstall list.'
     }
@@ -4204,7 +4209,7 @@ function Invoke-WinPulseMigrationPreflight {
 
     $developerHints = @()
     try {
-        Write-Host '  Detecting developer/config hints...' -ForegroundColor DarkGray
+        Write-Host '  Detecting developer/config hints...' -ForegroundColor Gray
         $developerHints = @(Get-WinPulseDeveloperHints -profiles $profiles)
         $hintCount = @($developerHints | Where-Object { $_.Exists }).Count
         $checks += New-WinPulseCheckResult -id 'Migration.DeveloperHints' -category 'Migration' -name 'Developer/config hints' -status 'Info' -severity 'Low' -summary ('Found {0} developer/config paths.' -f $hintCount) -recommendation 'Review sensitive developer data. Private keys are not exported by preflight.'
@@ -4241,7 +4246,7 @@ function Invoke-WinPulseMigrationPreflight {
         Errors             = @($errors)
     }
 
-    Write-Host '  Writing JSON, HTML, text, and log outputs...' -ForegroundColor DarkGray
+    Write-Host '  Writing JSON, HTML, text, and log outputs...' -ForegroundColor Gray
     Export-WinPulseMigrationPreflightJson -report $report -path $jsonPath
     Export-WinPulseMigrationPreflightHtml -report $report -path $htmlPath
     Export-WinPulseMigrationPreflightText -report $report -path $textPath
@@ -4693,7 +4698,7 @@ function Invoke-WinPulseRobocopy {
                 $line = ([string]$_).Trim()
                 if ($line.Length -eq 0) { return }
                 if ($line.Length -gt 76) { $line = '...' + $line.Substring($line.Length - 73) }
-                Write-Host (("`r    {0}" -f $line).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor DarkGray
+                Write-Host (("`r    {0}" -f $line).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor Gray
             }
             $code = $LASTEXITCODE
             # Clear the status line so the next folder's message starts clean.
@@ -5371,7 +5376,7 @@ function Invoke-WinPulseMigrationBackup {
     Write-Host '  Certificates are kept; passwords and private keys are skipped unless you opt in.' -ForegroundColor Cyan
     Write-Host ''
 
-    Write-Host '  Scanning user profiles...' -ForegroundColor DarkGray
+    Write-Host '  Scanning user profiles...' -ForegroundColor Gray
     $profileRoot = if ([string]::IsNullOrWhiteSpace($BackupProfilesRoot)) { 'C:\Users' } else { $BackupProfilesRoot }
     $profiles = @(Get-WinPulseMigrationProfiles -root $profileRoot)
     if ($profiles.Count -eq 0) {
@@ -5434,7 +5439,7 @@ function Invoke-WinPulseMigrationBackup {
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Backup'
-    Write-Host ('  Default destination: {0}' -f $defaultRoot) -ForegroundColor DarkGray
+    Write-Host ('  Default destination: {0}' -f $defaultRoot) -ForegroundColor Gray
     if ($nonInteractive) {
         $destinationRoot = $BackupDestination.Trim()
     }
@@ -5444,13 +5449,13 @@ function Invoke-WinPulseMigrationBackup {
     }
 
     Write-Host ''
-    Write-Host '  Building dry-run copy plan...' -ForegroundColor DarkGray
+    Write-Host '  Building dry-run copy plan...' -ForegroundColor Gray
     $exclusions = Get-WinPulseBackupExclusions -includePrivateKeys:$includeKeys
     $plan = New-WinPulseBackupPlan -profiles $profiles -userKeys $userKeys -folderKeys $folderKeys -destinationRoot $destinationRoot -appKeys $appKeys -profileRoot $profileRoot
 
     Write-Host ''
     Write-Host ('  Plan: {0} items, {1} exist, total {2}' -f $plan.ItemCount, $plan.ExistingCount, $plan.TotalSize) -ForegroundColor Cyan
-    Write-Host ('  Destination: {0}' -f $destinationRoot) -ForegroundColor DarkGray
+    Write-Host ('  Destination: {0}' -f $destinationRoot) -ForegroundColor Gray
     Write-Host ''
     foreach ($item in $plan.Items) {
         $mark = if ($item.Exists) { '[+]' } else { '[ ]' }
@@ -5533,7 +5538,7 @@ function Invoke-WinPulseMigrationBackup {
 
         $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
         $verb = if ($dryRun) { 'Planning' } else { 'Copying' }
-        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
+        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor Gray
         $itemExcludeFiles = @($exclusions.Files) + @($item.ExtraExcludeFiles)
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
@@ -5561,7 +5566,7 @@ function Invoke-WinPulseMigrationBackup {
     $appCapture = $null
     if (-not $dryRun -and $captureAppList) {
         Write-Host ''
-        Write-Host '  Capturing installed app list...' -ForegroundColor DarkGray
+        Write-Host '  Capturing installed app list...' -ForegroundColor Gray
         $appCapture = Invoke-WinPulseBackupAppCapture -destinationRoot $destinationRoot
         Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('App capture: {0}' -f $appCapture.Note)
     }
@@ -5661,7 +5666,7 @@ function Invoke-WinPulseMigrationBackup {
         if (-not $captureAppList) { $cmd += '-SkipBackupAppList' }
         if (-not $dryRun) { $cmd += '-BackupExecute' }
         Write-Host ''
-        Write-Host '  To repeat this without prompts:' -ForegroundColor DarkGray
+        Write-Host '  To repeat this without prompts:' -ForegroundColor Gray
         Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
     }
 
@@ -5988,7 +5993,7 @@ function Invoke-WinPulseMigrationAppReinstall {
             }
         }
         else {
-            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor Gray
         }
 
         if (-not $selectedBackupRoot) {
@@ -6038,7 +6043,7 @@ function Invoke-WinPulseMigrationAppReinstall {
         $wingetCmdCheck = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($wingetCmdCheck) {
             try {
-                Write-Host '  Checking installed packages...' -ForegroundColor DarkGray
+                Write-Host '  Checking installed packages...' -ForegroundColor Gray
                 $listRaw = (& ([string]$wingetCmdCheck.Source) list --accept-source-agreements 2>&1 | Out-String)
                 foreach ($id in @($packageIds)) {
                     if ($listRaw -match [regex]::Escape($id)) {
@@ -6118,7 +6123,7 @@ function Invoke-WinPulseMigrationAppReinstall {
             continue
         }
 
-        Write-Host ('  Installing {0}... ({1}/{2})' -f $id, $installIdx, $selectedIds.Count) -ForegroundColor DarkGray
+        Write-Host ('  Installing {0}... ({1}/{2})' -f $id, $installIdx, $selectedIds.Count) -ForegroundColor Gray
         $wingetPath = [string]$wingetCommand.Source
         $output = & $wingetPath install --id $id -e --accept-package-agreements --accept-source-agreements 2>&1
         $exitCode = $LASTEXITCODE
@@ -6252,7 +6257,7 @@ function Invoke-WinPulseMigrationVerify {
             }
         }
         else {
-            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor Gray
         }
 
         if (-not $selectedBackupRoot) {
@@ -6272,7 +6277,7 @@ function Invoke-WinPulseMigrationVerify {
         return $null
     }
 
-    Write-Host ('  Backup: {0}' -f $selectedBackupRoot) -ForegroundColor DarkGray
+    Write-Host ('  Backup: {0}' -f $selectedBackupRoot) -ForegroundColor Gray
     Write-Host ''
 
     $results = @()
@@ -6295,7 +6300,7 @@ function Invoke-WinPulseMigrationVerify {
 
         $backupPath = Get-WinPulseManifestItemBackupPath -item $entry -backupRoot $selectedBackupRoot
         if (-not $verification -or $recordedFiles -le 0 -or [string]::IsNullOrWhiteSpace($backupPath)) {
-            Write-Host ('    [ ] {0}\{1}  skipped (no executed backup data)' -f $userName, $folder) -ForegroundColor DarkGray
+            Write-Host ('    [ ] {0}\{1}  skipped (no executed backup data)' -f $userName, $folder) -ForegroundColor Gray
             $results += [pscustomobject][ordered]@{
                 UserName      = $userName
                 Folder        = $folder
@@ -6598,7 +6603,7 @@ function Invoke-WinPulseMigrationRestore {
             }
         }
         else {
-            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor DarkGray
+            Write-Host '  No local backups with a manifest.json were found.' -ForegroundColor Gray
         }
 
         if (-not $selectedBackupRoot) {
@@ -6623,11 +6628,11 @@ function Invoke-WinPulseMigrationRestore {
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Restore'
-    Write-Host ('  Backup:  {0}' -f $selectedBackupRoot) -ForegroundColor DarkGray
-    Write-Host ('  Users:   {0}' -f ($restoreUsers -join ', ')) -ForegroundColor DarkGray
-    Write-Host ('  Folders: {0}' -f ($restoreFolders -join ', ')) -ForegroundColor DarkGray
+    Write-Host ('  Backup:  {0}' -f $selectedBackupRoot) -ForegroundColor Gray
+    Write-Host ('  Users:   {0}' -f ($restoreUsers -join ', ')) -ForegroundColor Gray
+    Write-Host ('  Folders: {0}' -f ($restoreFolders -join ', ')) -ForegroundColor Gray
     Write-Host ''
-    Write-Host '  Default restore root: C:\Users (restores into C:\Users\<User>\<Folder>)' -ForegroundColor DarkGray
+    Write-Host '  Default restore root: C:\Users (restores into C:\Users\<User>\<Folder>)' -ForegroundColor Gray
     if ($nonInteractive) {
         $restoreRoot = $RestoreRoot.Trim()
     }
@@ -6646,7 +6651,7 @@ function Invoke-WinPulseMigrationRestore {
     }
 
     Write-Host ''
-    Write-Host '  Building dry-run restore plan...' -ForegroundColor DarkGray
+    Write-Host '  Building dry-run restore plan...' -ForegroundColor Gray
     $restoreExclusions = Get-WinPulseRestoreExclusions
     $plan = New-WinPulseRestorePlan -manifest $manifest -backupRoot $selectedBackupRoot -restoreRoot $restoreRoot -targetUserName $restoreAsUser
 
@@ -6680,14 +6685,14 @@ function Invoke-WinPulseMigrationRestore {
 
     Write-Host ''
     Write-Host ('  Plan: {0} items, {1} have data, {2} would overwrite, total {3}' -f $plan.ItemCount, $plan.ExistingCount, $plan.OverwriteCount, $plan.TotalSize) -ForegroundColor Cyan
-    Write-Host ('  Restore root: {0}' -f $restoreRoot) -ForegroundColor DarkGray
+    Write-Host ('  Restore root: {0}' -f $restoreRoot) -ForegroundColor Gray
     if (-not [string]::IsNullOrWhiteSpace($restoreAsUser)) {
-        Write-Host ('  Restore as user: {0}' -f $restoreAsUser) -ForegroundColor DarkGray
+        Write-Host ('  Restore as user: {0}' -f $restoreAsUser) -ForegroundColor Gray
     }
     Write-Host ''
     foreach ($item in $plan.Items) {
         if (-not $item.Exists) {
-            Write-Host ('    [ ] {0}\{1}  (no data in backup)' -f $item.UserName, $item.Folder) -ForegroundColor DarkGray
+            Write-Host ('    [ ] {0}\{1}  (no data in backup)' -f $item.UserName, $item.Folder) -ForegroundColor Gray
             continue
         }
         $mark = if ($item.TargetExists) { '[!]' } else { '[+]' }
@@ -6774,7 +6779,7 @@ function Invoke-WinPulseMigrationRestore {
 
         $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
         $verb = if ($dryRun) { 'Planning' } else { 'Restoring' }
-        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor DarkGray
+        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor Gray
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Target -logPath $itemLog -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -copyDirMetadata:$false -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
@@ -6889,7 +6894,7 @@ function Invoke-WinPulseMigrationRestore {
         if ($hashSampleSize -gt 0) { $cmd += '-RestoreHashSample' }
         if (-not $dryRun) { $cmd += '-RestoreExecute' }
         Write-Host ''
-        Write-Host '  To repeat this without prompts:' -ForegroundColor DarkGray
+        Write-Host '  To repeat this without prompts:' -ForegroundColor Gray
         Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
     }
 
@@ -6948,7 +6953,7 @@ function Show-WinPulseWindows11Readiness {
     }
 
     Write-Host ''
-    Write-Host $readiness.Note -ForegroundColor DarkGray
+    Write-Host $readiness.Note -ForegroundColor Gray
 }
 
 function Export-WinPulseLatestBundle {
@@ -7978,7 +7983,7 @@ function Invoke-WinPulseRepairPlan {
             Write-Host '  Scheduling reboot in 30 seconds. Save your work now.' -ForegroundColor Yellow
             & shutdown.exe /r /t 30 /c "WinPulse: Executing pending reboot"
             Write-Host '  Reboot scheduled. The system will restart in 30 seconds.' -ForegroundColor Cyan
-            Write-Host '  Run ''shutdown /a'' to abort.' -ForegroundColor DarkGray
+            Write-Host '  Run ''shutdown /a'' to abort.' -ForegroundColor Gray
         }
         'wu_services' {
             Restart-WindowsUpdateServices
@@ -8067,7 +8072,7 @@ function Repair-SystemFiles {
 
 function Wait-WinPulseKey {
     param([string]$Message = '  Press any key to continue')
-    Write-Host $Message -ForegroundColor DarkGray -NoNewline
+    Write-Host $Message -ForegroundColor Gray -NoNewline
     try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { $null = Read-Host }
     Write-Host ''
 }
@@ -8328,7 +8333,7 @@ function Ensure-WinGet {
         Write-Host '  winget not found. Install App Installer from the Microsoft Store.' -ForegroundColor Yellow
     } else {
         Write-Host '  winget found but not functional (EULA not accepted?).' -ForegroundColor Yellow
-        Write-Host '  Run: winget list --accept-source-agreements' -ForegroundColor DarkGray
+        Write-Host '  Run: winget list --accept-source-agreements' -ForegroundColor Gray
     }
     return $false
 }
@@ -8391,7 +8396,7 @@ function Show-WinPulseChocoMenu {
 
         Clear-Host
         Write-WinPulseHeader -title ('Chocolatey - hledam: {0}' -f $term)
-        Write-Host '  Vyhledavam...' -ForegroundColor DarkGray
+        Write-Host '  Vyhledavam...' -ForegroundColor Gray
 
         $searchOutput = @()
         try {
@@ -8600,7 +8605,7 @@ function Invoke-WinPulseCustomUninstall {
     param([switch]$dryrun)
 
     $catalog = @(Get-WinPulsePackageCatalog)
-    Write-Host '  Checking installed packages...' -ForegroundColor DarkGray
+    Write-Host '  Checking installed packages...' -ForegroundColor Gray
     $installed = @($catalog | Where-Object { Test-WinPulsePackageInstalled -id $_.Id })
 
     if ($installed.Count -eq 0) {
@@ -10427,9 +10432,9 @@ function Invoke-WinPulseMode {
     switch ($mode) {
         'Triage' {
             Clear-Host
-            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
+            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor Gray
             Write-Host ''
-            Write-Host '  Loading system information...' -ForegroundColor DarkGray
+            Write-Host '  Loading system information...' -ForegroundColor Gray
 
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
@@ -10437,9 +10442,9 @@ function Invoke-WinPulseMode {
         }
         'Repair' {
             Clear-Host
-            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor DarkGray
+            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor Gray
             Write-Host ''
-            Write-Host '  Loading system information...' -ForegroundColor DarkGray
+            Write-Host '  Loading system information...' -ForegroundColor Gray
 
             Write-Log -level 'INFO' -message ('WinPulse {0} starting repair-mode scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
