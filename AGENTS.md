@@ -16,10 +16,19 @@ fixing it unilaterally.
 
 ## Resume Here (next session)
 
-Current state: `main` and `dev/migration-preflight-foundation` are in sync at a
-working `0.11.1-20260602`. Clean tree, nothing pending uncommitted. Verified:
-parser + ASCII clean, both fixture smoke tests pass non-elevated, and the
-dashboard/scan path was confirmed on a real elevated machine.
+Current state: `main` and `dev/migration-preflight-foundation` are in sync at
+`0.11.1-20260602` (version bump pending for the 2026-06-03 batch). Clean tree,
+nothing pending uncommitted. Verified: parser + ASCII clean, all fixture smoke
+tests pass non-elevated.
+
+Done 2026-06-03 (not yet version-bumped):
+- C18: `-SkipBackupAppList` opt-out for backup app-list capture (Codex + review).
+- MigrationApps UX batch (Claude): sort not-installed first with labeled separator,
+  pre-tick not-installed items via new `Selected` property on multi-select items,
+  summary line after selection (Selected | Not installed | Already installed),
+  progress counter X/N during install, removed double-confirm (`YES` prompt gone),
+  "already installed" winget output treated as success (DarkGreen, not FAILED).
+- `Select-WinPulseMultiMenuItem` now pre-ticks items with `Selected = $true`.
 
 Working today: triage scan + dashboard, Quick Triage / Full menu, W11 readiness,
 migration preflight, migration backup + restore (interactive AND non-interactive
@@ -701,6 +710,49 @@ Acceptance (non-elevated, temp fixtures):
   smoke modes still exit 0.
 
 Out of scope: changing what the capture collects, the report files, TUI rendering.
+
+### Task C19 - MigrationApps: per-package result Status field and AlreadyInstalled count in record/report
+
+Why: the install loop (as of 2026-06-03) correctly treats "already installed"
+winget output as success (`$wasAlreadyInstalled`), but the JSON record and
+HTML/text report do not distinguish "newly installed", "already installed", and
+"failed" - all collapse into Success true/false. Owner wants AlreadyInstalled
+visible separately so a re-run on the same machine produces a clear summary.
+
+Scope:
+
+- Add a `Status` string to each per-package result object (alongside the
+  existing `Success`, `ExitCode`, `DryRun`, `Note` fields):
+    - `'DryRun'`            when $dryRun
+    - `'Installed'`         when exitCode 0 (fresh install)
+    - `'AlreadyInstalled'`  when $wasAlreadyInstalled (non-zero exit but
+                            "already installed" / "no applicable upgrade" text)
+    - `'Failed'`            otherwise
+  Do NOT change $success or $wasAlreadyInstalled logic.
+- Add `AlreadyInstalledCount` to the record object (alongside InstalledCount,
+  FailedCount, DryRunCount) and to the summary line in the text report:
+  "Summary: Selected X | Installed Y | AlreadyInstalled Z | Failed W | DryRun V".
+- HTML report: add a Status column (or replace the existing Result column if
+  one exists). Style: green for Installed, muted green for AlreadyInstalled,
+  red for Failed, grey for DryRun. Reuse the existing CSS classes from the
+  backup/restore HTML reports.
+- Text report: show the Status string per package.
+- Do NOT change: the $success/$wasAlreadyInstalled logic, the nonInteractive
+  path, -AppsSelect, the interactive selection block, the console output (the
+  OK / Already installed / FAILED lines), or any other mode's code.
+
+Acceptance (non-elevated, dry-run only):
+
+- After a MigrationApps dry-run, `migration-apps.json` has an
+  `AlreadyInstalledCount` field (0 for dry-run; all items Status='DryRun').
+- HTML and text reports contain "AlreadyInstalled" in per-item output and
+  summary.
+- Extend the MigrationApps smoke to assert `AlreadyInstalledCount` exists in
+  the JSON record (0 for dry-run is correct).
+- Parser + ASCII clean; all existing smoke modes still exit 0.
+
+Out of scope: real winget install in tests, changing interactive menus or
+console output, touching other modes.
 
 ## Project Direction
 
