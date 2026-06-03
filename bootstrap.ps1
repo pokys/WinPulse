@@ -1752,13 +1752,16 @@ function Select-WinPulseMenuItem {
                     continue
                 }
 
-                $isSelected = ($selectableIdx[$sel] -eq $i)
-                $pointer = if ($isSelected) { '>' } else { ' ' }
-                $keyTag = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
-                $hint = if ($item['Hint']) { $item['Hint'] } else { '' }
-                $color = if ($item['Color']) { $item['Color'] } else { 'White' }
+                $isSelected  = ($selectableIdx[$sel] -eq $i)
+                $pointer     = if ($isSelected) { '>' } else { ' ' }
+                $keyTag      = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
+                $hint        = if ($item['Hint']) { $item['Hint'] } else { '' }
+                $color       = if ($item['Color']) { $item['Color'] } else { 'White' }
+                $badge       = if ($item['Badge']) { [string]$item['Badge'] } else { '' }
+                $badgeColor  = if ($item['BadgeColor']) { [string]$item['BadgeColor'] } else { $color }
 
-                $left = ' {0} {1} {2}' -f $pointer, $keyTag, $item['Label']
+                $labelText = [string]$item['Label']
+                $left = if ($badge) { ' {0} {1} {2} {3}' -f $pointer, $keyTag, $badge, $labelText } else { ' {0} {1} {2}' -f $pointer, $keyTag, $labelText }
                 $avail = $w - 4
                 $rightSpace = $avail - $left.Length
                 if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
@@ -1772,6 +1775,14 @@ function Select-WinPulseMenuItem {
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
                 if ($isSelected) {
                     Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
+                }
+                elseif ($badge) {
+                    $prefixPart = ' {0} {1} ' -f $pointer, $keyTag
+                    $badgePart  = '{0} ' -f $badge
+                    $afterLabel = if ($hint -and $rightSpace -gt ($hint.Length + 2)) { (' ' * ($rightSpace - $hint.Length)) + $hint } else { ' ' * $rightSpace }
+                    Write-Host -NoNewline $prefixPart -ForegroundColor Gray
+                    Write-Host -NoNewline $badgePart  -ForegroundColor $badgeColor
+                    Write-Host -NoNewline ($labelText + $afterLabel) -ForegroundColor $color
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor Gray
@@ -10861,15 +10872,15 @@ function Show-WinPulseDiagnosticsMenu {
         if ($netHint.Length -gt 46) { $netHint = $netHint.Substring(0, 43) + '...' }
 
         $items = @(
-            @{ Label = ('{0} Findings' -f (Get-WinPulseDiagnosticsBadge -State $findState)); Key = 'F'; Hint = $findHint; Color = (Get-WinPulseDiagnosticsColor -State $findState) }
-            @{ Label = ('{0} Drivers' -f (Get-WinPulseDiagnosticsBadge -State $driverState)); Key = 'D'; Hint = $driverHint; Color = (Get-WinPulseDiagnosticsColor -State $driverState) }
-            @{ Label = ('{0} Services' -f (Get-WinPulseDiagnosticsBadge -State $svcState)); Key = 'V'; Hint = $svcHint; Color = (Get-WinPulseDiagnosticsColor -State $svcState) }
-            @{ Label = ('{0} System' -f (Get-WinPulseDiagnosticsBadge -State 'OK')); Key = 'S'; Hint = $systemHint; Color = (Get-WinPulseDiagnosticsColor -State 'OK') }
-            @{ Label = ('{0} Hardware' -f (Get-WinPulseDiagnosticsBadge -State $hwState)); Key = 'H'; Hint = $hwHint; Color = (Get-WinPulseDiagnosticsColor -State $hwState) }
-            @{ Label = ('{0} Security' -f (Get-WinPulseDiagnosticsBadge -State $secState)); Key = 'X'; Hint = $secHint; Color = (Get-WinPulseDiagnosticsColor -State $secState) }
-            @{ Label = ('{0} Network' -f (Get-WinPulseDiagnosticsBadge -State $netState)); Key = 'N'; Hint = $netHint; Color = (Get-WinPulseDiagnosticsColor -State $netState) }
+            @{ Label = 'Findings'; Key = 'F'; Badge = (Get-WinPulseDiagnosticsBadge -State $findState);   BadgeColor = (Get-WinPulseDiagnosticsColor -State $findState);   Hint = $findHint;   Color = 'White' }
+            @{ Label = 'Drivers';  Key = 'D'; Badge = (Get-WinPulseDiagnosticsBadge -State $driverState); BadgeColor = (Get-WinPulseDiagnosticsColor -State $driverState); Hint = $driverHint; Color = 'White' }
+            @{ Label = 'Services'; Key = 'V'; Badge = (Get-WinPulseDiagnosticsBadge -State $svcState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $svcState);    Hint = $svcHint;    Color = 'White' }
+            @{ Label = 'System';   Key = 'S'; Badge = '[ OK ]';                                           BadgeColor = 'Green';                                            Hint = $systemHint; Color = 'White' }
+            @{ Label = 'Hardware'; Key = 'H'; Badge = (Get-WinPulseDiagnosticsBadge -State $hwState);     BadgeColor = (Get-WinPulseDiagnosticsColor -State $hwState);     Hint = $hwHint;     Color = 'White' }
+            @{ Label = 'Security'; Key = 'X'; Badge = (Get-WinPulseDiagnosticsBadge -State $secState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $secState);    Hint = $secHint;    Color = 'White' }
+            @{ Label = 'Network';  Key = 'N'; Badge = (Get-WinPulseDiagnosticsBadge -State $netState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $netState);    Hint = $netHint;    Color = 'White' }
             @{ Separator = $true }
-            @{ Label = 'Back'; Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Back';     Key = 'B'; Color = 'DarkGray' }
         )
 
         $choice = Select-WinPulseMenuItem -Title 'Diagnostics' -Items $items
