@@ -754,6 +754,72 @@ Acceptance (non-elevated, dry-run only):
 Out of scope: real winget install in tests, changing interactive menus or
 console output, touching other modes.
 
+### Task C21 - Battery health row in dashboard
+
+Why: technicians need to know battery wear before recommending a battery swap or
+before working with storage/boot on a device that might shut down unexpectedly.
+The data is already collected in `$scan.HardwareDetail.Battery` by
+`Get-WinPulseHardwareDetail` (called in `Invoke-CoreScan`, line ~1489) — nothing
+new to collect, just display it.
+
+`$scan.HardwareDetail.Battery` fields (all may be null on desktops):
+  - `Present`              bool   — true only if Win32_Battery found a battery
+  - `HealthPercent`        double — FullChargedCapacity / DesignedCapacity * 100
+  - `DesignCapacityWh`     double — original design capacity in Wh
+  - `FullChargeCapacityWh` double — current max charge in Wh
+  - `CycleCount`           int    — charge cycles (may be null if unavailable)
+
+Scope:
+
+- In `Show-WinPulseDashboard` (inside `bootstrap.ps1`), after the Drivers row
+  and before the findings separator, add a conditional Battery row:
+
+  ```powershell
+  if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery.Present) {
+      $bat       = $scan.HardwareDetail.Battery
+      $batState  = if (-not $bat.HealthPercent) { 'OK' } `
+                   elseif ($bat.HealthPercent -lt 60) { 'Critical' } `
+                   elseif ($bat.HealthPercent -lt 80) { 'Warning' } `
+                   else { 'OK' }
+      $batHColor = switch ($batState) { 'Critical'{'Red'} 'Warning'{'Yellow'} default{'Gray'} }
+      $batSegs   = [System.Collections.Generic.List[hashtable]]::new()
+      if ($bat.HealthPercent) {
+          $batSegs.Add(@{ Text = 'Health {0}%' -f $bat.HealthPercent; Color = $batHColor })
+      }
+      if ($bat.DesignCapacityWh -and $bat.FullChargeCapacityWh) {
+          $batSegs.Add(@{ Text = ' | '; Color = 'Gray' })
+          $batSegs.Add(@{ Text = '{0} / {1} Wh' -f $bat.FullChargeCapacityWh, $bat.DesignCapacityWh; Color = 'Gray' })
+      }
+      if ($bat.CycleCount) {
+          $batSegs.Add(@{ Text = ' | Cycles {0}' -f $bat.CycleCount; Color = 'Gray' })
+      }
+      if ($batSegs.Count -gt 0) {
+          Write-WinPulseDashboardSegLine -Label 'Battery' -State $batState -Segments $batSegs.ToArray()
+      }
+  }
+  ```
+
+- Also update `Get-WinPulseTriageFindings` (line ~2417): the existing finding
+  fires at HealthPercent < 50 with Severity Warning. Add a second finding for
+  HealthPercent < 30 with Severity Critical ("Battery critically degraded: X%").
+  Keep the existing <50 finding as Warning.
+
+- Do NOT change: the battery data collection, HardwareDetail, any other row,
+  or any non-dashboard code.
+
+Acceptance (non-elevated, temp fixtures):
+
+- On a desktop fixture (no battery), the Battery row must NOT appear and smoke
+  must exit 0. The existing smoke test already covers this implicitly — just
+  verify it still passes.
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes still exit 0.
+- Visual check (Claude): run on a real laptop with a battery and confirm the row
+  appears with correct colors (green/yellow/red based on health).
+
+Out of scope: current charge level (%), charging status, per-cell data, any
+change to how battery data is collected.
+
 ### Task C20 - TUI folder picker for backup destination and restore root
 
 Why: technicians picking a backup target or source have to type a path from
