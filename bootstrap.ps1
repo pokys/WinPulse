@@ -2450,7 +2450,8 @@ function Show-WinPulseDashboard {
     }
     else {
         $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })
-        foreach ($f in $ordered) {
+        $top = @($ordered | Select-Object -First 3)
+        foreach ($f in $top) {
             $fColor = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
             $fBadge = if ($f.Severity -eq 'Critical') { '[CRIT]' } else { '[WARN]' }
             $fText = ' {0} {1}' -f $fBadge, $f.Message
