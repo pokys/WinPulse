@@ -661,6 +661,47 @@ Acceptance (non-elevated, temp fixtures):
 
 Out of scope: changing the JSON schema, TUI rendering, the copy/install logic.
 
+### Task C18 - Make the installed-software-list capture a visible backup choice
+
+Why: today `Invoke-WinPulseBackupAppCapture` runs on EVERY executed backup with no
+way to decline it (and `winget export` adds ~5-15s). The owner wants it as a
+visible, declinable choice that stays ON by default (decision A).
+
+Scope:
+
+- Add `-SkipBackupAppList` switch to the top `param()` block and plumb it through
+  `Invoke-WinPulseMode` to `Invoke-WinPulseMigrationBackup` and the elevation
+  passthrough (mirror the existing backup switches like `-BackupHashSample`).
+- In `Invoke-WinPulseMigrationBackup` compute `$captureAppList`:
+  - Non-interactive: `$captureAppList = -not $SkipBackupAppList` (so the default,
+    with no switch, still captures - keeps current behaviour).
+  - Interactive: ask once, default YES. Use a small 2-item single-select with
+    "Yes" first (so Enter keeps it on), e.g. title "Capture the installed
+    software list (for later winget reinstall)?" with Yes/No. Treat Esc/null as
+    Yes (the default-on intent).
+- Gate the capture on it: change the existing `if (-not $dryRun) { ...capture... }`
+  to `if (-not $dryRun -and $captureAppList) { ...capture... }`. When not
+  captured, `AppCapture` stays `$null` in the manifest (already nullable) and the
+  `apps\` folder is not created.
+- Surface it: show a line in the plan/summary area (near the opt-in scope / app
+  targets display) like "Installed software list: yes" / "no", and in the
+  "repeat this without prompts" command append `-SkipBackupAppList` when it was
+  declined.
+- Do NOT change `Invoke-WinPulseBackupAppCapture` itself, the copy flow, app DATA
+  (`-BackupApps`), verification, or any counts.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Default (no `-SkipBackupAppList`): an executed backup still writes
+  `apps\installed-apps.json` and a non-null `AppCapture` (existing C15 smoke must
+  still pass unchanged).
+- With `-SkipBackupAppList`: the executed backup writes NO `apps\` folder and
+  `AppCapture` is `$null`; exit 0.
+- Add a smoke assertion for the skip case. Parser + ASCII clean; all migration
+  smoke modes still exit 0.
+
+Out of scope: changing what the capture collects, the report files, TUI rendering.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
