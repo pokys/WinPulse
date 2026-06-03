@@ -570,6 +570,19 @@ function Get-WinPulseHardwareDetail {
             }
         }
         catch { }
+        # Fallback: Win32_Battery.DesignCapacity / FullChargeCapacity
+        if (-not $batteryInfo.HealthPercent) {
+            try {
+                $dc = [int]($battery | Select-Object -ExpandProperty DesignCapacity -ErrorAction SilentlyContinue)
+                $fc = [int]($battery | Select-Object -ExpandProperty FullChargeCapacity -ErrorAction SilentlyContinue)
+                if ($dc -gt 0 -and $fc -gt 0) {
+                    $batteryInfo.DesignCapacityWh    = [math]::Round($dc / 1000, 1)
+                    $batteryInfo.FullChargeCapacityWh = [math]::Round($fc / 1000, 1)
+                    $batteryInfo.HealthPercent        = [math]::Round(($fc / $dc) * 100, 1)
+                }
+            }
+            catch { }
+        }
     }
 
     $board = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -2344,9 +2357,10 @@ function Show-WinPulseDashboard {
         if ($bat.CycleCount) {
             $batSegs.Add(@{ Text = (' | Cycles {0}' -f $bat.CycleCount); Color = 'Gray' })
         }
-        if ($batSegs.Count -gt 0) {
-            Write-WinPulseDashboardSegLine -Label 'Battery' -State $batState -Segments $batSegs.ToArray()
+        if ($batSegs.Count -eq 0) {
+            $batSegs.Add(@{ Text = 'Present (wear data unavailable)'; Color = 'Gray' })
         }
+        Write-WinPulseDashboardSegLine -Label 'Battery' -State $batState -Segments $batSegs.ToArray()
     }
 
     # Findings separator
@@ -10424,8 +10438,10 @@ function Show-WinPulseFindingsDetail {
         Write-Host ('    RAM type : {0}' -f $ramType) -ForegroundColor White
         Write-Host ('    TPM      : {0}' -f $tpmLabel) -ForegroundColor White
         if ($scan.HardwareDetail.Battery.Present) {
-            $batColor = if ($scan.HardwareDetail.Battery.HealthPercent -lt 50) { 'Yellow' } else { 'White' }
-            Write-Host ('    Battery  : {0}% health' -f $scan.HardwareDetail.Battery.HealthPercent) -ForegroundColor $batColor
+            $batHp = $scan.HardwareDetail.Battery.HealthPercent
+            $batColor = if ($batHp -and $batHp -lt 50) { 'Yellow' } else { 'White' }
+            $batLine = if ($batHp) { '    Battery  : {0}% health' -f $batHp } else { '    Battery  : present (wear data unavailable)' }
+            Write-Host $batLine -ForegroundColor $batColor
         }
     }
 
