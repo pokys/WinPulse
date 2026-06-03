@@ -2438,7 +2438,7 @@ function Get-WinPulseTriageFindings {
         if ($scan.HardwareDetail.Battery.HealthPercent -lt 30) {
             $findings += [pscustomobject]@{ Severity = 'Critical'; Message = ('Battery critically degraded: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
         }
-        if ($scan.HardwareDetail.Battery.HealthPercent -lt 50) {
+        elseif ($scan.HardwareDetail.Battery.HealthPercent -lt 50) {
             $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Battery health is low: {0}%' -f $scan.HardwareDetail.Battery.HealthPercent) }
         }
     }
