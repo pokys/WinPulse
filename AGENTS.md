@@ -754,6 +754,134 @@ Acceptance (non-elevated, dry-run only):
 Out of scope: real winget install in tests, changing interactive menus or
 console output, touching other modes.
 
+### Task C20 - TUI folder picker for backup destination and restore root
+
+Why: technicians picking a backup target or source have to type a path from
+memory (`E:\Backups\Petr`). A folder browser lets them navigate drives and
+directories with arrow keys and pick the folder visually. Manual typing must
+stay available as a fallback (for UNC paths, etc.).
+
+**IMPORTANT - visual verification required.** This task changes live TUI
+rendering. Build it on `dev`, validate parser + ASCII + all smoke modes, then
+report. Claude will confirm visually on a real terminal before merging to main.
+Do NOT push to main until Claude approves.
+
+#### New function: `Select-WinPulseFolderPath`
+
+Add `Select-WinPulseFolderPath` near the other `Select-WinPulse*` helpers.
+
+Signature:
+```powershell
+function Select-WinPulseFolderPath {
+    param(
+        [string]$Title = 'Select folder',
+        [string]$StartPath = $null   # optional; defaults to drives list
+    )
+    # Returns: selected path string, or $null if cancelled
+}
+```
+
+Behaviour:
+
+- **Start view** (when `$StartPath` is null or empty): list available filesystem
+  drives from `Get-PSDrive -PSProvider FileSystem | Sort-Object Name`. Each
+  drive is shown as e.g. `C:\`, `D:\`, `E:\`. Arrow keys + Enter navigates into
+  that drive root.
+- **Directory view**: show items in this order:
+  1. `[Select this folder]` — Enter on this item returns the current path.
+  2. `..  (go up)` — Enter goes to parent; at a drive root, goes back to drives
+     list. Omit this item when showing the drives list.
+  3. Sorted subdirectories of the current path (via
+     `Get-ChildItem -LiteralPath $current -Directory -ErrorAction SilentlyContinue`).
+     If the listing fails (access denied etc.), show a one-line note and treat
+     the folder as having no children, but keep `[Select this folder]` active.
+- **Keyboard:**
+  - `↑`/`↓` — move cursor (viewport-scroll if list is long; reuse the
+    `$maxViewport` / `$viewTop` pattern from `Select-WinPulseMultiMenuItem`).
+  - `Enter` — navigate into directory, or confirm `[Select this folder]`, or
+    go up from `..`.
+  - `Esc` — cancel, return `$null`.
+  - `T` (or `M`) — switch to a `Read-Host` prompt so the user can type any
+    path (UNC, absolute, etc.). Validate that the typed path is non-empty;
+    return it as-is (the caller validates existence if needed). If the user
+    presses Enter on an empty string, re-show the picker.
+- **Header**: the current path (or "Drives" for the start view) in the box
+  title, using the existing WinPulse box style.
+- **Help bar**: `↑/↓ Navigate  Enter Select/Open  T Type path  Esc Cancel`
+- **Non-interactive fallback**: if `$Host.UI.RawUI.KeyAvailable` throws (i.e.
+  non-interactive), fall back to a `Read-Host` prompt immediately (same guard
+  pattern as the existing menus).
+
+#### Plug-in points (three places, all in `bootstrap.ps1`)
+
+Replace each interactive `Read-Host` path prompt with `Select-WinPulseFolderPath`.
+Do NOT touch the non-interactive branches (they use params directly).
+
+**1. Backup destination** (inside `Invoke-WinPulseMigrationBackup`, the `else`
+branch around line 5198):
+```powershell
+# BEFORE:
+$destInput = Read-Host '  Where to save the backup?  (Enter for default, or a path like E:\Backups\Name)'
+$destinationRoot = if ([string]::IsNullOrWhiteSpace($destInput)) { $defaultRoot } else { $destInput.Trim() }
+
+# AFTER:
+$destPicked = Select-WinPulseFolderPath -Title 'Backup destination'
+$destinationRoot = if ([string]::IsNullOrWhiteSpace($destPicked)) { $defaultRoot } else { $destPicked }
+```
+(Esc from the picker = use default, just like pressing Enter on the old prompt.)
+
+**2. Restore root** (inside `Invoke-WinPulseMigrationRestore`, the `else`
+branch around line 6391):
+```powershell
+# BEFORE:
+$rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
+$restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
+
+# AFTER:
+$rootPicked = Select-WinPulseFolderPath -Title 'Restore root'
+$restoreRoot = if ([string]::IsNullOrWhiteSpace($rootPicked)) { 'C:\Users' } else { $rootPicked }
+```
+
+**3. Manual backup-source path** — there are three identical `__manual__`
+fallback blocks (in Restore, Verify, and Apps backup-source selection). Each
+looks like:
+```powershell
+if (-not $selectedBackupRoot) {
+    $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+    ...
+    $selectedBackupRoot = $manualInput.Trim()
+}
+```
+Replace the `Read-Host` line in each block with:
+```powershell
+$manualInput = Select-WinPulseFolderPath -Title 'Backup folder'
+```
+The surrounding null-check and cancellation logic stays unchanged.
+
+#### Constraints
+
+- Keep all non-interactive param paths (`-BackupDestination`, `-RestoreRoot`,
+  `AppsBackupPath`, `VerifyBackupPath`) byte-for-byte unchanged.
+- Do not add UNC / network share browsing — if the user needs a UNC path, `T`
+  (type manually) is the escape hatch.
+- ASCII-only, StrictMode-safe, PowerShell 5.1 compatible.
+- `Get-ChildItem` errors (access denied, empty drive) must never crash the
+  picker — catch and continue.
+- Do not change any other function's behaviour.
+
+#### Acceptance
+
+- Parser clean, ASCII check empty, `git diff --check` clean.
+- All four smoke modes exit 0 (smoke uses non-interactive params, so the
+  picker is never called — this verifies nothing regressed).
+- **Visual check (Claude does this before merge):** on a real terminal, the
+  picker opens, shows drives, navigates into a subfolder, `[Select this folder]`
+  returns the path, `T` falls through to typed input, `Esc` cancels with the
+  default used, help bar is visible and correct.
+
+Out of scope: UNC browsing, file-level picker, multiple-folder selection,
+drive labels/sizes, clipboard paste, any non-path prompt.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
