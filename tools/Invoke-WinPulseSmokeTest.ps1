@@ -571,6 +571,9 @@ try {
         if ($appsManifest.Tool.Action -ne 'DryRun') {
             throw ('MigrationApps fixture action was {0}, expected DryRun.' -f $appsManifest.Tool.Action)
         }
+        if (-not $appsManifest.PSObject.Properties['AlreadyInstalledCount'] -or [int]$appsManifest.AlreadyInstalledCount -ne 0) {
+            throw ('MigrationApps fixture AlreadyInstalledCount was {0}, expected 0.' -f $appsManifest.AlreadyInstalledCount)
+        }
         if ([int]$appsManifest.SelectedCount -ne 2 -or [int]$appsManifest.DryRunCount -ne 2 -or [int]$appsManifest.FailedCount -ne 0 -or [int]$appsManifest.InstalledCount -ne 0) {
             throw ('MigrationApps fixture counts were Selected={0}, DryRun={1}, Installed={2}, Failed={3}.' -f $appsManifest.SelectedCount, $appsManifest.DryRunCount, $appsManifest.InstalledCount, $appsManifest.FailedCount)
         }
