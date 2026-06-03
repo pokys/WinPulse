@@ -1041,6 +1041,108 @@ if ($pcfgOk -and (Test-Path -LiteralPath $tmpHtml)) { ... }
 Visual laptop check remains for Claude/owner: confirm battery row shows
 `Health XX% | YY.Y / ZZ.Z Wh` instead of "wear data unavailable".
 
+### Task C23 - Add CPU load to Hardware row; add WiFi SSID+signal to Network row
+
+**CRITICAL layout constraint:** Both additions must NEVER push the right box
+border out of position. The value area in `Write-WinPulseDashboardSegLine` is
+~66 chars (BoxWidth 88). If the total segment text exceeds this, the border
+misaligns. Guard every addition with a `if ($total -le 66)` check or keep
+individual additions short enough that the combined line stays under 55 chars
+(leave headroom for all combinations). When in doubt, omit the optional segment
+rather than risk overflow.
+
+#### Part A — CPU load in Hardware row
+
+**Data:** `Win32_Processor.LoadPercentage` (int, 0-100). Not currently in
+`$scan.Hardware` — add it.
+
+1. In `Invoke-CoreScan` (`bootstrap.ps1`, inside the hardware scan try-block
+   around line 1340), add a CPU load query alongside the existing RAM/disk
+   queries:
+
+   ```powershell
+   $cpuLoad = $null
+   try {
+       $cpuObj = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+       if ($cpuObj -and $cpuObj.PSObject.Properties['LoadPercentage'] -and $null -ne $cpuObj.LoadPercentage) {
+           $cpuLoad = [int]$cpuObj.LoadPercentage
+       }
+   } catch {}
+   ```
+
+   Add `CpuLoadPercent = $cpuLoad` to the `$result.Hardware` ordered dict (line
+   ~1388). Also add `CpuLoadPercent = $null` to the default stub at line ~1270.
+
+2. In `Show-WinPulseDashboard`, in the Hardware row block, append a CPU load
+   segment ONLY when the value is non-null:
+
+   ```powershell
+   if ($null -ne $scan.Hardware.CpuLoadPercent) {
+       $cpuLColor = if ($scan.Hardware.CpuLoadPercent -ge 80) { 'Red' } `
+                    elseif ($scan.Hardware.CpuLoadPercent -ge 60) { 'Yellow' } `
+                    else { 'Gray' }
+       $hwSegs.Add(@{ Text = ' | CPU {0}%' -f $scan.Hardware.CpuLoadPercent; Color = $cpuLColor })
+   }
+   ```
+
+   Add this AFTER the temperature segment (which is already the last optional
+   add). Keep the Add call on the `$hwSegs` List before `.ToArray()`.
+
+   Current Hardware segments: `RAM X% | C: X% XGB | SMART OK` + optional
+   `| CPU XC` (temp) = max ~55 chars. Adding `| CPU X%` (9 chars max) stays
+   well under 66. Safe.
+
+#### Part B — WiFi SSID + signal in Network row
+
+**Data:** `$scan.NetworkDetail.WiFi` — already collected in `Invoke-CoreScan`
+(line ~1599). Fields: `SSID` (string), `SignalPercent` (int or null).
+`$scan.NetworkDetail` may be null if the network detail scan failed — guard it.
+
+1. Convert the Network row from `Write-WinPulseDashboardLine` (plain string)
+   to `Write-WinPulseDashboardSegLine` (segments). Replicate the same content
+   as segments first, then conditionally append WiFi.
+
+   ```powershell
+   $netState = if ($scan.Network.Internet) { 'OK' } else { 'Warning' }
+   $netSegs  = [System.Collections.Generic.List[hashtable]]::new()
+   $netSegs.Add(@{ Text = [string]$scan.Network.IPv4; Color = 'Gray' })
+   $netSegs.Add(@{ Text = ' | GW {0}' -f $scan.Network.Gateway; Color = 'Gray' })
+   $netSegs.Add(@{ Text = ' | Net {0}' -f $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' }); Color = $(if ($scan.Network.Internet) { 'Gray' } else { 'Red' }) })
+   if ($scan.NetworkDetail -and $scan.NetworkDetail.WiFi -and $scan.NetworkDetail.WiFi.SSID) {
+       $ssid = [string]$scan.NetworkDetail.WiFi.SSID
+       if ($ssid.Length -gt 15) { $ssid = $ssid.Substring(0, 15) }
+       $sig  = $scan.NetworkDetail.WiFi.SignalPercent
+       $wifiText = if ($sig) { ' | WiFi: {0} {1}%' -f $ssid, $sig } else { ' | WiFi: {0}' -f $ssid }
+       $wifiColor = if ($sig -and $sig -lt 40) { 'Red' } elseif ($sig -and $sig -lt 70) { 'Yellow' } else { 'Gray' }
+       $netSegs.Add(@{ Text = $wifiText; Color = $wifiColor })
+   }
+   Write-WinPulseDashboardSegLine -Label 'Network' -State $netState -Segments $netSegs.ToArray()
+   ```
+
+   Length check: base Network value is ~46 chars. WiFi addition max:
+   ` | WiFi: 123456789012345 100%` = 29 chars. Total max = 75 chars > 66.
+   Add a guard: only add WiFi segment when `$ssid.Length + 16 + (total so far) -le 62`:
+
+   ```powershell
+   $baseLen = ($netSegs | ForEach-Object { ([string]$_['Text']).Length } | Measure-Object -Sum).Sum
+   if (($baseLen + $wifiText.Length) -le 62) {
+       $netSegs.Add(@{ Text = $wifiText; Color = $wifiColor })
+   }
+   ```
+
+   When the combined line would overflow, silently omit the WiFi segment.
+
+**Do NOT change:** any other dashboard row, any non-dashboard code, smoke tests,
+the existing segment infrastructure.
+
+**Acceptance:**
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0.
+- On a machine with no WiFi, Network row looks identical to today.
+- On a machine under low CPU load, Hardware row shows `| CPU X%` in gray.
+- Visual check (Claude/owner): confirm layout is intact at >= 90 columns on
+  both WiFi and non-WiFi machines; no right-border misalignment.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
