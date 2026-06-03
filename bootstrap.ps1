@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.12.0-20260603'
+$script:WinPulseVersion = '0.13.0-20260603'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -587,9 +587,12 @@ function Get-WinPulseHardwareDetail {
         if (-not $batteryInfo.HealthPercent) {
             try {
                 $tmpHtml = Join-Path $env:TEMP 'winpulse-batt.html'
-                $null = & powercfg /batteryreport /output $tmpHtml 2>&1
+                $pcfg = Join-Path $env:SystemRoot 'System32\powercfg.exe'
+                if (-not (Test-Path -LiteralPath $pcfg)) { $pcfg = 'powercfg' }
+                $null = & $pcfg /batteryreport /output $tmpHtml 2>&1
                 if (Test-Path -LiteralPath $tmpHtml) {
-                    $html = Get-Content -LiteralPath $tmpHtml -Raw -ErrorAction SilentlyContinue
+                    # powercfg generates UTF-16 LE; use ReadAllText for auto BOM detection
+                    $html = [System.IO.File]::ReadAllText($tmpHtml)
                     Remove-Item -LiteralPath $tmpHtml -Force -ErrorAction SilentlyContinue
                     if ($html) {
                         $dcPos = $html.IndexOf('DESIGN CAPACITY', [System.StringComparison]::OrdinalIgnoreCase)

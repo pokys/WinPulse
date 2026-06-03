@@ -17,7 +17,7 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at
-`0.12.0-20260603`. Clean tree,
+`0.13.0-20260603`. Clean tree,
 nothing pending uncommitted. Verified: parser + ASCII clean, all fixture smoke
 tests pass non-elevated.
 
