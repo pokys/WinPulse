@@ -948,6 +948,95 @@ The surrounding null-check and cancellation logic stays unchanged.
 Out of scope: UNC browsing, file-level picker, multiple-folder selection,
 drive labels/sizes, clipboard paste, any non-path prompt.
 
+### Task C22 - Fix powercfg battery report parsing (replace fragile regex)
+
+Why: the current powercfg fallback in `Get-WinPulseHardwareDetail` (inside
+`bootstrap.ps1`, around line 587) consistently fails on real laptops and shows
+"wear data unavailable". The root cause is a fragile regex that requires the
+HTML table cells to be adjacent with no nested tags between them:
+
+```
+'(?i)<td[^>]*>[^<]*</td>[^<]*<td[^>]*>([\d\s,\.]+)\s*mWh</td>...'
+```
+
+`[^<]*` between `</td>` and `<td>` fails the moment there is ANY HTML tag
+(whitespace element, attribute, newline with indentation that has been wrapped
+in a tag, etc.) between the cells. powercfg HTML structure varies across Windows
+versions, locales, and OEMs.
+
+**Root cause analysis before you write a single line of code:**
+
+First, add a temporary diagnostic block that writes what powercfg produces to
+`$batteryInfo` as a `ParseDiag` key (or to a local variable you can inspect):
+
+```powershell
+# After [System.IO.File]::ReadAllText($tmpHtml):
+$batteryInfo['ParseDiag'] = ('len={0} dcPos={1} mwhCount={2}' -f
+    $html.Length,
+    $html.IndexOf('DESIGN CAPACITY', [System.StringComparison]::OrdinalIgnoreCase),
+    ([regex]::Matches($html, 'mWh')).Count)
+```
+
+Run WinPulse on the laptop, then read `ParseDiag` from a debug run to
+understand the actual structure. Then remove the diagnostic before committing.
+
+**Fix — replace the fragile table-row regex with a simpler two-step approach:**
+
+Instead of matching the full table row structure, just:
+1. Find the position of "DESIGN CAPACITY" in the HTML.
+2. Take a 3000-char window starting there.
+3. Find ALL occurrences of `(\d[\d,\.\s]*)\s*mWh` in that window.
+4. The FIRST match is the design capacity value; the SECOND is the full charge
+   capacity value. (In the report, design capacity column comes before full
+   charge capacity column, both in the same data row, in document order.)
+5. Strip non-digits, convert to int, divide by 1000 for Wh.
+
+```powershell
+$dcPos = $html.IndexOf('DESIGN CAPACITY', [System.StringComparison]::OrdinalIgnoreCase)
+if ($dcPos -ge 0) {
+    $window  = $html.Substring($dcPos, [math]::Min(3000, $html.Length - $dcPos))
+    $mwhAll  = [regex]::Matches($window, '(\d[\d,\.\s]*)\s*mWh')
+    if ($mwhAll.Count -ge 2) {
+        $dc = [int]($mwhAll[0].Groups[1].Value -replace '[^\d]', '')
+        $fc = [int]($mwhAll[1].Groups[1].Value -replace '[^\d]', '')
+        if ($dc -gt 0 -and $fc -gt 0) {
+            $batteryInfo.DesignCapacityWh    = [math]::Round($dc / 1000, 1)
+            $batteryInfo.FullChargeCapacityWh = [math]::Round($fc / 1000, 1)
+            $batteryInfo.HealthPercent        = [math]::Round(($fc / $dc) * 100, 1)
+        }
+    }
+    # Cycle count: look for a plain integer in a <td> that follows the two mWh cells
+    # (third data column). Only attempt if not already set by WMI.
+    if (-not $batteryInfo.CycleCount -and $mwhAll.Count -ge 2) {
+        $afterFc = $window.Substring($mwhAll[1].Index + $mwhAll[1].Length)
+        $cycleM  = [regex]::Match($afterFc, '<td[^>]*>\s*(\d+)\s*</td>')
+        if ($cycleM.Success) { $batteryInfo.CycleCount = [int]$cycleM.Groups[1].Value }
+    }
+}
+```
+
+Replace the current regex block (lines ~598-614) with this. Keep everything
+else (file creation, ReadAllText, Remove-Item, outer try/catch) unchanged.
+
+**Also verify:** ensure `powercfg` is actually producing the file. Add exit-code
+capture and guard on non-zero exit:
+
+```powershell
+$null = & $pcfg /batteryreport /output $tmpHtml 2>&1
+$pcfgOk = ($LASTEXITCODE -eq 0)
+if ($pcfgOk -and (Test-Path -LiteralPath $tmpHtml)) { ... }
+```
+
+**Acceptance:**
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0 (no battery on desktop = no change to smoke).
+- The fix is self-contained to `Get-WinPulseHardwareDetail` in `bootstrap.ps1`.
+- No other functions or modes touched.
+
+Visual laptop check remains for Claude/owner: confirm battery row shows
+`Health XX% | YY.Y / ZZ.Z Wh` instead of "wear data unavailable".
+
 ## Project Direction
 
 WinPulse is the main project going forward.
