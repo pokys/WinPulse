@@ -6632,8 +6632,8 @@ function Invoke-WinPulseMigrationRestore {
         $restoreRoot = $RestoreRoot.Trim()
     }
     else {
-        $rootPicked = Select-WinPulseFolderPath -Title 'Restore root'
-        $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootPicked)) { 'C:\Users' } else { $rootPicked }
+        $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
+        $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
     }
     $restoreAsUserInput = if ($nonInteractive) { $RestoreAsUser } else { Read-Host '  Restore into which user name? (Enter = keep original)' }
     try {
