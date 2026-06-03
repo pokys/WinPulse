@@ -5778,9 +5778,29 @@ function Invoke-WinPulseMigrationAppReinstall {
         }
     }
     else {
+        $alreadyInstalledSet = @{}
+        $wingetCmdCheck = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($wingetCmdCheck) {
+            try {
+                Write-Host '  Checking installed packages...' -ForegroundColor DarkGray
+                $listRaw = (& ([string]$wingetCmdCheck.Source) list --accept-source-agreements 2>&1 | Out-String)
+                foreach ($id in @($packageIds)) {
+                    if ($listRaw -match [regex]::Escape($id)) {
+                        $alreadyInstalledSet[$id.ToLowerInvariant()] = $true
+                    }
+                }
+            }
+            catch {}
+        }
         $items = @()
         foreach ($id in @($packageIds)) {
-            $items += @{ Label = $id; Key = $id; Hint = 'winget package ID' }
+            $isInstalled = $alreadyInstalledSet.ContainsKey($id.ToLowerInvariant())
+            $items += @{
+                Label = $id
+                Key   = $id
+                Hint  = if ($isInstalled) { 'installed' } else { 'not installed' }
+                Color = if ($isInstalled) { 'DarkGray' } else { 'White' }
+            }
         }
         $selectedIds = @(Select-WinPulseMultiMenuItem -Title 'Which apps should be reinstalled?' -Items $items)
     }
@@ -5843,14 +5863,19 @@ function Invoke-WinPulseMigrationAppReinstall {
         $wingetPath = [string]$wingetCommand.Source
         $output = & $wingetPath install --id $id -e --accept-package-agreements --accept-source-agreements 2>&1
         $exitCode = $LASTEXITCODE
-        $success = ($exitCode -eq 0)
-        if ($success) {
+        $outputStr = ($output | Out-String).Trim()
+        $wasAlreadyInstalled = ($exitCode -ne 0) -and ($outputStr -imatch 'already installed|No applicable upgrade found')
+        $success = ($exitCode -eq 0) -or $wasAlreadyInstalled
+        if ($exitCode -eq 0) {
             Write-Host ('    OK: {0}' -f $id) -ForegroundColor Green
+        }
+        elseif ($wasAlreadyInstalled) {
+            Write-Host ('    Already installed: {0}' -f $id) -ForegroundColor DarkGreen
         }
         else {
             Write-Host ('    FAILED: {0} (exit {1})' -f $id, $exitCode) -ForegroundColor Red
         }
-        $results += [pscustomobject][ordered]@{ PackageId = $id; Command = $commandText; DryRun = $false; Success = $success; ExitCode = $exitCode; Note = (($output | Out-String).Trim()) }
+        $results += [pscustomobject][ordered]@{ PackageId = $id; Command = $commandText; DryRun = $false; Success = $success; ExitCode = $exitCode; Note = $outputStr }
     }
 
     $failed = @($results | Where-Object { -not $_.Success })
