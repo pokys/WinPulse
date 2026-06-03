@@ -161,6 +161,7 @@ $start = Get-Date
 $fixtureRoot = $null
 $backupRoot = $null
 $dryRunBackupRoot = $null
+$skipAppListBackupRoot = $null
 $appBackupRoot = $null
 $restoreRoot = $null
 $appRestoreRoot = $null
@@ -186,6 +187,7 @@ try {
         $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
         $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Backup')
         $dryRunBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('BackupDryRun')
+        $skipAppListBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('BackupSkipAppList')
         $appBackupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppBackup')
         $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Restore')
         $appRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('AppRestore')
@@ -267,6 +269,36 @@ try {
         }
         if (-not [bool]$backupManifest.AppCapture.WingetAvailable -and -not [string]::IsNullOrWhiteSpace([string]$backupManifest.AppCapture.WingetExportFile)) {
             throw 'MigrationBackup fixture recorded a winget export file while WingetAvailable was false.'
+        }
+
+        $skipAppListArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationBackup',
+            '-BackupProfilesRoot', (Convert-SmokeArgument -Value $usersRoot),
+            '-BackupUsers', 'tester',
+            '-BackupFolders', 'Desktop',
+            '-BackupDestination', (Convert-SmokeArgument -Value $skipAppListBackupRoot),
+            '-BackupExecute',
+            '-SkipBackupAppList'
+        )
+        $skipAppListRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $skipAppListArguments
+        $stdoutParts += $skipAppListRun.Stdout
+        $stderrParts += $skipAppListRun.Stderr
+        if ($skipAppListRun.ExitCode -ne 0) {
+            throw ('MigrationBackup SkipBackupAppList fixture exited with {0}' -f $skipAppListRun.ExitCode)
+        }
+        $skipManifestPath = Join-Path -Path $skipAppListBackupRoot -ChildPath 'manifest.json'
+        Assert-SmokeFile -Path $skipManifestPath
+        Assert-SmokeManifestCounts -Path $skipManifestPath
+        $skipAppsRoot = Join-Path -Path $skipAppListBackupRoot -ChildPath 'apps'
+        if (Test-Path -LiteralPath $skipAppsRoot) {
+            throw 'MigrationBackup SkipBackupAppList fixture wrote an apps sidecar folder.'
+        }
+        $skipManifest = Get-Content -LiteralPath $skipManifestPath -Raw | ConvertFrom-Json
+        if ($skipManifest.PSObject.Properties['AppCapture'] -and $null -ne $skipManifest.AppCapture) {
+            throw 'MigrationBackup SkipBackupAppList fixture recorded AppCapture.'
         }
         $expectedFilesPresent = $true
 
@@ -651,6 +683,7 @@ if ($fixtureRoot) {
     $summary.Add(('FixtureCleaned: {0}' -f $fixtureCleaned))
     $summary.Add(('BackupRoot: {0}' -f $backupRoot))
     if ($dryRunBackupRoot) { $summary.Add(('DryRunBackupRoot: {0}' -f $dryRunBackupRoot)) }
+    if ($skipAppListBackupRoot) { $summary.Add(('SkipAppListBackupRoot: {0}' -f $skipAppListBackupRoot)) }
     if ($appBackupRoot) { $summary.Add(('AppBackupRoot: {0}' -f $appBackupRoot)) }
     if ($restoreRoot) { $summary.Add(('RestoreRoot: {0}' -f $restoreRoot)) }
     if ($appRestoreRoot) { $summary.Add(('AppRestoreRoot: {0}' -f $appRestoreRoot)) }

@@ -12,6 +12,7 @@ param(
     [switch]$BackupIncludePrivateKeys,
     [switch]$BackupIncludeAppData,
     [switch]$BackupHashSample,
+    [switch]$SkipBackupAppList,
     [string]$BackupProfilesRoot = $null,
 
     [string]$RestoreBackupPath = $null,
@@ -5082,6 +5083,7 @@ function Invoke-WinPulseMigrationBackup {
         [switch]$BackupIncludePrivateKeys,
         [switch]$BackupIncludeAppData,
         [switch]$BackupHashSample,
+        [switch]$SkipBackupAppList,
         [string]$BackupProfilesRoot = $null
     )
 
@@ -5094,7 +5096,8 @@ function Invoke-WinPulseMigrationBackup {
         $BackupExecute -or
         $BackupIncludePrivateKeys -or
         $BackupIncludeAppData -or
-        $BackupHashSample
+        $BackupHashSample -or
+        $SkipBackupAppList
     )
     $nonInteractive = (
         @($BackupUsers).Count -gt 0 -and
@@ -5156,6 +5159,17 @@ function Invoke-WinPulseMigrationBackup {
         $folderKeys += 'AppData'
     }
 
+    if ($nonInteractive) {
+        $captureAppList = -not $SkipBackupAppList
+    }
+    else {
+        $captureChoice = Select-WinPulseMenuItem -Title 'Capture the installed software list (for later winget reinstall)?' -Items @(
+            @{ Label = 'Yes'; Key = 'Y'; Hint = 'Recommended; default' },
+            @{ Label = 'No';  Key = 'N'; Hint = 'Skip app list capture' }
+        )
+        $captureAppList = ($captureChoice -ne 'N')
+    }
+
     $computerName = Get-WinPulseSafeComputerName
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     # Default to a persistent top-level folder, NOT under C:\ProgramData\WinPulse
@@ -5198,6 +5212,7 @@ function Invoke-WinPulseMigrationBackup {
     if ($appKeys.Count -gt 0) {
         Write-Host ('  App targets:    {0}' -f ($appKeys -join ', ')) -ForegroundColor Yellow
     }
+    Write-Host ('  Installed software list: {0}' -f $(if ($captureAppList) { 'yes' } else { 'no' })) -ForegroundColor DarkYellow
 
     Write-Host ''
     if ($nonInteractive) {
@@ -5288,7 +5303,7 @@ function Invoke-WinPulseMigrationBackup {
     $failed = @($results | Where-Object { -not $_.Success -and -not $_.Partial })
     $mismatch = @($results | Where-Object { $_.Verification -and $_.Verification.Status -eq 'Mismatch' -and -not $_.Partial })
     $appCapture = $null
-    if (-not $dryRun) {
+    if (-not $dryRun -and $captureAppList) {
         Write-Host ''
         Write-Host '  Capturing installed app list...' -ForegroundColor DarkGray
         $appCapture = Invoke-WinPulseBackupAppCapture -destinationRoot $destinationRoot
@@ -5387,6 +5402,7 @@ function Invoke-WinPulseMigrationBackup {
         if ($includeKeys) { $cmd += '-BackupIncludePrivateKeys' }
         if ($includeAppData) { $cmd += '-BackupIncludeAppData' }
         if ($hashSampleSize -gt 0) { $cmd += '-BackupHashSample' }
+        if (-not $captureAppList) { $cmd += '-SkipBackupAppList' }
         if (-not $dryRun) { $cmd += '-BackupExecute' }
         Write-Host ''
         Write-Host '  To repeat this without prompts:' -ForegroundColor DarkGray
@@ -10104,6 +10120,7 @@ function Invoke-WinPulseMode {
         [switch]$BackupIncludePrivateKeys,
         [switch]$BackupIncludeAppData,
         [switch]$BackupHashSample,
+        [switch]$SkipBackupAppList,
         [string]$BackupProfilesRoot = $null,
 
         [string]$RestoreBackupPath = $null,
@@ -10151,7 +10168,7 @@ function Invoke-WinPulseMode {
         }
         'MigrationBackup' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration backup mode.' -f $script:WinPulseVersion)
-            Invoke-WinPulseMigrationBackup -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot | Out-Null
+            Invoke-WinPulseMigrationBackup -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -SkipBackupAppList:$SkipBackupAppList -BackupProfilesRoot $BackupProfilesRoot | Out-Null
         }
         'MigrationRestore' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running migration restore mode.' -f $script:WinPulseVersion)
@@ -10242,6 +10259,7 @@ if ($BackupExecute) { $elevationPassthrough += '-BackupExecute' }
 if ($BackupIncludePrivateKeys) { $elevationPassthrough += '-BackupIncludePrivateKeys' }
 if ($BackupIncludeAppData) { $elevationPassthrough += '-BackupIncludeAppData' }
 if ($BackupHashSample) { $elevationPassthrough += '-BackupHashSample' }
+if ($SkipBackupAppList) { $elevationPassthrough += '-SkipBackupAppList' }
 if ($PSBoundParameters.ContainsKey('BackupProfilesRoot')) { $elevationPassthrough += @('-BackupProfilesRoot', (ConvertTo-WinPulseCommandArgument -value $BackupProfilesRoot)) }
 if ($PSBoundParameters.ContainsKey('RestoreBackupPath')) { $elevationPassthrough += @('-RestoreBackupPath', (ConvertTo-WinPulseCommandArgument -value $RestoreBackupPath)) }
 if ($PSBoundParameters.ContainsKey('RestoreRoot')) { $elevationPassthrough += @('-RestoreRoot', (ConvertTo-WinPulseCommandArgument -value $RestoreRoot)) }
@@ -10316,4 +10334,4 @@ if ($Mode -ne 'MigrationVerify') {
     Initialize-WinPulse
 }
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -SkipBackupAppList:$SkipBackupAppList -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect
