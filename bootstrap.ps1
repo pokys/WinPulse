@@ -570,7 +570,7 @@ function Get-WinPulseHardwareDetail {
             }
         }
         catch { }
-        # Fallback: Win32_Battery.DesignCapacity / FullChargeCapacity
+        # Fallback 1: Win32_Battery.DesignCapacity / FullChargeCapacity
         if (-not $batteryInfo.HealthPercent) {
             try {
                 $dc = [int]($battery | Select-Object -ExpandProperty DesignCapacity -ErrorAction SilentlyContinue)
@@ -579,6 +579,39 @@ function Get-WinPulseHardwareDetail {
                     $batteryInfo.DesignCapacityWh    = [math]::Round($dc / 1000, 1)
                     $batteryInfo.FullChargeCapacityWh = [math]::Round($fc / 1000, 1)
                     $batteryInfo.HealthPercent        = [math]::Round(($fc / $dc) * 100, 1)
+                }
+            }
+            catch { }
+        }
+        # Fallback 2: powercfg /batteryreport - reliable on all Windows laptops
+        if (-not $batteryInfo.HealthPercent) {
+            try {
+                $tmpHtml = Join-Path $env:TEMP 'winpulse-batt.html'
+                $null = & powercfg /batteryreport /output $tmpHtml 2>&1
+                if (Test-Path -LiteralPath $tmpHtml) {
+                    $html = Get-Content -LiteralPath $tmpHtml -Raw -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $tmpHtml -Force -ErrorAction SilentlyContinue
+                    if ($html) {
+                        $dcPos = $html.IndexOf('DESIGN CAPACITY', [System.StringComparison]::OrdinalIgnoreCase)
+                        if ($dcPos -ge 0) {
+                            $seg = $html.Substring($dcPos, [math]::Min(2000, $html.Length - $dcPos))
+                            $m = [regex]::Match($seg, '(?i)<td[^>]*>[^<]*</td>[^<]*<td[^>]*>([\d\s,\.]+)\s*mWh</td>[^<]*<td[^>]*>([\d\s,\.]+)\s*mWh</td>')
+                            if ($m.Success) {
+                                $dc = [int]($m.Groups[1].Value -replace '[^\d]', '')
+                                $fc = [int]($m.Groups[2].Value -replace '[^\d]', '')
+                                if ($dc -gt 0 -and $fc -gt 0) {
+                                    $batteryInfo.DesignCapacityWh    = [math]::Round($dc / 1000, 1)
+                                    $batteryInfo.FullChargeCapacityWh = [math]::Round($fc / 1000, 1)
+                                    $batteryInfo.HealthPercent        = [math]::Round(($fc / $dc) * 100, 1)
+                                }
+                            }
+                            # Also try to extract cycle count if not already set
+                            if (-not $batteryInfo.CycleCount) {
+                                $cm = [regex]::Match($seg, '(?i)<td[^>]*>[^<]*</td>[^<]*<td[^>]*>[\d\s,\.]+\s*mWh</td>[^<]*<td[^>]*>[\d\s,\.]+\s*mWh</td>[^<]*<td[^>]*>(\d+)</td>')
+                                if ($cm.Success) { $batteryInfo.CycleCount = [int]$cm.Groups[1].Value }
+                            }
+                        }
+                    }
                 }
             }
             catch { }
