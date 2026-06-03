@@ -1893,6 +1893,250 @@ function Select-WinPulseMultiMenuItem {
     }
 }
 
+function Select-WinPulseFolderPath {
+    [CmdletBinding()]
+    param(
+        [string]$Title = 'Select folder',
+        [string]$StartPath = $null
+    )
+
+    $interactive = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
+
+    if (-not $interactive) {
+        Write-WinPulseHeader -title $Title
+        $typedPath = Read-Host '  Type folder path'
+        if ([string]::IsNullOrWhiteSpace($typedPath)) { return $null }
+        return $typedPath
+    }
+
+    $currentPath = $null
+    if (-not [string]::IsNullOrWhiteSpace($StartPath)) {
+        $currentPath = $StartPath.Trim()
+    }
+
+    $w = Get-WinPulseBoxWidth
+    $hLine = [string][char]0x2500 * ($w - 2)
+    $vLine = [char]0x2502
+    $sel = 0
+    $viewTop = 0
+
+    [Console]::CursorVisible = $false
+    try {
+        Clear-Host
+        $startY = 0
+        $lastLineCount = 0
+
+        while ($true) {
+            $items = @()
+            $locationLabel = 'Drives'
+
+            if ([string]::IsNullOrWhiteSpace($currentPath)) {
+                $drives = @()
+                $driveNote = $null
+                try {
+                    $drives = @(Get-PSDrive -PSProvider FileSystem | Sort-Object Name)
+                }
+                catch {
+                    $driveNote = 'Could not list filesystem drives.'
+                }
+
+                foreach ($drive in @($drives)) {
+                    $root = [string]$drive.Root
+                    if ([string]::IsNullOrWhiteSpace($root)) {
+                        $root = ('{0}:\' -f $drive.Name)
+                    }
+                    $items += @{ Label = $root; Type = 'Drive'; Path = $root }
+                }
+
+                if ($items.Count -eq 0) {
+                    $note = if ($driveNote) { $driveNote } else { 'No filesystem drives found.' }
+                    $items += @{ Label = $note; Separator = $true; Color = 'DarkYellow' }
+                }
+            }
+            else {
+                $locationLabel = $currentPath
+                $items += @{ Label = '[Select this folder]'; Type = 'Select'; Path = $currentPath }
+
+                $parentPath = $null
+                try {
+                    $currentItem = Get-Item -LiteralPath $currentPath -ErrorAction Stop
+                    if ($currentItem -is [System.IO.DirectoryInfo] -and $currentItem.Parent) {
+                        $parentPath = $currentItem.Parent.FullName
+                    }
+                }
+                catch { }
+
+                if ($parentPath) {
+                    $items += @{ Label = '..  (go up)'; Type = 'Up'; Path = $parentPath }
+                }
+                else {
+                    $items += @{ Label = '..  (go up)'; Type = 'DriveList'; Path = $null }
+                }
+
+                $listNote = $null
+                try {
+                    $dirs = @(Get-ChildItem -LiteralPath $currentPath -Directory -ErrorAction Stop | Sort-Object Name)
+                    foreach ($dir in @($dirs)) {
+                        $items += @{ Label = $dir.Name; Type = 'Directory'; Path = $dir.FullName }
+                    }
+                }
+                catch {
+                    $listNote = 'Could not list subfolders.'
+                }
+
+                if ($listNote) {
+                    $items += @{ Label = $listNote; Separator = $true; Color = 'DarkYellow' }
+                }
+            }
+
+            $selectableIdx = @()
+            for ($i = 0; $i -lt $items.Count; $i++) {
+                if (-not $items[$i]['Separator']) { $selectableIdx += $i }
+            }
+            if ($selectableIdx.Count -eq 0) {
+                $sel = 0
+            }
+            elseif ($sel -ge $selectableIdx.Count) {
+                $sel = $selectableIdx.Count - 1
+            }
+
+            try {
+                $maxViewport = [math]::Max(1, [Console]::WindowHeight - 4)
+            }
+            catch {
+                $maxViewport = 15
+            }
+
+            if ($selectableIdx.Count -gt 0) {
+                $activeItemIdx = $selectableIdx[$sel]
+                if ($activeItemIdx -lt $viewTop) { $viewTop = $activeItemIdx }
+                if ($activeItemIdx -ge ($viewTop + $maxViewport)) { $viewTop = $activeItemIdx - $maxViewport + 1 }
+            }
+            if ($viewTop -ge $items.Count) { $viewTop = [math]::Max(0, $items.Count - 1) }
+
+            if ($lastLineCount -gt 0) {
+                [Console]::SetCursorPosition(0, $startY)
+                $blankWidth = [math]::Min($w + 4, [Console]::BufferWidth - 1)
+                if ($blankWidth -lt 1) { $blankWidth = 1 }
+                $blank = ' ' * $blankWidth
+                for ($c = 0; $c -lt $lastLineCount; $c++) { Write-Host $blank }
+                [Console]::SetCursorPosition(0, $startY)
+            }
+            $drawnLines = 0
+
+            $scrollInfo = if ($items.Count -gt $maxViewport -and $selectableIdx.Count -gt 0) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
+            $titleFull = ('{0} - {1}' -f $Title, $locationLabel)
+            if ($scrollInfo) { $titleFull = '{0}  {1}' -f $titleFull, $scrollInfo }
+            $titleMax = [math]::Max(8, $w - 8)
+            if ($titleFull.Length -gt $titleMax) {
+                $titleFull = $titleFull.Substring(0, $titleMax - 3) + '...'
+            }
+
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x250C), ([string][char]0x2500 * 2), $titleFull, ([string][char]0x2500 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2510)) -ForegroundColor DarkCyan
+            $drawnLines++
+
+            $rendered = 0
+            for ($i = 0; $i -lt $items.Count; $i++) {
+                if ($rendered -ge $maxViewport) { break }
+                if ($i -lt $viewTop) { continue }
+                $item = $items[$i]
+
+                if ($item['Separator']) {
+                    $label = if ($item['Label']) { ' ' + $item['Label'] } else { '' }
+                    $avail = $w - 2
+                    if ($label.Length -gt $avail) { $label = $label.Substring(0, $avail) }
+                    $line = $label + (' ' * [math]::Max(0, $avail - $label.Length))
+                    $color = if ($item['Color']) { $item['Color'] } else { 'DarkGray' }
+                    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor DarkCyan
+                    Write-Host -NoNewline $line -ForegroundColor $color
+                    Write-Host ('{0}' -f $vLine) -ForegroundColor DarkCyan
+                    $drawnLines++
+                    $rendered++
+                    continue
+                }
+
+                $isSelected = ($selectableIdx.Count -gt 0 -and $selectableIdx[$sel] -eq $i)
+                $pointer = if ($isSelected) { '>' } else { ' ' }
+                $left = ' {0} {1}' -f $pointer, $item['Label']
+                $avail = $w - 4
+                $rightSpace = $avail - $left.Length
+                if ($rightSpace -lt 0) {
+                    $left = $left.Substring(0, $avail)
+                    $rightSpace = 0
+                }
+                $line = $left + (' ' * $rightSpace)
+
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor DarkCyan
+                if ($isSelected) {
+                    Write-Host -NoNewline $line -ForegroundColor White -BackgroundColor DarkBlue
+                }
+                else {
+                    Write-Host -NoNewline $line -ForegroundColor White
+                }
+                Write-Host (' {0}' -f $vLine) -ForegroundColor DarkCyan
+                $drawnLines++
+                $rendered++
+            }
+
+            Write-Host ('  {0}{1}{2}' -f ([char]0x2514), $hLine, ([char]0x2518)) -ForegroundColor DarkCyan
+            $drawnLines++
+            $helpText = '  {0}/{1} Navigate  Enter Select/Open  T Type path  Esc Cancel' -f ([char]0x2191), ([char]0x2193)
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor DarkGray
+            $drawnLines++
+
+            $lastLineCount = $drawnLines
+
+            $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            switch ($k.VirtualKeyCode) {
+                38 {
+                    if ($selectableIdx.Count -gt 0) {
+                        $sel = if ($sel -gt 0) { $sel - 1 } else { $selectableIdx.Count - 1 }
+                    }
+                }
+                40 {
+                    if ($selectableIdx.Count -gt 0) {
+                        $sel = if ($sel -lt $selectableIdx.Count - 1) { $sel + 1 } else { 0 }
+                    }
+                }
+                13 {
+                    if ($selectableIdx.Count -gt 0) {
+                        $selectedItem = $items[$selectableIdx[$sel]]
+                        switch ($selectedItem['Type']) {
+                            'Drive' { $currentPath = $selectedItem['Path']; $sel = 0; $viewTop = 0 }
+                            'Directory' { $currentPath = $selectedItem['Path']; $sel = 0; $viewTop = 0 }
+                            'Select' { return $selectedItem['Path'] }
+                            'Up' { $currentPath = $selectedItem['Path']; $sel = 0; $viewTop = 0 }
+                            'DriveList' { $currentPath = $null; $sel = 0; $viewTop = 0 }
+                        }
+                    }
+                }
+                27 { return $null }
+                default {
+                    $ch = [string]$k.Character
+                    if ($ch) {
+                        $ch = $ch.ToUpperInvariant()
+                        if ($ch -eq 'T' -or $ch -eq 'M') {
+                            [Console]::CursorVisible = $true
+                            Write-Host ''
+                            $typedPath = Read-Host '  Type folder path'
+                            [Console]::CursorVisible = $false
+                            if (-not [string]::IsNullOrWhiteSpace($typedPath)) {
+                                return $typedPath
+                            }
+                            Clear-Host
+                            $lastLineCount = 0
+                        }
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        [Console]::CursorVisible = $true
+    }
+}
+
 function Write-WinPulseDashboardLine {
     [CmdletBinding()]
     param(
@@ -5195,8 +5439,8 @@ function Invoke-WinPulseMigrationBackup {
         $destinationRoot = $BackupDestination.Trim()
     }
     else {
-        $destInput = Read-Host '  Where to save the backup?  (Enter for default, or a path like E:\Backups\Name)'
-        $destinationRoot = if ([string]::IsNullOrWhiteSpace($destInput)) { $defaultRoot } else { $destInput.Trim() }
+        $destPicked = Select-WinPulseFolderPath -Title 'Backup destination'
+        $destinationRoot = if ([string]::IsNullOrWhiteSpace($destPicked)) { $defaultRoot } else { $destPicked }
     }
 
     Write-Host ''
@@ -5748,7 +5992,7 @@ function Invoke-WinPulseMigrationAppReinstall {
         }
 
         if (-not $selectedBackupRoot) {
-            $manualInput = Read-Host '  Path to the backup folder (the one with apps\winget-packages.json)'
+            $manualInput = Select-WinPulseFolderPath -Title 'Backup folder'
             if ([string]::IsNullOrWhiteSpace($manualInput)) {
                 Write-Host '  No path entered. App reinstall cancelled.' -ForegroundColor Yellow
                 return $null
@@ -6012,7 +6256,7 @@ function Invoke-WinPulseMigrationVerify {
         }
 
         if (-not $selectedBackupRoot) {
-            $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+            $manualInput = Select-WinPulseFolderPath -Title 'Backup folder'
             if ([string]::IsNullOrWhiteSpace($manualInput)) {
                 Write-Host '  No path entered. Verify cancelled.' -ForegroundColor Yellow
                 return $null
@@ -6358,7 +6602,7 @@ function Invoke-WinPulseMigrationRestore {
         }
 
         if (-not $selectedBackupRoot) {
-            $manualInput = Read-Host '  Path to the backup folder (the one with manifest.json)'
+            $manualInput = Select-WinPulseFolderPath -Title 'Backup folder'
             if ([string]::IsNullOrWhiteSpace($manualInput)) {
                 Write-Host '  No path entered. Restore cancelled.' -ForegroundColor Yellow
                 return $null
@@ -6388,8 +6632,8 @@ function Invoke-WinPulseMigrationRestore {
         $restoreRoot = $RestoreRoot.Trim()
     }
     else {
-        $rootInput = Read-Host '  Restore into where?  (Enter for C:\Users)'
-        $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootInput)) { 'C:\Users' } else { $rootInput.Trim() }
+        $rootPicked = Select-WinPulseFolderPath -Title 'Restore root'
+        $restoreRoot = if ([string]::IsNullOrWhiteSpace($rootPicked)) { 'C:\Users' } else { $rootPicked }
     }
     $restoreAsUserInput = if ($nonInteractive) { $RestoreAsUser } else { Read-Host '  Restore into which user name? (Enter = keep original)' }
     try {
