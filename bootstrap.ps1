@@ -2450,7 +2450,11 @@ function Show-WinPulseDashboard {
     }
     else {
         $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })
-        $top = @($ordered | Select-Object -First 3)
+        # Show as many findings as fit without pushing the menu off-screen.
+        # ~30 rows = dashboard fixed overhead (borders, status rows) + menu height.
+        $winH = try { [Console]::WindowHeight } catch { 40 }
+        $maxF = [math]::Max(1, $winH - 30)
+        $top = @($ordered | Select-Object -First $maxF)
         foreach ($f in $top) {
             $fColor = if ($f.Severity -eq 'Critical') { 'Red' } else { 'Yellow' }
             $fBadge = if ($f.Severity -eq 'Critical') { '[CRIT]' } else { '[WARN]' }
