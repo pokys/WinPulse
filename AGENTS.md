@@ -17,7 +17,20 @@ fixing it unilaterally.
 ## Resume Here (next session)
 
 Current state: `main` and `dev/migration-preflight-foundation` are in sync at
-`0.13.1-20260603`. Clean tree,
+`0.14.0-20260603`. Clean tree.
+
+Done 2026-06-03 (second batch, not in previous note):
+- C23: CPU load % in Hardware row; WiFi SSID+signal in Network row (segment renderer).
+- C24: Findings count in separator `╠══ Findings (N) ══╣`; battery ChargePercent.
+- C25: Navigable Diagnostics menu replacing Findings & Details — 7 sections
+  (Findings/Drivers/Services/System/Hardware/Security/Network) each with
+  colored [CRIT]/[WARN]/[ OK ] badge, one-line summary hint, drill-down detail.
+  Badge/BadgeColor support added to Select-WinPulseMenuItem.
+- Adaptive findings: dashboard shows `max(1, WindowHeight-30)` findings so
+  menu never gets pushed off-screen on short terminals.
+- Dashboard: black bg + yellow borders; inline colored values (disk red if
+  >90%, BitLocker ON = cyan, Reboot YES = yellow); Scanned inside box.
+- Battery row with powercfg fallback (UTF-16 aware, all-mWh regex). Clean tree,
 nothing pending uncommitted. Verified: parser + ASCII clean, all fixture smoke
 tests pass non-elevated.
 
