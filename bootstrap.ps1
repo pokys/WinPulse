@@ -2211,7 +2211,7 @@ function Show-WinPulseDashboard {
     $ramState = Get-WinPulseStateFromPercent -percent $scan.Hardware.Ram.UsedPercent
     $cDisk = $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1
     $cDiskText = if ($cDisk) { 'C:{0}% {1}' -f $cDisk.UsedPercent, $cDisk.Free } else { 'C:N/A' }
-    $smartLabel = if ($scan.Hardware.SmartHealthy) { 'S:OK' } else { 'S:FAIL' }
+    $smartLabel = if ($scan.Hardware.SmartHealthy) { 'SMART OK' } else { 'SMART FAIL' }
     Write-WinPulseDashboardLine -Label 'Hardware' -Value ('RAM {0}% | {1} | {2}' -f $scan.Hardware.Ram.UsedPercent, $cDiskText, $smartLabel) -State $ramState
 
     # Security
@@ -2221,14 +2221,14 @@ function Show-WinPulseDashboard {
     }
     $avLabel = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'None' }
     if ($avLabel.Length -gt 18) { $avLabel = $avLabel.Substring(0, 18) }
-    $fwLabel = if ($scan.Security.FirewallEnabled) { 'ON' } else { 'OFF' }
+    $fwLabel = if ($scan.Security.FirewallEnabled) { 'Firewall ON' } else { 'Firewall OFF' }
     $bitLockerOn = $false
     if ($scan.Security.BitLocker -and $scan.Security.BitLocker.Count -gt 0) {
         $bitLockerOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0
     }
-    $blLabel = if ($bitLockerOn) { 'ON' } else { 'OFF' }
+    $blLabel = if ($bitLockerOn) { 'BitLocker ON' } else { 'BitLocker OFF' }
     $secState = if ($scan.Security.Antivirus.EffectiveRealtimeProtection -and $scan.Security.FirewallEnabled) { 'OK' } else { 'Critical' }
-    Write-WinPulseDashboardLine -Label 'Security' -Value ('AV {0} | FW {1} | BL {2}' -f $avLabel, $fwLabel, $blLabel) -State $secState
+    Write-WinPulseDashboardLine -Label 'Security' -Value ('AV {0} | {1} | {2}' -f $avLabel, $fwLabel, $blLabel) -State $secState
 
     # Network
     $netState = if ($scan.Network.Internet) { 'OK' } else { 'Warning' }
@@ -2236,7 +2236,7 @@ function Show-WinPulseDashboard {
 
     # Health
     $healthState = if ($scan.Health.CriticalLast24Hours -eq 0 -and -not $scan.Health.PendingReboot -and $scan.Health.BsodRecentCount -eq 0) { 'OK' } elseif ($scan.Health.BsodRecentCount -gt 0 -or $scan.Health.CriticalLast24Hours -gt 0) { 'Critical' } else { 'Warning' }
-    Write-WinPulseDashboardLine -Label 'Health' -Value ('BSOD {0} | Crit24 {1} | Reboot {2}' -f $scan.Health.BsodRecentCount, $scan.Health.CriticalLast24Hours, $(if ($scan.Health.PendingReboot) { 'YES' } else { 'No' })) -State $healthState
+    Write-WinPulseDashboardLine -Label 'Health' -Value ('BSOD {0} | Events(24h) {1} | Reboot {2}' -f $scan.Health.BsodRecentCount, $scan.Health.CriticalLast24Hours, $(if ($scan.Health.PendingReboot) { 'YES' } else { 'No' })) -State $healthState
 
     # License
     if ($scan.License) {
