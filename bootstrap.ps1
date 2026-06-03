@@ -1760,6 +1760,9 @@ function Select-WinPulseMultiMenuItem {
     if ($selectableIdx.Count -eq 0) { return @() }
 
     $checked = @{}
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        if (-not $Items[$i]['Separator'] -and $Items[$i]['Selected']) { $checked[$i] = $true }
+    }
     $interactive = $true
     try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
 
@@ -5792,17 +5795,25 @@ function Invoke-WinPulseMigrationAppReinstall {
             }
             catch {}
         }
+        $notInstalledIds  = @($packageIds | Where-Object { -not $alreadyInstalledSet.ContainsKey($_.ToLowerInvariant()) })
+        $alreadyInstalledIds = @($packageIds | Where-Object { $alreadyInstalledSet.ContainsKey($_.ToLowerInvariant()) })
         $items = @()
-        foreach ($id in @($packageIds)) {
-            $isInstalled = $alreadyInstalledSet.ContainsKey($id.ToLowerInvariant())
-            $items += @{
-                Label = $id
-                Key   = $id
-                Hint  = if ($isInstalled) { 'installed' } else { 'not installed' }
-                Color = if ($isInstalled) { 'DarkGray' } else { 'White' }
-            }
+        foreach ($id in $notInstalledIds) {
+            $items += @{ Label = $id; Key = $id; Hint = 'not installed'; Color = 'White'; Selected = $true }
+        }
+        if ($notInstalledIds.Count -gt 0 -and $alreadyInstalledIds.Count -gt 0) {
+            $items += @{ Separator = $true; Label = 'already installed' }
+        }
+        foreach ($id in $alreadyInstalledIds) {
+            $items += @{ Label = $id; Key = $id; Hint = 'installed'; Color = 'DarkGray' }
         }
         $selectedIds = @(Select-WinPulseMultiMenuItem -Title 'Which apps should be reinstalled?' -Items $items)
+        if ($selectedIds.Count -gt 0) {
+            $selInstalled = @($selectedIds | Where-Object { $alreadyInstalledSet.ContainsKey($_.ToLowerInvariant()) }).Count
+            $selMissing   = $selectedIds.Count - $selInstalled
+            Write-Host ''
+            Write-Host ('  Selected: {0}  |  Not installed: {1}  |  Already installed: {2}' -f $selectedIds.Count, $selMissing, $selInstalled) -ForegroundColor DarkCyan
+        }
     }
 
     if ($selectedIds.Count -eq 0) {
@@ -5825,13 +5836,6 @@ function Invoke-WinPulseMigrationAppReinstall {
             return $null
         }
         $dryRun = ($action -eq 'D')
-        if (-not $dryRun) {
-            $confirm = Read-Host '  Type YES to install selected apps'
-            if ($confirm -ne 'YES') {
-                Write-Host '  Not confirmed. App reinstall cancelled.' -ForegroundColor Yellow
-                return $null
-            }
-        }
     }
 
     Write-Host ''
@@ -5845,7 +5849,9 @@ function Invoke-WinPulseMigrationAppReinstall {
     }
 
     $results = @()
+    $installIdx = 0
     foreach ($id in @($selectedIds)) {
+        $installIdx++
         $commandText = New-WinPulseWingetInstallCommandText -packageId $id
         if ($dryRun) {
             Write-Host ('  DRY RUN: {0}' -f $commandText) -ForegroundColor Cyan
@@ -5859,7 +5865,7 @@ function Invoke-WinPulseMigrationAppReinstall {
             continue
         }
 
-        Write-Host ('  Installing {0}...' -f $id) -ForegroundColor DarkGray
+        Write-Host ('  Installing {0}... ({1}/{2})' -f $id, $installIdx, $selectedIds.Count) -ForegroundColor DarkGray
         $wingetPath = [string]$wingetCommand.Source
         $output = & $wingetPath install --id $id -e --accept-package-agreements --accept-source-agreements 2>&1
         $exitCode = $LASTEXITCODE
