@@ -1589,139 +1589,354 @@ Acceptance (non-elevated, no visual check needed):
 Out of scope: changing what `Get-WinPulseStartupAnalysis` collects, filtering by
 DisplayName, adding more services to the whitelist beyond those listed above.
 
-### Task C30 - Remote backup via SMB C$ (Phase 1 MVP)
+### Task C30 - Live Migration (pull from remote PC via SMB C$)
 
-Why: technicians often need to pull a user's data from a remote PC over the
-network without logging into it physically. WinPulse's robocopy engine already
-handles UNC paths natively and `Get-WinPulseMigrationProfiles` already accepts a
-`-Root` parameter from Task C1. This task adds source selection and UNC plumbing.
+Why: a technician setting up a new PC wants one guided workflow — enter the old
+PC's hostname, pick users and folders, confirm — and WinPulse pulls the data
+over the network and drops it into the new machine's C:\Users. No manual steps,
+no separate backup-then-restore dance. This is a new first-class mode built on
+top of the existing backup and restore engines.
 
-Safety boundaries (FIXED - do not change without asking Claude):
-- Use the technician's current Windows token only (transparent Kerberos/NTLM).
-  No `Get-Credential`, no `New-SmbMapping`, no credential prompts in Phase 1.
+#### Safety boundaries (FIXED — do not change without asking Claude)
+
+- Use the technician's current Windows token (transparent Kerberos/NTLM auth).
+  No `Get-Credential`, no `New-SmbMapping`, no credential prompts.
 - No PSRemoting (`Enter-PSSession`, `Invoke-Command`), no remote WMI execution.
-  SMB file copy does not execute code on the remote host - this is by design.
-- Locked files on a live PC (NTUSER.DAT, open browser DBs, OST) will silently
-  fail to copy. This is expected for live machines; document it in the plan
-  summary but do not treat it as a backup failure.
-- The remote root must resolve to a UNC path `\\HOST\C$\Users`. Reject anything
-  that does not produce a valid UNC.
+  The copy is purely SMB file I/O — robocopy over `\\HOST\C$\Users`. No code
+  runs on the remote host.
+- Locked files on a live source PC (NTUSER.DAT, open browser DBs, open OST
+  files) will silently fail to copy. This is expected and acceptable for a live
+  machine. Show a clear note in the plan; do not treat it as a failure.
+- The remote UNC root must be `\\HOSTNAME\C$\Users`. Reject anything that does
+  not produce this form.
+- The local temp backup is kept after migration so the technician can verify
+  or re-run restore. Never auto-delete it.
 
-Scope:
+#### Overview of the new mode
 
-**1. Top-level parameter**
+```
+MigrationLive
+  Invoke-WinPulseMigrationLive
+    Step 1  Get remote hostname (interactive prompt or -LiveSourceHost param)
+    Step 2  Reachability check  ->  Get-WinPulseRemoteUsersRoot
+    Step 3  Profile discovery   ->  Get-WinPulseMigrationProfiles -Root \\HOST\C$\Users
+    Step 4  User selection      ->  Select-WinPulseBackupUsers  (reuse existing)
+    Step 5  Folder selection    ->  Select-WinPulseBackupFolders  (reuse existing)
+    Step 6  Plan + confirmation
+    Step 7  Phase 1 Pull        ->  Invoke-WinPulseMigrationBackup (non-interactive params)
+    Step 8  Phase 2 Restore     ->  Invoke-WinPulseMigrationRestore (non-interactive params)
+    Step 9  Summary
+```
 
-Add `-BackupSourceHost <string>` to the top `param()` block. Plumb it through
-`Invoke-WinPulseMode` to `Invoke-WinPulseMigrationBackup` and the elevation
-passthrough (mirror `-BackupHashSample` and other backup switches).
+Steps 7 and 8 call the EXISTING backup and restore functions in full
+non-interactive mode (all params provided). Do NOT duplicate their copy,
+verification, manifest, or report logic. This keeps Live Migration a thin
+orchestrator over proven code.
 
-**2. Helper: `Get-WinPulseRemoteUsersRoot`**
+#### 1. Top-level parameters
 
-Add near the other `Get-WinPulse*` migration helpers:
+Add to the top `param()` block:
+
+```powershell
+[string]$LiveSourceHost   = $null,
+[string[]]$LiveUsers      = @(),
+[string[]]$LiveFolders    = @(),
+[string]$LiveDestination  = $null,
+[string]$LiveRestoreRoot  = $null,
+[switch]$LiveExecute
+```
+
+Plumb all six through `Invoke-WinPulseMode` to `Invoke-WinPulseMigrationLive`
+(mirror how `-BackupUsers`, `-BackupFolders`, etc. are plumbed for
+`Invoke-WinPulseMigrationBackup`). Add `MigrationLive` to the elevation
+passthrough so it auto-elevates (it needs admin for C$ access and writing to
+C:\Users).
+
+#### 2. Mode registration
+
+Add `'MigrationLive'` to every `-Mode` ValidateSet in the file (top param block,
+`Invoke-WinPulseMode` switch, smoke wrapper). Add a `switch` case in
+`Invoke-WinPulseMode` that calls `Invoke-WinPulseMigrationLive` and passes all
+six Live* params through. Add `MigrationLive` to the auto-elevate list.
+
+#### 3. Migration menu entry
+
+In `Show-WinPulseMigrationMenu`, add ONE item before the existing Back/Esc entry:
+
+```powershell
+@{ Label = 'Live Migration'; Key = 'V'; Hint = 'Pull data from a remote PC directly' }
+```
+
+And its handler calls `Invoke-WinPulseMode -Mode MigrationLive` (no Live* params
+— fully interactive). Key 'V' is free; do not reuse existing keys.
+
+#### 4. Helper: `Get-WinPulseRemoteUsersRoot`
+
+Add near the other migration helper functions:
 
 ```powershell
 function Get-WinPulseRemoteUsersRoot {
-    param([Parameter(Mandatory)][string]$Hostname)
-    $hostname = $Hostname.Trim().TrimStart('\')
-    if ([string]::IsNullOrWhiteSpace($hostname)) { return $null }
-    $uncRoot = '\\{0}\C$\Users' -f $hostname
-    Write-Host ('  Checking reachability: {0} ...' -f $uncRoot) -ForegroundColor Gray
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Hostname)
+    $h = $Hostname.Trim().TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($h)) { return $null }
+    $adminShare = '\\{0}\C$' -f $h
+    $uncRoot    = '{0}\Users' -f $adminShare
+    Write-Host ('  Checking reachability of {0} ...' -f $adminShare) -ForegroundColor Gray
     try {
-        if (-not (Test-Path -LiteralPath ('\\{0}\C$' -f $hostname) -ErrorAction Stop)) {
-            Write-Host '  Remote C$ not reachable. Check hostname, admin rights and firewall.' -ForegroundColor Red
+        if (-not (Test-Path -LiteralPath $adminShare -ErrorAction Stop)) {
+            Write-Host '  Not reachable. Verify hostname, admin rights, C$ share and firewall.' `
+                       -ForegroundColor Red
             return $null
         }
     }
     catch {
-        Write-Host ('  Remote C$ not reachable: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host ('  Not reachable: {0}' -f $_.Exception.Message) -ForegroundColor Red
         return $null
     }
-    Write-Host '  Remote C$ reachable.' -ForegroundColor Green
+    Write-Host ('  Reachable: {0}' -f $uncRoot) -ForegroundColor Green
     return $uncRoot
 }
 ```
 
-**3. Source selection in `Invoke-WinPulseMigrationBackup`**
+#### 5. Main function: `Invoke-WinPulseMigrationLive`
 
-At the very start of `Invoke-WinPulseMigrationBackup`, before profile discovery,
-determine the profiles root. This REPLACES the existing `$profilesRoot = $null`
-or `-BackupProfilesRoot` default assignment. Use the existing `-BackupProfilesRoot`
-parameter to pass the UNC root through to `Get-WinPulseMigrationProfiles -Root`
-(it already exists from Task C1 — do not add a second root parameter).
+Full function signature and flow. Keep each step clearly separated with a
+comment header so the code is readable.
 
-Non-interactive (when `-BackupSourceHost` is provided):
 ```powershell
-if (-not [string]::IsNullOrWhiteSpace($BackupSourceHost)) {
-    $resolvedRoot = Get-WinPulseRemoteUsersRoot -Hostname $BackupSourceHost
-    if (-not $resolvedRoot) { return }
-    $BackupProfilesRoot = $resolvedRoot
-}
+function Invoke-WinPulseMigrationLive {
+    [CmdletBinding()]
+    param(
+        [string]$LiveSourceHost  = $null,
+        [string[]]$LiveUsers     = @(),
+        [string[]]$LiveFolders   = @(),
+        [string]$LiveDestination = $null,
+        [string]$LiveRestoreRoot = $null,
+        [switch]$LiveExecute
+    )
 ```
 
-Interactive (when `-BackupSourceHost` is absent AND `-BackupProfilesRoot` is not
-already set by the caller):
+**Determine interactive vs non-interactive:**
+
 ```powershell
-$srcChoice = Select-WinPulseMenuItem -Title 'Backup source' -Items @(
-    @{ Label = 'This PC';              Key = 'L'; Hint = 'Local C:\Users' }
-    @{ Label = 'Remote PC  (via C$)';  Key = 'R'; Hint = 'Pull from another PC over the network' }
-)
-if (-not $srcChoice) { return }
-if ($srcChoice -eq 'R') {
-    $hostname = Read-Host '  Remote hostname or IP'
+$nonInteractive = (-not [string]::IsNullOrWhiteSpace($LiveSourceHost))
+```
+
+**Step 1 — Get hostname:**
+
+```powershell
+if ($nonInteractive) {
+    $hostname = $LiveSourceHost.Trim()
+} else {
+    Clear-Host
+    Write-WinPulseHeader -title 'Live Migration'
+    Write-Host ''
+    Write-Host '  Pull data from a remote PC directly over the network.' -ForegroundColor Gray
+    Write-Host '  The remote PC must be on, reachable, and you need admin rights on it.' -ForegroundColor Gray
+    Write-Host ''
+    $hostname = Read-Host '  Source PC hostname or IP'
     if ([string]::IsNullOrWhiteSpace($hostname)) { return }
-    $resolvedRoot = Get-WinPulseRemoteUsersRoot -Hostname $hostname
-    if (-not $resolvedRoot) { return }
-    $BackupProfilesRoot = $resolvedRoot
 }
-# else: BackupProfilesRoot stays null = existing default (C:\Users)
 ```
 
-Guard the interactive block with the same non-interactive check used elsewhere
-in the function (i.e. do NOT show the picker when the caller is already running
-non-interactively via params).
+**Step 2 — Reachability:**
 
-**4. Manifest**
-
-Add `SourceHost` to the manifest Tool section:
 ```powershell
-SourceHost = if (-not [string]::IsNullOrWhiteSpace($BackupSourceHost)) { $BackupSourceHost } else { $env:COMPUTERNAME }
+$remoteUsersRoot = Get-WinPulseRemoteUsersRoot -Hostname $hostname
+if (-not $remoteUsersRoot) { if (-not $nonInteractive) { Wait-WinPulseKey }; return }
 ```
 
-**5. Plan/summary display**
+**Step 3 — Profile discovery:**
 
-When a remote root is in use, add two lines to the pre-copy plan output
-(near where `Excluded files` and `Opt-in scope` are shown):
+```powershell
+$profiles = @(Get-WinPulseMigrationProfiles -Root $remoteUsersRoot)
+if ($profiles.Count -eq 0) {
+    Write-Host '  No user profiles found on remote PC.' -ForegroundColor Yellow
+    if (-not $nonInteractive) { Wait-WinPulseKey }
+    return
+}
 ```
-  Source host : \\HOSTNAME\C$\Users
-  Note: locked files on a live PC (open DBs, NTUSER.DAT) will be skipped.
+
+**Step 4 — User selection:**
+
+```powershell
+if ($nonInteractive -and $LiveUsers.Count -gt 0) {
+    $selectedUsers = @($profiles | Where-Object { $_.UserName -in $LiveUsers })
+} else {
+    $selectedUsers = @(Select-WinPulseBackupUsers -profiles $profiles)
+    if ($selectedUsers.Count -eq 0) { return }
+}
 ```
 
-**6. Repeat-command hint (C10)**
+**Step 5 — Folder selection:**
 
-In the post-backup repeat-command hint, append `-BackupSourceHost <hostname>`
-when a remote source was used.
+```powershell
+if ($nonInteractive -and $LiveFolders.Count -gt 0) {
+    $selectedFolders = $LiveFolders
+} else {
+    $selectedFolders = @(Select-WinPulseBackupFolders)
+    if ($selectedFolders.Count -eq 0) { return }
+}
+```
 
-**7. Visual verification required**
+**Step 6 — Destination and restore root:**
 
-The two-item source picker (This PC / Remote PC) uses `Select-WinPulseMenuItem`.
-Build on `dev`, validate parser + ASCII + all smoke modes, then report.
-Claude will verify the picker visually before merge to main.
+```powershell
+# Local temp backup destination
+if ([string]::IsNullOrWhiteSpace($LiveDestination)) {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
+    $destination = 'C:\WinPulseBackups\LiveMigration-{0}-{1}' -f $hostname, $stamp
+} else {
+    $destination = $LiveDestination
+}
 
-Acceptance (non-elevated, temp fixtures):
+# Local restore root
+$restoreRoot = if ([string]::IsNullOrWhiteSpace($LiveRestoreRoot)) { 'C:\Users' } else { $LiveRestoreRoot }
+```
 
-- Parser clean, ASCII check empty, git diff --check clean.
-- All four migration smoke modes exit 0. Smoke uses local `-BackupProfilesRoot`
-  so the remote path is never exercised - this confirms nothing regressed.
-- Code review: `Get-WinPulseRemoteUsersRoot` contains no PSRemoting or remote
-  WMI; the UNC root is passed through the existing `-BackupProfilesRoot`
-  mechanism; the locked-files note appears in the plan summary when remote is used.
-- Visual check (Claude before merge): source picker shows "This PC / Remote PC";
-  selecting Remote prompts for hostname; unreachable host prints a clear red error
-  and cancels without crashing.
+**Step 6b — Plan display and confirmation (interactive only):**
 
-Out of scope: `Get-Credential`, `New-SmbMapping`, remote restore or verify,
-VSS shadow copies, drive label enumeration, incremental over slow links,
-PSRemoting or any remote code execution.
+When NOT non-interactive, show a summary before proceeding:
+
+```powershell
+if (-not $nonInteractive) {
+    Write-Host ''
+    Write-Host '  Migration plan:' -ForegroundColor White
+    Write-Host ('    Source  : {0}' -f $remoteUsersRoot) -ForegroundColor Gray
+    Write-Host ('    Users   : {0}' -f ($selectedUsers | ForEach-Object { $_.UserName }) -join ', ') `
+               -ForegroundColor Gray
+    Write-Host ('    Folders : {0}' -f ($selectedFolders -join ', ')) -ForegroundColor Gray
+    Write-Host ('    Temp    : {0}' -f $destination) -ForegroundColor Gray
+    Write-Host ('    Restore : {0}' -f $restoreRoot) -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  NOTE: locked files on the live source PC (open DBs, NTUSER.DAT)' `
+               -ForegroundColor Yellow
+    Write-Host '        will be skipped — this is normal for a running machine.' `
+               -ForegroundColor Yellow
+    Write-Host ''
+    $confirm = Select-WinPulseMenuItem -Title 'Start live migration?' -Items @(
+        @{ Label = 'Yes — copy now'; Key = 'Y'; Hint = 'Pull data and restore locally' }
+        @{ Label = 'No — cancel';    Key = 'N'; Hint = '' }
+    )
+    if ($confirm -ne 'Y') { return }
+    $LiveExecute = $true
+}
+```
+
+**Step 7 — Phase 1: Pull (remote backup):**
+
+```powershell
+Write-Host ''
+Write-Host '  ═══ Phase 1/2: Pulling data from remote PC ═══' -ForegroundColor White
+Write-Host ''
+
+Invoke-WinPulseMigrationBackup `
+    -BackupProfilesRoot $remoteUsersRoot `
+    -BackupUsers        ($selectedUsers | ForEach-Object { $_.UserName }) `
+    -BackupFolders      $selectedFolders `
+    -BackupDestination  $destination `
+    -BackupExecute:$LiveExecute
+```
+
+If `$LiveExecute` is false (dry-run), the backup runs as dry-run too and shows
+the plan without copying.
+
+**Step 8 — Phase 2: Restore (local):**
+
+Only run Phase 2 when Phase 1 was not a dry-run AND the destination folder exists:
+
+```powershell
+if ($LiveExecute -and (Test-Path -LiteralPath $destination)) {
+    Write-Host ''
+    Write-Host '  ═══ Phase 2/2: Restoring data to local PC ═══' -ForegroundColor White
+    Write-Host ''
+
+    Invoke-WinPulseMigrationRestore `
+        -RestoreBackupPath $destination `
+        -RestoreRoot       $restoreRoot `
+        -RestoreFolders    $selectedFolders `
+        -RestoreExecute
+}
+```
+
+**Step 9 — Summary:**
+
+```powershell
+Write-Host ''
+if ($LiveExecute) {
+    Write-Host '  Live migration complete.' -ForegroundColor Green
+    Write-Host ('  Source backup is kept at: {0}' -f $destination) -ForegroundColor Gray
+    Write-Host '  Run MigrationVerify on the backup folder to confirm integrity.' -ForegroundColor Gray
+} else {
+    Write-Host '  Dry-run complete. Add -LiveExecute to copy for real.' -ForegroundColor Yellow
+    Write-Host ('  Equivalent command:') -ForegroundColor Gray
+    $userList    = ($selectedUsers | ForEach-Object { $_.UserName }) -join ','
+    $folderList  = $selectedFolders -join ','
+    Write-Host ('  bootstrap.ps1 -Mode MigrationLive -LiveSourceHost "{0}" ' -f $hostname) `
+               -ForegroundColor Gray
+    Write-Host ('    -LiveUsers {0} -LiveFolders {1} -LiveExecute' -f $userList, $folderList) `
+               -ForegroundColor Gray
+}
+if (-not $nonInteractive) { Wait-WinPulseKey }
+```
+
+#### 6. Smoke test coverage
+
+Add `'MigrationLive'` to the smoke wrapper `ValidateSet`. The smoke test for
+this mode should:
+- Build a fixture source profile (like MigrationBackup smoke does) under a temp
+  folder simulating the remote root (use `-LiveSourceHost` is not testable without
+  a real network; instead pass `-LiveDestination` and fake the remote root as a
+  local temp path via the `Get-WinPulseMigrationProfiles -Root` mechanism).
+- Since `Get-WinPulseRemoteUsersRoot` would fail on a local path, the smoke test
+  should call `Invoke-WinPulseMigrationLive` with a MOCKED remote root — skip
+  the reachability helper and pass `-BackupProfilesRoot` directly to the backup
+  call. Add a `-LiveProfilesRoot` internal override param OR just make the smoke
+  test bypass `Get-WinPulseRemoteUsersRoot` by passing a pre-validated local
+  temp root via a test-only code path.
+
+  **Simplest viable approach:** Add an internal undocumented `-_LiveProfilesRoot`
+  override param that, when set, skips the reachability check and uses the
+  provided value as `$remoteUsersRoot` directly. Use this ONLY in the smoke test.
+  Name it with a leading underscore to signal it is test-only.
+
+- Assert: dry-run (no `-LiveExecute`) prints the plan and exits 0. The smoke
+  test does not need to exercise the real copy.
+- Parser clean, ASCII check, all existing smoke modes still exit 0.
+
+#### 7. Visual verification (Claude before merge)
+
+This task touches the Migration menu (new item) and the interactive confirmation
+picker. Build on `dev`, run parser + ASCII + all smoke modes, report. Claude will
+verify:
+- Migration menu shows "Live Migration" item
+- Selecting it prompts for hostname
+- Unreachable host shows clear red error and cancels
+- Plan display is readable
+- Confirmation picker works
+- Phase separators are visible during copy
+
+Do NOT merge to main until Claude approves visually.
+
+#### Acceptance summary
+
+- `'MigrationLive'` in every ValidateSet; auto-elevate list updated.
+- `Get-WinPulseRemoteUsersRoot` does only `Test-Path` on `\\HOST\C$` — no
+  PSRemoting, no WMI, no credential prompts.
+- Phase 1 calls `Invoke-WinPulseMigrationBackup` with all params set (fully
+  non-interactive). Phase 2 calls `Invoke-WinPulseMigrationRestore` with all
+  params set. Neither copy loop, manifest, verification, nor report logic is
+  duplicated in `Invoke-WinPulseMigrationLive`.
+- Dry-run (no `-LiveExecute`) runs Phase 1 as dry-run, skips Phase 2, prints
+  the equivalent command.
+- Locked-file note is shown in the plan before confirmation.
+- Local temp backup is never auto-deleted.
+- Parser clean, ASCII-only, StrictMode-safe, PS 5.1 compatible.
+- All existing smoke modes still exit 0.
+
+Out of scope: `Get-Credential`, `New-SmbMapping`, VSS shadow copies, remote
+restore or verify, incremental copy, drive label enumeration, PSRemoting.
 
 ## Project Direction
 
