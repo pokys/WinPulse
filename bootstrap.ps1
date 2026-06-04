@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.13.1-20260603'
+$script:WinPulseVersion = '0.14.1-20260604'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -740,6 +740,17 @@ function Get-WinPulseDriverAnalysis {
         }
     }
 
+    $problemDevices = @()
+    try {
+        $pnpOut = & pnputil /enum-devices /problem /ids 2>$null
+        if ($LASTEXITCODE -eq 0 -and $pnpOut) {
+            $problemDevices = @($pnpOut |
+                Where-Object { $_ -match '^\s*Instance ID:\s+(.+)$' } |
+                ForEach-Object { $Matches[1].Trim() })
+        }
+    }
+    catch { }
+
     $unsigned = @()
     $recentlyChanged = @()
     try {
@@ -766,6 +777,7 @@ function Get-WinPulseDriverAnalysis {
 
     return [ordered]@{
         Problematic     = $problematic
+        ProblemDevices  = $problemDevices
         Unsigned        = $unsigned
         RecentlyChanged = $recentlyChanged
     }
@@ -1268,6 +1280,7 @@ function Invoke-CoreScan {
             DomainJoined = $false
             Domain = 'Unknown'
             Firmware = 'Unknown'
+            DumpInfo = $null
         }
         Hardware    = [ordered]@{
             Ram = [ordered]@{
@@ -1353,11 +1366,31 @@ function Invoke-CoreScan {
             DomainJoined = $domainJoined
             Domain = $domainLabel
             Firmware = $firmwareMode
+            DumpInfo = $null
         }
     }
     catch {
         $result.Errors += "SYSTEM scan failed: $($_.Exception.Message)"
     }
+
+    $dumpInfo = [ordered]@{
+        MinidumpCount  = 0
+        MinidumpNewest = $null
+        FullDumpExists = $false
+    }
+    try {
+        $mdPath = Join-Path -Path $env:SystemRoot -ChildPath 'Minidump'
+        if (Test-Path -LiteralPath $mdPath -ErrorAction SilentlyContinue) {
+            $mdFiles = @(Get-ChildItem -LiteralPath $mdPath -Filter '*.dmp' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+            $dumpInfo['MinidumpCount'] = $mdFiles.Count
+            if ($mdFiles.Count -gt 0) {
+                $dumpInfo['MinidumpNewest'] = $mdFiles[0].LastWriteTime
+            }
+        }
+        $dumpInfo['FullDumpExists'] = Test-Path -LiteralPath (Join-Path -Path $env:SystemRoot -ChildPath 'memory.dmp') -ErrorAction SilentlyContinue
+    }
+    catch { }
+    $result.System['DumpInfo'] = $dumpInfo
 
     try {
         if (-not $os) { $os = Get-CimInstance -ClassName Win32_OperatingSystem }
@@ -1752,13 +1785,16 @@ function Select-WinPulseMenuItem {
                     continue
                 }
 
-                $isSelected = ($selectableIdx[$sel] -eq $i)
-                $pointer = if ($isSelected) { '>' } else { ' ' }
-                $keyTag = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
-                $hint = if ($item['Hint']) { $item['Hint'] } else { '' }
-                $color = if ($item['Color']) { $item['Color'] } else { 'White' }
+                $isSelected  = ($selectableIdx[$sel] -eq $i)
+                $pointer     = if ($isSelected) { '>' } else { ' ' }
+                $keyTag      = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
+                $hint        = if ($item['Hint']) { $item['Hint'] } else { '' }
+                $color       = if ($item['Color']) { $item['Color'] } else { 'White' }
+                $badge       = if ($item['Badge']) { [string]$item['Badge'] } else { '' }
+                $badgeColor  = if ($item['BadgeColor']) { [string]$item['BadgeColor'] } else { $color }
 
-                $left = ' {0} {1} {2}' -f $pointer, $keyTag, $item['Label']
+                $labelText = [string]$item['Label']
+                $left = if ($badge) { ' {0} {1} {2} {3}' -f $pointer, $keyTag, $badge, $labelText } else { ' {0} {1} {2}' -f $pointer, $keyTag, $labelText }
                 $avail = $w - 4
                 $rightSpace = $avail - $left.Length
                 if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
@@ -1772,6 +1808,14 @@ function Select-WinPulseMenuItem {
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
                 if ($isSelected) {
                     Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
+                }
+                elseif ($badge) {
+                    $prefixPart = ' {0} {1} ' -f $pointer, $keyTag
+                    $badgePart  = '{0} ' -f $badge
+                    $afterLabel = if ($hint -and $rightSpace -gt ($hint.Length + 2)) { (' ' * ($rightSpace - $hint.Length)) + $hint } else { ' ' * $rightSpace }
+                    Write-Host -NoNewline $prefixPart -ForegroundColor Gray
+                    Write-Host -NoNewline $badgePart  -ForegroundColor $badgeColor
+                    Write-Host -NoNewline ($labelText + $afterLabel) -ForegroundColor $color
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor Gray
@@ -2506,6 +2550,25 @@ function Get-WinPulseTriageFindings {
     if ($scan.Health.BsodRecentCount -gt 0) {
         $findings += [pscustomobject]@{ Severity = 'Critical'; Message = ('BSOD events (7d): {0}' -f $scan.Health.BsodRecentCount) }
     }
+    $dumpInfo = if ($scan.System) { Get-WinPulseObjectValue -inputobject $scan.System -name 'DumpInfo' } else { $null }
+    if ($dumpInfo) {
+        $minidumpCountValue = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpCount'
+        $minidumpCount = if ($null -ne $minidumpCountValue) { [int]$minidumpCountValue } else { 0 }
+        if ($minidumpCount -gt 0) {
+            $newest = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpNewest'
+            $newestText = 'unknown'
+            if ($newest -is [datetime]) {
+                $newestText = $newest.ToString('yyyy-MM-dd HH:mm')
+            }
+            elseif ($null -ne $newest -and -not [string]::IsNullOrWhiteSpace([string]$newest)) {
+                $newestText = [string]$newest
+            }
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('{0} minidump(s) found (newest: {1}). Machine may have crashed recently.' -f $minidumpCount, $newestText) }
+        }
+        if ([bool](Get-WinPulseObjectValue -inputobject $dumpInfo -name 'FullDumpExists')) {
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'Full memory dump found in Windows root. Machine has had a kernel crash.' }
+        }
+    }
     if ($scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' -and $_.UsedPercent -ge 90 }) {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'System drive C: usage is above 90%.' }
     }
@@ -2521,6 +2584,16 @@ function Get-WinPulseTriageFindings {
     if ($scan.Drivers -and $scan.Drivers.Problematic.Count -gt 0) {
         $sev = if ($scan.Drivers.Problematic.Count -gt 3) { 'Critical' } else { 'Warning' }
         $findings += [pscustomobject]@{ Severity = $sev; Message = ('Problematic device drivers: {0}' -f $scan.Drivers.Problematic.Count) }
+    }
+    $problemDevicesRaw = if ($scan.Drivers) { Get-WinPulseObjectValue -inputobject $scan.Drivers -name 'ProblemDevices' } else { @() }
+    $problemDevices = @($problemDevicesRaw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($problemDevices.Count -gt 0) {
+        $shownIds = @($problemDevices | Select-Object -First 2)
+        $idText = $shownIds -join ', '
+        if ($problemDevices.Count -gt 2) {
+            $idText = '{0}... (see Diagnostics)' -f $idText
+        }
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('{0} device(s) in error state: {1}' -f $problemDevices.Count, $idText) }
     }
     if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 3) {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Failed auto-start services: {0}' -f $scan.Startup.FailedAutoServices.Count) }
@@ -10529,6 +10602,405 @@ function Show-WinPulseFindingsDetail {
     Wait-WinPulseKey
 }
 
+function Get-WinPulseDiagnosticsBadge {
+    [CmdletBinding()]
+    param([string]$State = 'OK')
+
+    switch ($State) {
+        'Critical' { return '[CRIT]' }
+        'Warning'  { return '[WARN]' }
+        default    { return '[ OK ]' }
+    }
+}
+
+function Get-WinPulseDiagnosticsColor {
+    [CmdletBinding()]
+    param([string]$State = 'OK')
+
+    switch ($State) {
+        'Critical' { return 'Red' }
+        'Warning'  { return 'Yellow' }
+        default    { return 'White' }
+    }
+}
+
+function Get-WinPulseDiagnosticsCpuShort {
+    [CmdletBinding()]
+    param([pscustomobject]$scan)
+
+    if (-not $scan.HardwareDetail -or -not $scan.HardwareDetail.CPU -or -not $scan.HardwareDetail.CPU.Model) {
+        return 'CPU N/A'
+    }
+    $cpu = [string]$scan.HardwareDetail.CPU.Model
+    if ($cpu -ne 'N/A') {
+        $cpu = ($cpu -replace '\s*(CPU|Processor|\(R\)|\(TM\)|@\s*[\d.]+GHz)\s*', ' ').Trim() -replace '\s+', ' '
+    }
+    if ($cpu.Length -gt 24) { $cpu = $cpu.Substring(0, 24) }
+    if ([string]::IsNullOrWhiteSpace($cpu)) { return 'CPU N/A' }
+    return $cpu
+}
+
+function Show-WinPulseDiagnosticsFindings {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Findings'
+    $findings = @(Get-WinPulseTriageFindings -scan $scan)
+    if ($findings.Count -eq 0) {
+        Write-Host '  No issues detected.' -ForegroundColor Green
+        Write-Host ''
+        Wait-WinPulseKey
+        return
+    }
+
+    foreach ($f in @($findings | Where-Object { $_.Severity -eq 'Critical' })) {
+        Write-Host ('  [CRIT] {0}' -f $f.Message) -ForegroundColor Red
+    }
+    foreach ($f in @($findings | Where-Object { $_.Severity -ne 'Critical' })) {
+        Write-Host ('  [WARN] {0}' -f $f.Message) -ForegroundColor Yellow
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsDrivers {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Drivers'
+    $problematic = if ($scan.Drivers -and $scan.Drivers.Problematic) { @($scan.Drivers.Problematic) } else { @() }
+    $unsigned = if ($scan.Drivers -and $scan.Drivers.Unsigned) { @($scan.Drivers.Unsigned) } else { @() }
+    $problemDevicesRaw = if ($scan.Drivers) { Get-WinPulseObjectValue -inputobject $scan.Drivers -name 'ProblemDevices' } else { @() }
+    $problemDevices = @($problemDevicesRaw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    if ($problematic.Count -gt 0) {
+        Write-Host ('  Problematic drivers ({0}):' -f $problematic.Count) -ForegroundColor Yellow
+        foreach ($d in $problematic) {
+            Write-Host ('    {0}  [{1}]' -f $d['DeviceName'], $d['ErrorDescription']) -ForegroundColor Yellow
+        }
+        Write-Host ''
+    }
+    else {
+        Write-Host '  Problematic drivers: OK' -ForegroundColor Green
+    }
+
+    if ($unsigned.Count -gt 0) {
+        Write-Host ('  Unsigned drivers ({0}):' -f $unsigned.Count) -ForegroundColor Yellow
+        foreach ($d in $unsigned) {
+            Write-Host ('    {0}  provider: {1}  inf: {2}' -f $d['DeviceName'], $d['DriverProvider'], $d['InfName']) -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host '  Unsigned drivers: OK' -ForegroundColor Green
+    }
+
+    Write-Host ''
+    if ($problemDevices.Count -gt 0) {
+        Write-Host ('  Devices in error state ({0}):' -f $problemDevices.Count) -ForegroundColor Yellow
+        foreach ($id in $problemDevices) {
+            Write-Host ('    [WARN] {0}' -f $id) -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host '  No PnP error-state devices.' -ForegroundColor Gray
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsServices {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Services'
+    $failed = if ($scan.Startup -and $scan.Startup.FailedAutoServices) { @($scan.Startup.FailedAutoServices) } else { @() }
+    if ($failed.Count -eq 0) {
+        Write-Host '  Failed auto-start services: OK' -ForegroundColor Green
+    }
+    else {
+        Write-Host ('  Failed auto-start services ({0}):' -f $failed.Count) -ForegroundColor Yellow
+        foreach ($s in $failed) {
+            Write-Host ('    {0}  ({1})  status: {2}' -f $s['DisplayName'], $s['Name'], $s['Status']) -ForegroundColor Yellow
+        }
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsSystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'System'
+    $cpu = Get-WinPulseDiagnosticsCpuShort -scan $scan
+    $ramType = 'N/A'
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.DIMMs -and $scan.HardwareDetail.DIMMs.Count -gt 0) {
+        $ramType = [string]$scan.HardwareDetail.DIMMs[0].Type
+    }
+    $ramTotal = if ($scan.Hardware -and $scan.Hardware.Ram) { [string]$scan.Hardware.Ram.Total } else { 'N/A' }
+    $tpmLabel = if ($scan.TPM) { 'TPM {0}' -f $scan.TPM.Version } else { 'TPM N/A' }
+    $biosVersion = 'N/A'
+    $biosDate = 'N/A'
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.Motherboard) {
+        $biosVersion = [string]$scan.HardwareDetail.Motherboard.BIOSVersion
+        $biosDate = [string]$scan.HardwareDetail.Motherboard.BIOSDate
+    }
+
+    Write-Host ('  Hostname : {0}' -f $(if ($scan.System) { $scan.System.Hostname } else { 'N/A' })) -ForegroundColor White
+    Write-Host ('  OS/Build : {0}' -f $(if ($scan.System) { $scan.System.WindowsVersion } else { 'N/A' })) -ForegroundColor White
+    Write-Host ('  Uptime   : {0}' -f $(if ($scan.System) { $scan.System.Uptime } else { 'N/A' })) -ForegroundColor White
+    Write-Host ('  CPU      : {0}' -f $cpu) -ForegroundColor White
+    Write-Host ('  RAM      : {0} total, {1}' -f $ramTotal, $ramType) -ForegroundColor White
+    Write-Host ('  TPM      : {0}' -f $tpmLabel) -ForegroundColor White
+    Write-Host ('  BIOS     : {0}  {1}' -f $biosVersion, $biosDate) -ForegroundColor White
+
+    $dumpInfo = if ($scan.System) { Get-WinPulseObjectValue -inputobject $scan.System -name 'DumpInfo' } else { $null }
+    $minidumpCount = 0
+    $minidumpNewest = $null
+    $fullDumpExists = $false
+    if ($dumpInfo) {
+        $minidumpCountValue = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpCount'
+        if ($null -ne $minidumpCountValue) { $minidumpCount = [int]$minidumpCountValue }
+        $minidumpNewest = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpNewest'
+        $fullDumpExists = [bool](Get-WinPulseObjectValue -inputobject $dumpInfo -name 'FullDumpExists')
+    }
+
+    Write-Host ''
+    $dumpHeaderColor = if ($minidumpCount -gt 0 -or $fullDumpExists) { 'Yellow' } else { 'White' }
+    Write-Host '  Crash Dumps:' -ForegroundColor $dumpHeaderColor
+    if ($minidumpCount -gt 0) {
+        $newestText = 'unknown'
+        if ($minidumpNewest -is [datetime]) {
+            $newestText = $minidumpNewest.ToString('yyyy-MM-dd HH:mm')
+        }
+        elseif ($null -ne $minidumpNewest -and -not [string]::IsNullOrWhiteSpace([string]$minidumpNewest)) {
+            $newestText = [string]$minidumpNewest
+        }
+        Write-Host ('    Crash dumps: {0} minidump(s), newest {1}' -f $minidumpCount, $newestText) -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '    No crash dumps found.' -ForegroundColor Gray
+    }
+    Write-Host ('    Full memory dump: {0}' -f $(if ($fullDumpExists) { 'Yes' } else { 'No' })) -ForegroundColor $(if ($fullDumpExists) { 'Yellow' } else { 'Gray' })
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsHardware {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Hardware'
+    if ($scan.Hardware -and $scan.Hardware.Ram) {
+        Write-Host ('  RAM      : {0}% used  ({1} used / {2} total)' -f $scan.Hardware.Ram.UsedPercent, $scan.Hardware.Ram.Used, $scan.Hardware.Ram.Total) -ForegroundColor White
+    }
+    else {
+        Write-Host '  RAM      : N/A' -ForegroundColor Gray
+    }
+
+    $disks = if ($scan.Hardware -and $scan.Hardware.Disks) { @($scan.Hardware.Disks) } else { @() }
+    if ($disks.Count -gt 0) {
+        Write-Host '  Disks:' -ForegroundColor Yellow
+        foreach ($d in $disks) {
+            $color = if ($d.UsedPercent -ge 90) { 'Red' } elseif ($d.UsedPercent -ge 80) { 'Yellow' } else { 'White' }
+            Write-Host ('    {0}  size {1}  free {2}  used {3}%' -f $d.Drive, $d.Size, $d.Free, $d.UsedPercent) -ForegroundColor $color
+        }
+    }
+    else {
+        Write-Host '  Disks    : N/A' -ForegroundColor Gray
+    }
+
+    if ($scan.Hardware) {
+        Write-Host ('  SMART    : {0}' -f $(if ($scan.Hardware.SmartHealthy) { 'OK' } else { 'FAIL' })) -ForegroundColor $(if ($scan.Hardware.SmartHealthy) { 'Green' } else { 'Red' })
+    }
+    if ($scan.Temperatures) {
+        $cpuTemp = if ($scan.Temperatures.CPUTempCelsius) { '{0} C' -f $scan.Temperatures.CPUTempCelsius } else { 'N/A' }
+        Write-Host ('  CPU temp : {0}' -f $cpuTemp) -ForegroundColor White
+        if ($scan.Temperatures.DiskTemps) {
+            foreach ($t in @($scan.Temperatures.DiskTemps)) {
+                Write-Host ('    Disk temp: {0}  {1} C' -f $t.DiskModel, $t.TempCelsius) -ForegroundColor White
+            }
+        }
+    }
+    if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery -and $scan.HardwareDetail.Battery.Present) {
+        $bat = $scan.HardwareDetail.Battery
+        $health = if ($bat.HealthPercent) { '{0}%' -f $bat.HealthPercent } else { 'N/A' }
+        $charge = if ($null -ne $bat.ChargePercent) { '{0}%' -f $bat.ChargePercent } else { 'N/A' }
+        $cycles = if ($bat.CycleCount) { [string]$bat.CycleCount } else { 'N/A' }
+        $capacity = if ($bat.DesignCapacityWh -and $bat.FullChargeCapacityWh) { '{0} / {1} Wh' -f $bat.FullChargeCapacityWh, $bat.DesignCapacityWh } else { 'N/A' }
+        Write-Host ('  Battery  : health {0}  charge {1}  capacity {2}  cycles {3}' -f $health, $charge, $capacity, $cycles) -ForegroundColor White
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsSecurity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Security'
+    $products = if ($scan.Security -and $scan.Security.Antivirus -and $scan.Security.Antivirus.Products) { @($scan.Security.Antivirus.Products) } else { @() }
+    if ($products.Count -gt 0) {
+        Write-Host '  Antivirus products:' -ForegroundColor Yellow
+        foreach ($p in $products) {
+            Write-Host ('    {0}' -f $p.Name) -ForegroundColor White
+        }
+    }
+    else {
+        Write-Host '  Antivirus products: none detected' -ForegroundColor Red
+    }
+    if ($scan.Security) {
+        Write-Host ('  Real-time AV : {0}' -f $scan.Security.Antivirus.EffectiveRealtimeProtection) -ForegroundColor $(if ($scan.Security.Antivirus.EffectiveRealtimeProtection) { 'Green' } else { 'Red' })
+        Write-Host ('  Firewall     : {0}' -f $(if ($scan.Security.FirewallEnabled) { 'ON' } else { 'OFF' })) -ForegroundColor $(if ($scan.Security.FirewallEnabled) { 'Green' } else { 'Red' })
+        Write-Host ('  Secure Boot  : {0}' -f $scan.Security.SecureBootState) -ForegroundColor White
+        $volumes = if ($scan.Security.BitLocker) { @($scan.Security.BitLocker) } else { @() }
+        if ($volumes.Count -gt 0) {
+            Write-Host '  BitLocker:' -ForegroundColor Yellow
+            foreach ($v in $volumes) {
+                Write-Host ('    {0}  {1}  {2}%' -f $v.MountPoint, $v.ProtectionStatus, $v.EncryptionPercentage) -ForegroundColor White
+            }
+        }
+        else {
+            Write-Host '  BitLocker   : no volumes reported' -ForegroundColor Gray
+        }
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsNetwork {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    Clear-Host
+    Write-WinPulseHeader -title 'Network'
+    if ($scan.Network) {
+        Write-Host ('  IPv4      : {0}' -f $scan.Network.IPv4) -ForegroundColor White
+        Write-Host ('  Gateway   : {0}' -f $scan.Network.Gateway) -ForegroundColor White
+        Write-Host ('  DNS       : {0}' -f ($scan.Network.DnsServers -join ', ')) -ForegroundColor White
+        Write-Host ('  Internet  : {0}' -f $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' })) -ForegroundColor $(if ($scan.Network.Internet) { 'Green' } else { 'Yellow' })
+    }
+    else {
+        Write-Host '  Network summary unavailable.' -ForegroundColor Yellow
+    }
+
+    if ($scan.NetworkDetail -and $scan.NetworkDetail.WiFi) {
+        $w = $scan.NetworkDetail.WiFi
+        Write-Host ''
+        Write-Host '  WiFi:' -ForegroundColor Yellow
+        Write-Host ('    SSID    : {0}' -f $w.SSID) -ForegroundColor White
+        Write-Host ('    Signal  : {0}%' -f $w.SignalPercent) -ForegroundColor White
+        Write-Host ('    Channel : {0}' -f $w.Channel) -ForegroundColor White
+        Write-Host ('    Band    : {0}' -f $w.Band) -ForegroundColor White
+    }
+    else {
+        Write-Host '  WiFi      : not available' -ForegroundColor Gray
+    }
+    Write-Host ''
+    Wait-WinPulseKey
+}
+
+function Show-WinPulseDiagnosticsMenu {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][pscustomobject]$scan)
+
+    while ($true) {
+        $findings = @(Get-WinPulseTriageFindings -scan $scan)
+        $critCount = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
+        $warnCount = @($findings | Where-Object { $_.Severity -ne 'Critical' }).Count
+        $findState = if ($critCount -gt 0) { 'Critical' } elseif ($warnCount -gt 0) { 'Warning' } else { 'OK' }
+        $findHint = if ($findings.Count -gt 0) { '{0} critical | {1} warning' -f $critCount, $warnCount } else { 'No issues' }
+
+        $problematic = if ($scan.Drivers -and $scan.Drivers.Problematic) { @($scan.Drivers.Problematic) } else { @() }
+        $unsigned = if ($scan.Drivers -and $scan.Drivers.Unsigned) { @($scan.Drivers.Unsigned) } else { @() }
+        $driverState = if ($problematic.Count -gt 0) { 'Warning' } else { 'OK' }
+        $driverHint = if ($problematic.Count -gt 0 -or $unsigned.Count -gt 0) { '{0} problematic | {1} unsigned' -f $problematic.Count, $unsigned.Count } else { 'OK' }
+
+        $failedServices = if ($scan.Startup -and $scan.Startup.FailedAutoServices) { @($scan.Startup.FailedAutoServices) } else { @() }
+        $svcState = if ($failedServices.Count -gt 3) { 'Warning' } else { 'OK' }
+        $svcHint = if ($failedServices.Count -gt 0) { '{0} failed auto-start' -f $failedServices.Count } else { 'OK' }
+
+        $systemHint = if ($scan.System) { '{0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime } else { 'System unavailable' }
+        if ($systemHint.Length -gt 46) { $systemHint = $systemHint.Substring(0, 43) + '...' }
+
+        $cpuShort = Get-WinPulseDiagnosticsCpuShort -scan $scan
+        $ramText = if ($scan.Hardware -and $scan.Hardware.Ram) { [string]$scan.Hardware.Ram.Total } else { 'RAM N/A' }
+        $cDisk = if ($scan.Hardware -and $scan.Hardware.Disks) { $scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' } | Select-Object -First 1 } else { $null }
+        $cDiskText = if ($cDisk) { 'C:{0}%' -f $cDisk.UsedPercent } else { 'C:N/A' }
+        $batteryText = ''
+        $batteryState = 'OK'
+        if ($scan.HardwareDetail -and $scan.HardwareDetail.Battery -and $scan.HardwareDetail.Battery.Present) {
+            $batHp = $scan.HardwareDetail.Battery.HealthPercent
+            if ($batHp) {
+                $batteryText = ' | Battery {0}%' -f $batHp
+                $batteryState = if ($batHp -lt 60) { 'Critical' } elseif ($batHp -lt 80) { 'Warning' } else { 'OK' }
+            }
+            else {
+                $batteryText = ' | Battery N/A'
+            }
+        }
+        $diskState = if ($cDisk) { Get-WinPulseStateFromPercent -percent $cDisk.UsedPercent } else { 'OK' }
+        $hwState = if ($diskState -eq 'Critical' -or $batteryState -eq 'Critical') { 'Critical' } elseif ($diskState -eq 'Warning' -or $batteryState -eq 'Warning') { 'Warning' } else { 'OK' }
+        $hwHint = '{0} | {1} | {2}{3}' -f $cpuShort, $ramText, $cDiskText, $batteryText
+        if ($hwHint.Length -gt 46) { $hwHint = $hwHint.Substring(0, 43) + '...' }
+
+        $avNames = @()
+        if ($scan.Security -and $scan.Security.Antivirus -and $scan.Security.Antivirus.Products) {
+            $avNames = @($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        }
+        $avLabel = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'No AV' }
+        if ($avLabel.Length -gt 18) { $avLabel = $avLabel.Substring(0, 18) }
+        $fwText = if ($scan.Security -and $scan.Security.FirewallEnabled) { 'FW ON' } else { 'FW OFF' }
+        $blOn = $false
+        if ($scan.Security -and $scan.Security.BitLocker) {
+            $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0
+        }
+        $blText = if ($blOn) { 'BL ON' } else { 'BL OFF' }
+        $secState = if ($scan.Security -and $scan.Security.Antivirus.EffectiveRealtimeProtection -and $scan.Security.FirewallEnabled) { 'OK' } else { 'Critical' }
+        $secHint = '{0} | {1} | {2}' -f $avLabel, $fwText, $blText
+
+        $netState = if ($scan.Network -and $scan.Network.Internet) { 'OK' } else { 'Warning' }
+        $netHint = if ($scan.Network) { '{0} | GW {1} | Net {2}' -f $scan.Network.IPv4, $scan.Network.Gateway, $(if ($scan.Network.Internet) { 'OK' } else { 'FAIL' }) } else { 'Network unavailable' }
+        if ($scan.NetworkDetail -and $scan.NetworkDetail.WiFi -and $scan.NetworkDetail.WiFi.SSID) {
+            $ssid = [string]$scan.NetworkDetail.WiFi.SSID
+            if ($ssid.Length -gt 12) { $ssid = $ssid.Substring(0, 12) }
+            $wifiText = if ($scan.NetworkDetail.WiFi.SignalPercent) { ' | WiFi {0} {1}%' -f $ssid, $scan.NetworkDetail.WiFi.SignalPercent } else { ' | WiFi {0}' -f $ssid }
+            if (($netHint.Length + $wifiText.Length) -le 46) { $netHint += $wifiText }
+        }
+        if ($netHint.Length -gt 46) { $netHint = $netHint.Substring(0, 43) + '...' }
+
+        $items = @(
+            @{ Label = 'Findings'; Key = 'F'; Badge = (Get-WinPulseDiagnosticsBadge -State $findState);   BadgeColor = (Get-WinPulseDiagnosticsColor -State $findState);   Hint = $findHint;   Color = 'White' }
+            @{ Label = 'Drivers';  Key = 'D'; Badge = (Get-WinPulseDiagnosticsBadge -State $driverState); BadgeColor = (Get-WinPulseDiagnosticsColor -State $driverState); Hint = $driverHint; Color = 'White' }
+            @{ Label = 'Services'; Key = 'V'; Badge = (Get-WinPulseDiagnosticsBadge -State $svcState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $svcState);    Hint = $svcHint;    Color = 'White' }
+            @{ Label = 'System';   Key = 'S'; Badge = '[ OK ]';                                           BadgeColor = 'Green';                                            Hint = $systemHint; Color = 'White' }
+            @{ Label = 'Hardware'; Key = 'H'; Badge = (Get-WinPulseDiagnosticsBadge -State $hwState);     BadgeColor = (Get-WinPulseDiagnosticsColor -State $hwState);     Hint = $hwHint;     Color = 'White' }
+            @{ Label = 'Security'; Key = 'X'; Badge = (Get-WinPulseDiagnosticsBadge -State $secState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $secState);    Hint = $secHint;    Color = 'White' }
+            @{ Label = 'Network';  Key = 'N'; Badge = (Get-WinPulseDiagnosticsBadge -State $netState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $netState);    Hint = $netHint;    Color = 'White' }
+            @{ Separator = $true }
+            @{ Label = 'Back';     Key = 'B'; Color = 'DarkGray' }
+        )
+
+        $choice = Select-WinPulseMenuItem -Title 'Diagnostics' -Items $items
+        switch ($choice) {
+            'F' { Show-WinPulseDiagnosticsFindings -scan $scan }
+            'D' { Show-WinPulseDiagnosticsDrivers -scan $scan }
+            'V' { Show-WinPulseDiagnosticsServices -scan $scan }
+            'S' { Show-WinPulseDiagnosticsSystem -scan $scan }
+            'H' { Show-WinPulseDiagnosticsHardware -scan $scan }
+            'X' { Show-WinPulseDiagnosticsSecurity -scan $scan }
+            'N' { Show-WinPulseDiagnosticsNetwork -scan $scan }
+            default { return }
+        }
+    }
+}
+
 function Show-WinPulseTriageMenu {
     [CmdletBinding()]
     param(
@@ -10551,7 +11023,7 @@ function Show-WinPulseTriageMenu {
         )
         switch ($choice) {
             'R' { $scan = Invoke-CoreScan }
-            'F' { Show-WinPulseFindingsDetail -scan $scan }
+            'F' { Show-WinPulseDiagnosticsMenu -scan $scan }
             'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
             'P' { Show-WinPulseMigrationMenu }
             'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
