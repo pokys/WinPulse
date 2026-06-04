@@ -53,8 +53,15 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.8-20260604'
+$script:WinPulseVersion = '0.14.9-20260604'
 $script:WinPulseBoxColor = 'Gray'
+$script:WinPulseServiceNoiselist = @(
+    'DiagTrack', 'dmwappushservice', 'DoSvc',
+    'edgeupdate', 'edgeupdatem',
+    'gupdate', 'gupdatem',
+    'MapsBroker', 'SCardSvr', 'sppsvc',
+    'MozillaMaintenance', 'AdobeARMservice', 'Fax', 'WbioSrvc'
+)
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -2637,8 +2644,18 @@ function Get-WinPulseTriageFindings {
         }
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('{0} device(s) in error state: {1}' -f $problemDevices.Count, $idText) }
     }
-    if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 3) {
-        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Failed auto-start services: {0}' -f $scan.Startup.FailedAutoServices.Count) }
+    if ($scan.Startup -and $scan.Startup.FailedAutoServices) {
+        $problematicServices = @($scan.Startup.FailedAutoServices | Where-Object {
+            $n = [string]$_['Name']
+            ($n -notin $script:WinPulseServiceNoiselist) -and ($n -notlike 'GoogleUpdater*')
+        })
+        if ($problematicServices.Count -gt 5) {
+            $findings += [pscustomobject]@{
+                Severity = 'Warning'
+                Message  = ('Failed auto-start services: {0} (of {1} total stopped)' -f
+                            $problematicServices.Count, $scan.Startup.FailedAutoServices.Count)
+            }
+        }
     }
     if ($scan.License -and $scan.License.ActivationStatus -ne 'Activated') {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Windows license: {0}' -f $scan.License.ActivationStatus) }
@@ -10766,6 +10783,13 @@ function Show-WinPulseDiagnosticsServices {
         Write-Host ('  Failed auto-start services ({0}):' -f $failed.Count) -ForegroundColor Yellow
         foreach ($s in $failed) {
             Write-Host ('    {0}  ({1})  status: {2}' -f $s['DisplayName'], $s['Name'], $s['Status']) -ForegroundColor Yellow
+        }
+        $noisy = @($failed | Where-Object {
+            $n = [string]$_['Name']
+            ($n -in $script:WinPulseServiceNoiselist) -or ($n -like 'GoogleUpdater*')
+        })
+        if ($noisy.Count -gt 0) {
+            Write-Host ('  ({0} update/telemetry/on-demand services hidden - likely benign)' -f $noisy.Count) -ForegroundColor DarkGray
         }
     }
     Write-Host ''
