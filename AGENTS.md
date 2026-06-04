@@ -82,9 +82,15 @@ changes to `main` until visually verified; Claude bumps the version and merges.
 ## Work Queue (assigned to Codex)
 
 Prepared by Claude (lead). Do these in order. Claude reviews each before merge.
-Work on branch `dev/migration-preflight-foundation`; pull latest first (current
-tip bumps the version to `0.8.3-20260601`). Do not push to `main`. Do not bump
-the version (Claude handles version + merge). After each task: run the parser
+Work on branch `dev/migration-preflight-foundation`. **ALWAYS start by syncing
+with main:**
+```
+git checkout dev/migration-preflight-foundation
+git merge main --ff-only
+```
+If the merge fails (not fast-forward), stop and report to Claude before
+proceeding. Do not push to `main`. Do not bump the version (Claude handles
+version + merge). After each task: run the parser
 check and the ASCII check (see Validation), keep `bootstrap.ps1` ASCII-only and
 StrictMode-safe, and report what you changed plus your test output. If anything
 is ambiguous or conflicts with a rule, stop and ask.
