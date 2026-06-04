@@ -53,7 +53,8 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.2-20260604'
+$script:WinPulseVersion = '0.14.3-20260604'
+$script:WinPulseBoxColor = 'DarkCyan'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1706,11 +1707,11 @@ function Write-WinPulseHeader {
 
     $w = Get-WinPulseBoxWidth
     Write-Host ''
-    Write-Host ('  {0}{1}{2}' -f ([char]0x2554), ([string][char]0x2550 * ($w - 2)), ([char]0x2557)) -ForegroundColor Yellow
-    Write-Host -NoNewline ('  {0} ' -f ([char]0x2551)) -ForegroundColor Yellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2554), ([string][char]0x2550 * ($w - 2)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline ('  {0} ' -f ([char]0x2551)) -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline ('{0}' -f $title.PadRight($w - 4)) -ForegroundColor Cyan
-    Write-Host (' {0}' -f ([char]0x2551)) -ForegroundColor Yellow
-    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), ([string][char]0x2550 * ($w - 2)), ([char]0x255D)) -ForegroundColor Yellow
+    Write-Host (' {0}' -f ([char]0x2551)) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), ([string][char]0x2550 * ($w - 2)), ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
 }
 
 function Select-WinPulseMenuItem {
@@ -1773,14 +1774,14 @@ function Select-WinPulseMenuItem {
             $drawnLines = 0
 
             # Top border
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $Title, ([string][char]0x2550 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2557)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $Title, ([string][char]0x2550 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
                 $item = $Items[$i]
 
                 if ($item['Separator']) {
-                    Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor Yellow
+                    Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor $script:WinPulseBoxColor
                     $drawnLines++
                     continue
                 }
@@ -1805,7 +1806,7 @@ function Select-WinPulseMenuItem {
                     $left + (' ' * $rightSpace)
                 }
 
-                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 if ($isSelected) {
                     Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
                 }
@@ -1820,12 +1821,12 @@ function Select-WinPulseMenuItem {
                 else {
                     Write-Host -NoNewline $line -ForegroundColor Gray
                 }
-                Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+                Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 $drawnLines++
             }
 
             # Bottom border
-            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
             # Help bar
             $helpText = '  {0}/{1} Navigate  Enter Select  Esc Back' -f ([char]0x2191), ([char]0x2193)
@@ -1932,7 +1933,7 @@ function Select-WinPulseMultiMenuItem {
             # Top border + scroll indicator
             $scrollInfo = if ($Items.Count -gt $maxViewport) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
             $titleFull = if ($scrollInfo) { '{0}  {1}' -f $Title, $scrollInfo } else { $Title }
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             # Render only items in viewport window
@@ -1947,11 +1948,11 @@ function Select-WinPulseMultiMenuItem {
                         $catLabel = '  ' + $item['Label']
                         $catPad = $w - 2 - $catLabel.Length
                         if ($catPad -lt 0) { $catPad = 0 }
-                        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
-                        Write-Host -NoNewline ($catLabel + (' ' * $catPad)) -ForegroundColor Yellow
-                        Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+                        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                        Write-Host -NoNewline ($catLabel + (' ' * $catPad)) -ForegroundColor $script:WinPulseBoxColor
+                        Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                     } else {
-                        Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor Yellow
+                        Write-Host ('  {0}{1}{2}' -f $vLine, (' ' * ($w - 2)), $vLine) -ForegroundColor $script:WinPulseBoxColor
                     }
                     $drawnLines++
                     $rendered++
@@ -1973,18 +1974,18 @@ function Select-WinPulseMultiMenuItem {
                     $left + (' ' * ($rightSpace - $hint.Length)) + $hint
                 } else { $left + (' ' * $rightSpace) }
 
-                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 if ($isActive) {
                     Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
                 } else {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
-                Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+                Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 $drawnLines++
                 $rendered++
             }
 
-            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
             $helpText = '  Up/Down Navigate  Space Toggle  A All/None  Enter Confirm  Esc Cancel  {0} selected' -f $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
@@ -2154,7 +2155,7 @@ function Select-WinPulseFolderPath {
                 $titleFull = $titleFull.Substring(0, $titleMax - 3) + '...'
             }
 
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             $rendered = 0
@@ -2169,9 +2170,9 @@ function Select-WinPulseFolderPath {
                     if ($label.Length -gt $avail) { $label = $label.Substring(0, $avail) }
                     $line = $label + (' ' * [math]::Max(0, $avail - $label.Length))
                     $color = if ($item['Color']) { $item['Color'] } else { 'DarkGray' }
-                    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
+                    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                     Write-Host -NoNewline $line -ForegroundColor $color
-                    Write-Host ('{0}' -f $vLine) -ForegroundColor Yellow
+                    Write-Host ('{0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                     $drawnLines++
                     $rendered++
                     continue
@@ -2188,19 +2189,19 @@ function Select-WinPulseFolderPath {
                 }
                 $line = $left + (' ' * $rightSpace)
 
-                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 if ($isSelected) {
                     Write-Host -NoNewline $line -ForegroundColor Yellow
                 }
                 else {
                     Write-Host -NoNewline $line -ForegroundColor White
                 }
-                Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+                Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 $drawnLines++
                 $rendered++
             }
 
-            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor Yellow
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
             $helpText = '  {0}/{1} Navigate  Enter Select/Open  T Type path  Esc Cancel' -f ([char]0x2191), ([char]0x2193)
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
@@ -2280,12 +2281,12 @@ function Write-WinPulseDashboardLine {
     if ($content.Length -gt $inner) { $content = $content.Substring(0, $inner) }
     $content = $content.PadRight($inner)
 
-    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
-    Write-Host -NoNewline ' ' -ForegroundColor Yellow
+    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline ' ' -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline ('[{0}]' -f $badge.Text) -ForegroundColor $badge.Color
     $rest = $content.Substring($badge.Text.Length + 3)
     Write-Host -NoNewline $rest -ForegroundColor Gray
-    Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+    Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
 }
 
 function Write-WinPulseDashboardSegLine {
@@ -2304,8 +2305,8 @@ function Write-WinPulseDashboardSegLine {
     $totalLen = 0
     foreach ($s in $Segments) { $totalLen += ([string]$s['Text']).Length }
     $pad = [math]::Max(0, $segArea - $totalLen)
-    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
-    Write-Host -NoNewline ' ' -ForegroundColor Yellow
+    Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline ' ' -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline ('[{0}]' -f $badge.Text) -ForegroundColor $badge.Color
     Write-Host -NoNewline (' {0,-10} ' -f $Label) -ForegroundColor Gray
     for ($i = 0; $i -lt $Segments.Count; $i++) {
@@ -2313,7 +2314,7 @@ function Write-WinPulseDashboardSegLine {
         if ($i -eq $Segments.Count - 1) { $t = $t + (' ' * $pad) }
         Write-Host -NoNewline $t -ForegroundColor ([string]$Segments[$i]['Color'])
     }
-    Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+    Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
 }
 
 function Show-WinPulseDashboard {
@@ -2345,17 +2346,17 @@ function Show-WinPulseDashboard {
     # Top header (includes the build version for support/screenshots)
     $titleBar = ' WinPulse {0} ' -f $script:WinPulseVersion
     $titleFill = [math]::Max(1, $w - 4 - $titleBar.Length)
-    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleBar, ([string][char]0x2550 * $titleFill), ([char]0x2557)) -ForegroundColor Yellow
+    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleBar, ([string][char]0x2550 * $titleFill), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
 
     # System line
     $sysLine = ' {0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime
     if ($sysLine.Length -gt ($w - 4)) { $sysLine = $sysLine.Substring(0, $w - 4) }
-    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline ($sysLine.PadRight($w - 4)) -ForegroundColor White
-    Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+    Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
 
     # Separator
-    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor Yellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x2560), $hLine, ([char]0x2563)) -ForegroundColor $script:WinPulseBoxColor
 
     # Hardware
     # Hardware row
@@ -2495,9 +2496,9 @@ function Show-WinPulseDashboard {
 
     if ($findings.Count -eq 0) {
         $fLine = ' No issues detected'
-        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor Yellow
+        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
         Write-Host -NoNewline (' {0}' -f $fLine.PadRight($w - 4)) -ForegroundColor Green
-        Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+        Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
     }
     else {
         $ordered = @($findings | Sort-Object @{ Expression = { if ($_.Severity -eq 'Critical') { 0 } else { 1 } } })
@@ -2511,20 +2512,20 @@ function Show-WinPulseDashboard {
             $fBadge = if ($f.Severity -eq 'Critical') { '[CRIT]' } else { '[WARN]' }
             $fText = ' {0} {1}' -f $fBadge, $f.Message
             if ($fText.Length -gt ($w - 4)) { $fText = $fText.Substring(0, $w - 7) + '...' }
-            Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+            Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
             Write-Host -NoNewline ($fText.PadRight($w - 4)) -ForegroundColor $fColor
-            Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+            Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
         }
     }
 
     # Scanned timestamp - inside box, last line before bottom border
     $scanText = ' Scanned: {0}' -f $scan.GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')
-    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor Yellow
+    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline ($scanText.PadRight($w - 4)) -ForegroundColor Gray
-    Write-Host (' {0}' -f $vLine) -ForegroundColor Yellow
+    Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
 
     # Bottom border
-    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor Yellow
+    Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
 }
 
 function Get-WinPulseTriageFindings {
