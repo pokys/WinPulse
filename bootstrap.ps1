@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.6-20260604'
+$script:WinPulseVersion = '0.14.7-20260604'
 $script:WinPulseBoxColor = 'Gray'
 
 function Test-WinPulseIsAdmin {
@@ -1810,7 +1810,7 @@ function Select-WinPulseMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 if ($isSelected) {
-                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
+                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor White
                 }
                 elseif ($badge) {
                     $prefixPart = ' {0} {1} ' -f $pointer, $keyTag
@@ -1980,7 +1980,7 @@ function Select-WinPulseMultiMenuItem {
 
                 Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                 if ($isActive) {
-                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor Yellow
+                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor White
                 } else {
                     Write-Host -NoNewline $line -ForegroundColor $color
                 }
