@@ -1348,6 +1348,128 @@ the existing segment infrastructure.
 - Visual check (Claude/owner): confirm layout is intact at >= 90 columns on
   both WiFi and non-WiFi machines; no right-border misalignment.
 
+### Task C26 - Problematic PnP devices: triage finding + Diagnostics surface
+
+Why: a device in Windows error state (yellow/red exclamation in Device Manager)
+is a direct indicator that a driver or hardware component is broken.
+`pnputil /enum-devices /problem /ids` returns exactly these devices in one shot.
+WinPulse already shows driver counts in the Diagnostics Drivers section (C25) but
+has no explicit finding for error-state devices. This task makes it a triage signal.
+
+Scope:
+
+- In `Invoke-CoreScan`, inside the drivers scan block that populates `$scan.Drivers`,
+  add a pnputil call and store the results:
+
+  ```powershell
+  $problemDevices = @()
+  try {
+      $pnpOut = & pnputil /enum-devices /problem /ids 2>$null
+      if ($LASTEXITCODE -eq 0 -and $pnpOut) {
+          $problemDevices = @($pnpOut |
+              Where-Object { $_ -match '^\s*Instance ID:\s+(.+)$' } |
+              ForEach-Object { $Matches[1].Trim() })
+      }
+  } catch {}
+  ```
+
+  Add `ProblemDevices = $problemDevices` to `$result.Drivers` (follow the same
+  pattern as the existing `Problematic` / `Unsigned` fields). Also add
+  `ProblemDevices = @()` to the default/stub at the top of the drivers block.
+
+- In `Get-WinPulseTriageFindings`, add a finding when
+  `$scan.Drivers.ProblemDevices.Count -gt 0`:
+
+  ```
+  Severity: Warning
+  Message: "X device(s) in error state: <ID1>, <ID2>..."
+  ```
+
+  Cap the inline ID list at 2 entries; if more, append "... (see Diagnostics)".
+  Null-guard: skip if `$scan.Drivers` or `$scan.Drivers.ProblemDevices` is null.
+
+- In `Show-WinPulseDiagnosticsDrivers` (the detail function added in C25), after
+  the existing problematic/unsigned driver lists, add a "Devices in error state"
+  block:
+  - If `$scan.Drivers.ProblemDevices.Count -gt 0`, list each instance ID with a
+    `[WARN]` prefix (yellow).
+  - If empty, print "  No PnP error-state devices." in gray.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0. pnputil absent or returning empty must not throw.
+- On a clean machine: no problem devices -> no extra finding; Diagnostics Drivers
+  shows "No PnP error-state devices."
+- Smoke: run MigrationPreflight / Triage fixtures — both exit 0 even when pnputil
+  returns nothing (test the guard, not real hardware).
+
+Out of scope: device detail beyond the instance ID, driver repair actions, inf
+copy, any TUI rendering engine changes.
+
+### Task C27 - Crash dump detection finding
+
+Why: the presence of minidump or full memory dump files is strong evidence of
+recent blue-screen crashes. A technician triaging an unstable machine should see
+this immediately in the findings. Detection is read-only and cheap.
+
+Scope:
+
+- In `Invoke-CoreScan`, add a dump detection block (place it near the system /
+  OS info collection, before the hardware scan). Store results in `$result`:
+
+  ```powershell
+  $dumpInfo = [ordered]@{
+      MinidumpCount  = 0
+      MinidumpNewest = $null
+      FullDumpExists = $false
+  }
+  try {
+      $mdPath = Join-Path $env:SystemRoot 'Minidump'
+      if (Test-Path -LiteralPath $mdPath -ErrorAction SilentlyContinue) {
+          $mdFiles = @(Get-ChildItem -LiteralPath $mdPath -Filter '*.dmp' `
+                       -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+          $dumpInfo['MinidumpCount']  = $mdFiles.Count
+          if ($mdFiles.Count -gt 0) { $dumpInfo['MinidumpNewest'] = $mdFiles[0].LastWriteTime }
+      }
+      $dumpInfo['FullDumpExists'] = Test-Path -LiteralPath (Join-Path $env:SystemRoot 'memory.dmp') `
+                                              -ErrorAction SilentlyContinue
+  } catch {}
+  ```
+
+  Add `DumpInfo = $dumpInfo` to `$result.System` (or wherever OS/boot facts live;
+  check the existing scan object shape and follow its pattern). Also add a
+  `DumpInfo = $null` stub in the default/empty result so null-guards are consistent.
+
+- In `Get-WinPulseTriageFindings`, add findings:
+  - If `MinidumpCount -gt 0`: Warning — "X minidump(s) found (newest: <date>).
+    Machine may have crashed recently."
+  - If `FullDumpExists`: Warning — "Full memory dump found in Windows root.
+    Machine has had a kernel crash."
+  Null-guard both against a null DumpInfo.
+
+- In `Show-WinPulseDiagnosticsSystem` (the System detail from C25), after the
+  OS/uptime/TPM block, add a Crash Dumps section:
+  - "Crash dumps: X minidump(s), newest <date>" or "No crash dumps found" (green/gray).
+  - "Full memory dump: Yes / No".
+
+Non-admin note: `Test-Path` + `Get-ChildItem` on `C:\Windows\Minidump` may fail
+without elevation. WinPulse auto-elevates, but wrap entirely in try/catch so a
+permission error never crashes the scan — partial data (e.g. only FullDumpExists
+checked) is acceptable.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0. Test-Path / Get-ChildItem on non-existent paths
+  must not throw.
+- Smoke: fixture has no dump files -> `MinidumpCount = 0`, no finding, System
+  section shows "No crash dumps found." Entire block in try/catch so even a
+  blocked directory does not fail the scan.
+
+Out of scope: reading or analysing dump file contents, uploading dumps, WER
+integration, any admin-only copy action.
+
 ## Project Direction
 
 WinPulse is the main project going forward.

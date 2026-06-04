@@ -740,6 +740,17 @@ function Get-WinPulseDriverAnalysis {
         }
     }
 
+    $problemDevices = @()
+    try {
+        $pnpOut = & pnputil /enum-devices /problem /ids 2>$null
+        if ($LASTEXITCODE -eq 0 -and $pnpOut) {
+            $problemDevices = @($pnpOut |
+                Where-Object { $_ -match '^\s*Instance ID:\s+(.+)$' } |
+                ForEach-Object { $Matches[1].Trim() })
+        }
+    }
+    catch { }
+
     $unsigned = @()
     $recentlyChanged = @()
     try {
@@ -766,6 +777,7 @@ function Get-WinPulseDriverAnalysis {
 
     return [ordered]@{
         Problematic     = $problematic
+        ProblemDevices  = $problemDevices
         Unsigned        = $unsigned
         RecentlyChanged = $recentlyChanged
     }
@@ -1268,6 +1280,7 @@ function Invoke-CoreScan {
             DomainJoined = $false
             Domain = 'Unknown'
             Firmware = 'Unknown'
+            DumpInfo = $null
         }
         Hardware    = [ordered]@{
             Ram = [ordered]@{
@@ -1353,11 +1366,31 @@ function Invoke-CoreScan {
             DomainJoined = $domainJoined
             Domain = $domainLabel
             Firmware = $firmwareMode
+            DumpInfo = $null
         }
     }
     catch {
         $result.Errors += "SYSTEM scan failed: $($_.Exception.Message)"
     }
+
+    $dumpInfo = [ordered]@{
+        MinidumpCount  = 0
+        MinidumpNewest = $null
+        FullDumpExists = $false
+    }
+    try {
+        $mdPath = Join-Path -Path $env:SystemRoot -ChildPath 'Minidump'
+        if (Test-Path -LiteralPath $mdPath -ErrorAction SilentlyContinue) {
+            $mdFiles = @(Get-ChildItem -LiteralPath $mdPath -Filter '*.dmp' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+            $dumpInfo['MinidumpCount'] = $mdFiles.Count
+            if ($mdFiles.Count -gt 0) {
+                $dumpInfo['MinidumpNewest'] = $mdFiles[0].LastWriteTime
+            }
+        }
+        $dumpInfo['FullDumpExists'] = Test-Path -LiteralPath (Join-Path -Path $env:SystemRoot -ChildPath 'memory.dmp') -ErrorAction SilentlyContinue
+    }
+    catch { }
+    $result.System['DumpInfo'] = $dumpInfo
 
     try {
         if (-not $os) { $os = Get-CimInstance -ClassName Win32_OperatingSystem }
@@ -2517,6 +2550,25 @@ function Get-WinPulseTriageFindings {
     if ($scan.Health.BsodRecentCount -gt 0) {
         $findings += [pscustomobject]@{ Severity = 'Critical'; Message = ('BSOD events (7d): {0}' -f $scan.Health.BsodRecentCount) }
     }
+    $dumpInfo = if ($scan.System) { Get-WinPulseObjectValue -inputobject $scan.System -name 'DumpInfo' } else { $null }
+    if ($dumpInfo) {
+        $minidumpCountValue = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpCount'
+        $minidumpCount = if ($null -ne $minidumpCountValue) { [int]$minidumpCountValue } else { 0 }
+        if ($minidumpCount -gt 0) {
+            $newest = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpNewest'
+            $newestText = 'unknown'
+            if ($newest -is [datetime]) {
+                $newestText = $newest.ToString('yyyy-MM-dd HH:mm')
+            }
+            elseif ($null -ne $newest -and -not [string]::IsNullOrWhiteSpace([string]$newest)) {
+                $newestText = [string]$newest
+            }
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('{0} minidump(s) found (newest: {1}). Machine may have crashed recently.' -f $minidumpCount, $newestText) }
+        }
+        if ([bool](Get-WinPulseObjectValue -inputobject $dumpInfo -name 'FullDumpExists')) {
+            $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'Full memory dump found in Windows root. Machine has had a kernel crash.' }
+        }
+    }
     if ($scan.Hardware.Disks | Where-Object { $_.Drive -eq 'C:' -and $_.UsedPercent -ge 90 }) {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = 'System drive C: usage is above 90%.' }
     }
@@ -2532,6 +2584,16 @@ function Get-WinPulseTriageFindings {
     if ($scan.Drivers -and $scan.Drivers.Problematic.Count -gt 0) {
         $sev = if ($scan.Drivers.Problematic.Count -gt 3) { 'Critical' } else { 'Warning' }
         $findings += [pscustomobject]@{ Severity = $sev; Message = ('Problematic device drivers: {0}' -f $scan.Drivers.Problematic.Count) }
+    }
+    $problemDevicesRaw = if ($scan.Drivers) { Get-WinPulseObjectValue -inputobject $scan.Drivers -name 'ProblemDevices' } else { @() }
+    $problemDevices = @($problemDevicesRaw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($problemDevices.Count -gt 0) {
+        $shownIds = @($problemDevices | Select-Object -First 2)
+        $idText = $shownIds -join ', '
+        if ($problemDevices.Count -gt 2) {
+            $idText = '{0}... (see Diagnostics)' -f $idText
+        }
+        $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('{0} device(s) in error state: {1}' -f $problemDevices.Count, $idText) }
     }
     if ($scan.Startup -and $scan.Startup.FailedAutoServices.Count -gt 3) {
         $findings += [pscustomobject]@{ Severity = 'Warning'; Message = ('Failed auto-start services: {0}' -f $scan.Startup.FailedAutoServices.Count) }
@@ -10610,6 +10672,8 @@ function Show-WinPulseDiagnosticsDrivers {
     Write-WinPulseHeader -title 'Drivers'
     $problematic = if ($scan.Drivers -and $scan.Drivers.Problematic) { @($scan.Drivers.Problematic) } else { @() }
     $unsigned = if ($scan.Drivers -and $scan.Drivers.Unsigned) { @($scan.Drivers.Unsigned) } else { @() }
+    $problemDevicesRaw = if ($scan.Drivers) { Get-WinPulseObjectValue -inputobject $scan.Drivers -name 'ProblemDevices' } else { @() }
+    $problemDevices = @($problemDevicesRaw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 
     if ($problematic.Count -gt 0) {
         Write-Host ('  Problematic drivers ({0}):' -f $problematic.Count) -ForegroundColor Yellow
@@ -10630,6 +10694,17 @@ function Show-WinPulseDiagnosticsDrivers {
     }
     else {
         Write-Host '  Unsigned drivers: OK' -ForegroundColor Green
+    }
+
+    Write-Host ''
+    if ($problemDevices.Count -gt 0) {
+        Write-Host ('  Devices in error state ({0}):' -f $problemDevices.Count) -ForegroundColor Yellow
+        foreach ($id in $problemDevices) {
+            Write-Host ('    [WARN] {0}' -f $id) -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host '  No PnP error-state devices.' -ForegroundColor Gray
     }
     Write-Host ''
     Wait-WinPulseKey
@@ -10682,6 +10757,35 @@ function Show-WinPulseDiagnosticsSystem {
     Write-Host ('  RAM      : {0} total, {1}' -f $ramTotal, $ramType) -ForegroundColor White
     Write-Host ('  TPM      : {0}' -f $tpmLabel) -ForegroundColor White
     Write-Host ('  BIOS     : {0}  {1}' -f $biosVersion, $biosDate) -ForegroundColor White
+
+    $dumpInfo = if ($scan.System) { Get-WinPulseObjectValue -inputobject $scan.System -name 'DumpInfo' } else { $null }
+    $minidumpCount = 0
+    $minidumpNewest = $null
+    $fullDumpExists = $false
+    if ($dumpInfo) {
+        $minidumpCountValue = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpCount'
+        if ($null -ne $minidumpCountValue) { $minidumpCount = [int]$minidumpCountValue }
+        $minidumpNewest = Get-WinPulseObjectValue -inputobject $dumpInfo -name 'MinidumpNewest'
+        $fullDumpExists = [bool](Get-WinPulseObjectValue -inputobject $dumpInfo -name 'FullDumpExists')
+    }
+
+    Write-Host ''
+    $dumpHeaderColor = if ($minidumpCount -gt 0 -or $fullDumpExists) { 'Yellow' } else { 'White' }
+    Write-Host '  Crash Dumps:' -ForegroundColor $dumpHeaderColor
+    if ($minidumpCount -gt 0) {
+        $newestText = 'unknown'
+        if ($minidumpNewest -is [datetime]) {
+            $newestText = $minidumpNewest.ToString('yyyy-MM-dd HH:mm')
+        }
+        elseif ($null -ne $minidumpNewest -and -not [string]::IsNullOrWhiteSpace([string]$minidumpNewest)) {
+            $newestText = [string]$minidumpNewest
+        }
+        Write-Host ('    Crash dumps: {0} minidump(s), newest {1}' -f $minidumpCount, $newestText) -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '    No crash dumps found.' -ForegroundColor Gray
+    }
+    Write-Host ('    Full memory dump: {0}' -f $(if ($fullDumpExists) { 'Yes' } else { 'No' })) -ForegroundColor $(if ($fullDumpExists) { 'Yellow' } else { 'Gray' })
     Write-Host ''
     Wait-WinPulseKey
 }
