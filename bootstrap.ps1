@@ -53,8 +53,8 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.3-20260604'
-$script:WinPulseBoxColor = 'DarkCyan'
+$script:WinPulseVersion = '0.14.4-20260604'
+$script:WinPulseBoxColor = 'Gray'
 
 function Test-WinPulseIsAdmin {
     [CmdletBinding()]
@@ -1774,7 +1774,9 @@ function Select-WinPulseMenuItem {
             $drawnLines = 0
 
             # Top border
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $Title, ([string][char]0x2550 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline $Title -ForegroundColor White
+            Write-Host (' {0}{1}' -f ([string][char]0x2550 * [math]::Max(1, $w - $Title.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -1933,7 +1935,9 @@ function Select-WinPulseMultiMenuItem {
             # Top border + scroll indicator
             $scrollInfo = if ($Items.Count -gt $maxViewport) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
             $titleFull = if ($scrollInfo) { '{0}  {1}' -f $Title, $scrollInfo } else { $Title }
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline $titleFull -ForegroundColor White
+            Write-Host (' {0}{1}' -f ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             # Render only items in viewport window
@@ -2155,7 +2159,9 @@ function Select-WinPulseFolderPath {
                 $titleFull = $titleFull.Substring(0, $titleMax - 3) + '...'
             }
 
-            Write-Host ('  {0}{1} {2} {3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleFull, ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline $titleFull -ForegroundColor White
+            Write-Host (' {0}{1}' -f ([string][char]0x2550 * [math]::Max(1, $w - $titleFull.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
 
             $rendered = 0
@@ -2346,7 +2352,9 @@ function Show-WinPulseDashboard {
     # Top header (includes the build version for support/screenshots)
     $titleBar = ' WinPulse {0} ' -f $script:WinPulseVersion
     $titleFill = [math]::Max(1, $w - 4 - $titleBar.Length)
-    Write-Host ('  {0}{1}{2}{3}{4}' -f ([char]0x2554), ([string][char]0x2550 * 2), $titleBar, ([string][char]0x2550 * $titleFill), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline ('  {0}{1}' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline $titleBar -ForegroundColor White
+    Write-Host ('{0}{1}' -f ([string][char]0x2550 * $titleFill), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
 
     # System line
     $sysLine = ' {0} | {1} | up {2}' -f $scan.System.Hostname, $scan.System.WindowsVersion, $scan.System.Uptime
