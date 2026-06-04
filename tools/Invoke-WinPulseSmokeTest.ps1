@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'W11Readiness', 'ExportBundle')]
+    [ValidateSet('MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'W11Readiness', 'ExportBundle')]
     [string]$Mode = 'MigrationPreflight',
 
     [string]$BootstrapPath = $null
@@ -149,7 +149,7 @@ Write-Host ('WinPulse smoke test: {0}' -f $Mode) -ForegroundColor Cyan
 Write-Host ('Bootstrap: {0}' -f $BootstrapPath) -ForegroundColor Gray
 Write-Host ('Logs: {0}' -f $logRoot) -ForegroundColor Gray
 
-if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps')) {
+if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive')) {
     Write-Host ''
     Write-Host 'WARNING: run this smoke test from an elevated Windows PowerShell window.' -ForegroundColor Yellow
     Write-Host 'Parser errors will still be captured, but runtime output from auto-elevated child windows may not be captured.' -ForegroundColor Yellow
@@ -602,6 +602,53 @@ try {
         $stderrParts += $missingAppsRun.Stderr
         if ($missingAppsRun.ExitCode -ne 0) {
             throw ('MigrationApps missing-export fixture exited with {0}' -f $missingAppsRun.ExitCode)
+        }
+
+        $expectedFilesPresent = $true
+    }
+    elseif ($Mode -eq 'MigrationLive') {
+        $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
+        $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')
+        $desktop = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'Desktop')
+        $backupRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('LiveBackup')
+        $restoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('LiveRestore')
+        New-Item -Path $desktop -ItemType Directory -Force | Out-Null
+        Set-Content -Path (Join-Path -Path $desktop -ChildPath 'sample.txt') -Value 'WinPulse live migration smoke fixture' -Encoding ASCII
+
+        $liveArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', (Convert-SmokeArgument -Value $BootstrapPath),
+            '-Mode', 'MigrationLive',
+            '-LiveSourceHost', 'SmokeHost',
+            '-LiveUsers', 'tester',
+            '-LiveFolders', 'Desktop',
+            '-LiveDestination', (Convert-SmokeArgument -Value $backupRoot),
+            '-LiveRestoreRoot', (Convert-SmokeArgument -Value $restoreRoot),
+            '-_LiveProfilesRoot', (Convert-SmokeArgument -Value $usersRoot)
+        )
+        $liveRun = Invoke-SmokeChildProcess -PowerShellPath $powershell -Arguments $liveArguments
+        $stdoutParts += $liveRun.Stdout
+        $stderrParts += $liveRun.Stderr
+        if ($liveRun.ExitCode -ne 0) {
+            throw ('MigrationLive dry-run fixture exited with {0}' -f $liveRun.ExitCode)
+        }
+        if ([string]$liveRun.Stdout -notmatch 'Dry-run complete' -or [string]$liveRun.Stdout -notmatch 'Plan:') {
+            throw 'MigrationLive dry-run fixture did not print the expected plan and dry-run summary.'
+        }
+
+        $liveManifestPath = Join-Path -Path $backupRoot -ChildPath 'manifest.json'
+        Assert-SmokeFile -Path $liveManifestPath
+        $liveManifest = Get-Content -LiteralPath $liveManifestPath -Raw | ConvertFrom-Json
+        if ([string]$liveManifest.Tool.Action -ne 'DryRun') {
+            throw ('MigrationLive fixture action was {0}, expected DryRun.' -f $liveManifest.Tool.Action)
+        }
+        if (@($liveManifest.Users) -notcontains 'tester' -or @($liveManifest.Folders) -notcontains 'Desktop') {
+            throw 'MigrationLive fixture manifest did not record the selected user and folder.'
+        }
+        $liveCopiedFile = Join-SmokePath -Path $backupRoot -ChildPath @('tester', 'Desktop', 'sample.txt')
+        if (Test-Path -LiteralPath $liveCopiedFile) {
+            throw 'MigrationLive dry-run fixture copied a file.'
         }
 
         $expectedFilesPresent = $true

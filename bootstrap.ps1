@@ -1,7 +1,7 @@
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')]
+    [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'ExportBundle')]
     [string]$Mode = 'Triage',
 
     [string[]]$BackupUsers = @(),
@@ -26,10 +26,18 @@ param(
 
     [string]$AppsBackupPath = $null,
     [switch]$AppsExecute,
-    [string[]]$AppsSelect = @()
+    [string[]]$AppsSelect = @(),
+
+    [string]$LiveSourceHost = $null,
+    [string[]]$LiveUsers = @(),
+    [string[]]$LiveFolders = @(),
+    [string]$LiveDestination = $null,
+    [string]$LiveRestoreRoot = $null,
+    [switch]$LiveExecute,
+    [string]$_LiveProfilesRoot = $null
 )
 
-$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')
+$validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'ExportBundle')
 $modeOverride = $null
 $globalMode = Get-Variable -Name WinPulseMode -Scope Global -ErrorAction SilentlyContinue
 if ($globalMode -and -not [string]::IsNullOrWhiteSpace([string]$globalMode.Value)) {
@@ -119,7 +127,7 @@ function Start-WinPulseElevation {
         $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $tempScript))
     }
 
-    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')) {
+    if ($mode -in @('W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'ExportBundle')) {
         $args = @('-NoExit') + $args
     }
 
@@ -3736,6 +3744,38 @@ function Get-WinPulseMigrationProfiles {
     return @($profiles)
 }
 
+function Get-WinPulseRemoteUsersRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Hostname
+    )
+
+    $h = $Hostname.Trim().TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($h)) { return $null }
+    if ($h.IndexOfAny([char[]]@('\', '/', ':')) -ge 0) {
+        Write-Host '  Invalid source. Enter a hostname or IP address, not a path.' -ForegroundColor Red
+        return $null
+    }
+
+    $adminShare = '\\{0}\C$' -f $h
+    $uncRoot = '{0}\Users' -f $adminShare
+    Write-Host ('  Checking reachability of {0} ...' -f $adminShare) -ForegroundColor Gray
+    try {
+        if (-not (Test-Path -LiteralPath $adminShare -ErrorAction Stop)) {
+            Write-Host '  Not reachable. Verify hostname, admin rights, C$ share and firewall.' -ForegroundColor Red
+            return $null
+        }
+    }
+    catch {
+        Write-Host ('  Not reachable: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        return $null
+    }
+
+    Write-Host ('  Reachable: {0}' -f $uncRoot) -ForegroundColor Green
+    return $uncRoot
+}
+
 function Get-WinPulseOneDriveSignals {
     [CmdletBinding()]
     param(
@@ -7233,6 +7273,183 @@ function Invoke-WinPulseMigrationRestore {
     }
 }
 
+function Invoke-WinPulseMigrationLive {
+    [CmdletBinding()]
+    param(
+        [string]$LiveSourceHost = $null,
+        [string[]]$LiveUsers = @(),
+        [string[]]$LiveFolders = @(),
+        [string]$LiveDestination = $null,
+        [string]$LiveRestoreRoot = $null,
+        [switch]$LiveExecute,
+        [string]$_LiveProfilesRoot = $null
+    )
+
+    $nonInteractive = (-not [string]::IsNullOrWhiteSpace($LiveSourceHost))
+
+    # Step 1 - Get hostname.
+    if ($nonInteractive) {
+        $hostname = $LiveSourceHost.Trim()
+    }
+    else {
+        Clear-Host
+        Write-WinPulseHeader -title 'Live Migration'
+        Write-Host ''
+        Write-Host '  Pull data from a remote PC directly over the network.' -ForegroundColor Gray
+        Write-Host '  The remote PC must be on, reachable, and you need admin rights on it.' -ForegroundColor Gray
+        Write-Host ''
+        $hostname = Read-Host '  Source PC hostname or IP'
+        if ([string]::IsNullOrWhiteSpace($hostname)) { return $null }
+    }
+
+    # Step 2 - Reachability.
+    if (-not [string]::IsNullOrWhiteSpace($_LiveProfilesRoot)) {
+        $remoteUsersRoot = $_LiveProfilesRoot.Trim()
+        Write-Host ('  Using test profile root: {0}' -f $remoteUsersRoot) -ForegroundColor Gray
+    }
+    else {
+        $remoteUsersRoot = Get-WinPulseRemoteUsersRoot -Hostname $hostname
+    }
+    if (-not $remoteUsersRoot) {
+        if (-not $nonInteractive) { Wait-WinPulseKey }
+        return $null
+    }
+
+    # Step 3 - Profile discovery.
+    $profiles = @(Get-WinPulseMigrationProfiles -Root $remoteUsersRoot)
+    if ($profiles.Count -eq 0) {
+        Write-Host '  No user profiles found on remote PC.' -ForegroundColor Yellow
+        if (-not $nonInteractive) { Wait-WinPulseKey }
+        return $null
+    }
+
+    # Step 4 - User selection.
+    $liveUserKeys = @(ConvertTo-WinPulseStringList -values $LiveUsers)
+    if ($nonInteractive -and $liveUserKeys.Count -gt 0) {
+        $requestedUsers = @{}
+        foreach ($userKey in $liveUserKeys) {
+            $requestedUsers[$userKey.ToLowerInvariant()] = $true
+        }
+        $selectedUserKeys = @($profiles | Where-Object { $requestedUsers.ContainsKey(([string]$_.UserName).ToLowerInvariant()) } | ForEach-Object { [string]$_.UserName })
+    }
+    else {
+        $selectedUserKeys = @(Select-WinPulseBackupUsers -profiles $profiles)
+    }
+    if ($selectedUserKeys.Count -eq 0) {
+        Write-Host '  No users selected. Live migration cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+
+    # Step 5 - Folder selection.
+    $liveFolderKeys = @(ConvertTo-WinPulseStringList -values $LiveFolders)
+    if ($nonInteractive -and $liveFolderKeys.Count -gt 0) {
+        $selectedFolders = @($liveFolderKeys)
+    }
+    else {
+        $selectedFolders = @(Select-WinPulseBackupFolders)
+    }
+    if ($selectedFolders.Count -eq 0) {
+        Write-Host '  No folders selected. Live migration cancelled.' -ForegroundColor Yellow
+        return $null
+    }
+
+    # Step 6 - Destination and restore root.
+    if ([string]::IsNullOrWhiteSpace($LiveDestination)) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
+        $safeHost = ($hostname -replace '[\\/:*?"<>|]', '_')
+        $destination = 'C:\WinPulseBackups\LiveMigration-{0}-{1}' -f $safeHost, $stamp
+    }
+    else {
+        $destination = $LiveDestination.Trim()
+    }
+
+    $restoreRoot = if ([string]::IsNullOrWhiteSpace($LiveRestoreRoot)) { 'C:\Users' } else { $LiveRestoreRoot.Trim() }
+
+    # Step 6b - Plan display and confirmation.
+    if (-not $nonInteractive) {
+        $selectedUsersText = ($selectedUserKeys -join ', ')
+        $selectedFoldersText = ($selectedFolders -join ', ')
+
+        Write-Host ''
+        Write-Host '  Migration plan:' -ForegroundColor White
+        Write-Host ('    Source  : {0}' -f $remoteUsersRoot) -ForegroundColor Gray
+        Write-Host ('    Users   : {0}' -f $selectedUsersText) -ForegroundColor Gray
+        Write-Host ('    Folders : {0}' -f $selectedFoldersText) -ForegroundColor Gray
+        Write-Host ('    Temp    : {0}' -f $destination) -ForegroundColor Gray
+        Write-Host ('    Restore : {0}' -f $restoreRoot) -ForegroundColor Gray
+        Write-Host ''
+        Write-Host '  NOTE: locked files on the live source PC (open DBs, NTUSER.DAT)' -ForegroundColor Yellow
+        Write-Host '        will be skipped - this is normal for a running machine.' -ForegroundColor Yellow
+        Write-Host ''
+        $confirm = Select-WinPulseMenuItem -Title 'Start live migration?' -Items @(
+            @{ Label = 'Yes - copy now'; Key = 'Y'; Hint = 'Pull data and restore locally' }
+            @{ Label = 'No - cancel';    Key = 'N'; Hint = '' }
+        )
+        if ($confirm -ne 'Y') { return $null }
+        $LiveExecute = $true
+    }
+
+    # Step 7 - Phase 1: pull remote data into a local backup.
+    Write-Host ''
+    Write-Host '  === Phase 1/2: Pulling data from remote PC ===' -ForegroundColor White
+    Write-Host ''
+
+    $backupResult = Invoke-WinPulseMigrationBackup `
+        -BackupProfilesRoot $remoteUsersRoot `
+        -BackupUsers $selectedUserKeys `
+        -BackupFolders $selectedFolders `
+        -BackupDestination $destination `
+        -BackupExecute:$LiveExecute
+
+    # Step 8 - Phase 2: restore the local backup into the local users root.
+    $restoreResult = $null
+    if ($LiveExecute -and (Test-Path -LiteralPath $destination)) {
+        Write-Host ''
+        Write-Host '  === Phase 2/2: Restoring data to local PC ===' -ForegroundColor White
+        Write-Host ''
+
+        $restoreResult = Invoke-WinPulseMigrationRestore `
+            -RestoreBackupPath $destination `
+            -RestoreRoot $restoreRoot `
+            -RestoreFolders $selectedFolders `
+            -RestoreExecute
+    }
+
+    # Step 9 - Summary.
+    Write-Host ''
+    if ($LiveExecute) {
+        Write-Host '  Live migration complete.' -ForegroundColor Green
+        Write-Host ('  Source backup is kept at: {0}' -f $destination) -ForegroundColor Gray
+        Write-Host '  Run MigrationVerify on the backup folder to confirm integrity.' -ForegroundColor Gray
+    }
+    else {
+        Write-Host '  Dry-run complete. Add -LiveExecute to copy for real.' -ForegroundColor Yellow
+        Write-Host '  Equivalent command:' -ForegroundColor Gray
+        $cmd = @('.\bootstrap.ps1 -Mode MigrationLive')
+        $cmd += '-LiveSourceHost "{0}"' -f $hostname
+        $cmd += '-LiveUsers {0}' -f (($selectedUserKeys | ForEach-Object { '"{0}"' -f $_ }) -join ',')
+        $cmd += '-LiveFolders {0}' -f (($selectedFolders | ForEach-Object { '"{0}"' -f $_ }) -join ',')
+        if (-not [string]::IsNullOrWhiteSpace($LiveDestination)) { $cmd += '-LiveDestination "{0}"' -f $destination }
+        if (-not [string]::IsNullOrWhiteSpace($LiveRestoreRoot)) { $cmd += '-LiveRestoreRoot "{0}"' -f $restoreRoot }
+        $cmd += '-LiveExecute'
+        Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
+    }
+
+    if (-not $nonInteractive) { Wait-WinPulseKey }
+
+    return [pscustomobject][ordered]@{
+        SourceHost      = $hostname
+        RemoteUsersRoot = $remoteUsersRoot
+        DestinationRoot = $destination
+        RestoreRoot     = $restoreRoot
+        Users           = @($selectedUserKeys)
+        Folders         = @($selectedFolders)
+        DryRun          = (-not [bool]$LiveExecute)
+        BackupResult    = $backupResult
+        RestoreResult   = $restoreResult
+    }
+}
+
 function Show-WinPulseWindows11Readiness {
     [CmdletBinding()]
     param()
@@ -10519,6 +10736,7 @@ function Show-WinPulseMigrationMenu {
             @{ Label = 'Restore (put data back)';      Key = 'R'; Hint = 'From a backup' },
             @{ Label = 'Verify (re-check a backup)';   Key = 'V'; Hint = 'Integrity check' },
             @{ Label = 'Reinstall apps';                Key = 'A'; Hint = 'winget from backup' },
+            @{ Label = 'Live Migration';                Key = 'L'; Hint = 'Pull data from a remote PC directly' },
             @{ Separator = $true },
             @{ Label = 'Back';                         Key = 'Q'; Color = 'DarkGray' }
         )
@@ -10528,6 +10746,7 @@ function Show-WinPulseMigrationMenu {
             'R' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
             'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
             'A' { Invoke-WinPulseMigrationAppReinstall | Out-Null; Wait-WinPulseKey }
+            'L' { Invoke-WinPulseMode -Mode MigrationLive | Out-Null }
             default { return }
         }
     }
@@ -11131,7 +11350,7 @@ function Invoke-WinPulseMode {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'ExportBundle')]
+        [ValidateSet('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'ExportBundle')]
         [string]$mode,
 
         [string[]]$BackupUsers = @(),
@@ -11156,7 +11375,15 @@ function Invoke-WinPulseMode {
 
         [string]$AppsBackupPath = $null,
         [switch]$AppsExecute,
-        [string[]]$AppsSelect = @()
+        [string[]]$AppsSelect = @(),
+
+        [string]$LiveSourceHost = $null,
+        [string[]]$LiveUsers = @(),
+        [string[]]$LiveFolders = @(),
+        [string]$LiveDestination = $null,
+        [string]$LiveRestoreRoot = $null,
+        [switch]$LiveExecute,
+        [string]$_LiveProfilesRoot = $null
     )
 
     switch ($mode) {
@@ -11203,6 +11430,10 @@ function Invoke-WinPulseMode {
         }
         'MigrationApps' {
             Invoke-WinPulseMigrationAppReinstall -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect | Out-Null
+        }
+        'MigrationLive' {
+            Write-Log -level 'INFO' -message ('WinPulse {0} running live migration mode.' -f $script:WinPulseVersion)
+            Invoke-WinPulseMigrationLive -LiveSourceHost $LiveSourceHost -LiveUsers $LiveUsers -LiveFolders $LiveFolders -LiveDestination $LiveDestination -LiveRestoreRoot $LiveRestoreRoot -LiveExecute:$LiveExecute -_LiveProfilesRoot $_LiveProfilesRoot | Out-Null
         }
         'ExportBundle' {
             Write-Log -level 'INFO' -message ('WinPulse {0} running export bundle mode.' -f $script:WinPulseVersion)
@@ -11302,6 +11533,17 @@ if ($PSBoundParameters.ContainsKey('AppsSelect')) {
         $elevationPassthrough += @('-AppsSelect', (ConvertTo-WinPulseCommandArgument -value $appsSelectArgument))
     }
 }
+if ($PSBoundParameters.ContainsKey('LiveSourceHost')) { $elevationPassthrough += @('-LiveSourceHost', (ConvertTo-WinPulseCommandArgument -value $LiveSourceHost)) }
+if ($PSBoundParameters.ContainsKey('LiveUsers')) {
+    foreach ($value in @($LiveUsers)) { $elevationPassthrough += @('-LiveUsers', (ConvertTo-WinPulseCommandArgument -value $value)) }
+}
+if ($PSBoundParameters.ContainsKey('LiveFolders')) {
+    foreach ($value in @($LiveFolders)) { $elevationPassthrough += @('-LiveFolders', (ConvertTo-WinPulseCommandArgument -value $value)) }
+}
+if ($PSBoundParameters.ContainsKey('LiveDestination')) { $elevationPassthrough += @('-LiveDestination', (ConvertTo-WinPulseCommandArgument -value $LiveDestination)) }
+if ($PSBoundParameters.ContainsKey('LiveRestoreRoot')) { $elevationPassthrough += @('-LiveRestoreRoot', (ConvertTo-WinPulseCommandArgument -value $LiveRestoreRoot)) }
+if ($LiveExecute) { $elevationPassthrough += '-LiveExecute' }
+if ($PSBoundParameters.ContainsKey('_LiveProfilesRoot')) { $elevationPassthrough += @('-_LiveProfilesRoot', (ConvertTo-WinPulseCommandArgument -value $_LiveProfilesRoot)) }
 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
@@ -11321,6 +11563,10 @@ $verifyNonInteractiveForElevation = (
 $appsNonInteractiveForElevation = (
     $Mode -eq 'MigrationApps' -and
     -not [string]::IsNullOrWhiteSpace($AppsBackupPath)
+)
+$liveNonInteractiveForElevation = (
+    $Mode -eq 'MigrationLive' -and
+    -not [string]::IsNullOrWhiteSpace($LiveSourceHost)
 )
 $skipElevationForFixture = $false
 $perUserTempRoot = [IO.Path]::GetTempPath()
@@ -11342,6 +11588,12 @@ if ($verifyNonInteractiveForElevation) {
 if ($appsNonInteractiveForElevation -and -not $AppsExecute) {
     $skipElevationForFixture = $skipElevationForFixture -or (Test-WinPulsePathUnderRoot -path $AppsBackupPath -root $perUserTempRoot)
 }
+if ($liveNonInteractiveForElevation -and -not $LiveExecute -and -not [string]::IsNullOrWhiteSpace($_LiveProfilesRoot) -and -not [string]::IsNullOrWhiteSpace($LiveDestination)) {
+    $skipElevationForFixture = $skipElevationForFixture -or (
+        (Test-WinPulsePathUnderRoot -path $_LiveProfilesRoot -root $perUserTempRoot) -and
+        (Test-WinPulsePathUnderRoot -path $LiveDestination -root $perUserTempRoot)
+    )
+}
 
 if ($skipElevationForFixture) {
     $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse'
@@ -11358,4 +11610,4 @@ if ($Mode -ne 'MigrationVerify') {
     Initialize-WinPulse
 }
 
-Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -SkipBackupAppList:$SkipBackupAppList -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect
+Invoke-WinPulseMode -mode $Mode -BackupUsers $BackupUsers -BackupFolders $BackupFolders -BackupApps $BackupApps -BackupDestination $BackupDestination -BackupExecute:$BackupExecute -BackupIncludePrivateKeys:$BackupIncludePrivateKeys -BackupIncludeAppData:$BackupIncludeAppData -BackupHashSample:$BackupHashSample -SkipBackupAppList:$SkipBackupAppList -BackupProfilesRoot $BackupProfilesRoot -RestoreBackupPath $RestoreBackupPath -RestoreRoot $RestoreRoot -RestoreFolders $RestoreFolders -RestoreExecute:$RestoreExecute -RestoreHashSample:$RestoreHashSample -RestoreAsUser $RestoreAsUser -VerifyBackupPath $VerifyBackupPath -AppsBackupPath $AppsBackupPath -AppsExecute:$AppsExecute -AppsSelect $AppsSelect -LiveSourceHost $LiveSourceHost -LiveUsers $LiveUsers -LiveFolders $LiveFolders -LiveDestination $LiveDestination -LiveRestoreRoot $LiveRestoreRoot -LiveExecute:$LiveExecute -_LiveProfilesRoot $_LiveProfilesRoot
