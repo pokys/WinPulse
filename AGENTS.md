@@ -1470,6 +1470,48 @@ Acceptance (non-elevated, temp fixtures):
 Out of scope: reading or analysing dump file contents, uploading dumps, WER
 integration, any admin-only copy action.
 
+### Task C28 - Select-all / deselect-all shortcut in multi-select menus
+
+Why: multi-select menus (backup folder/user/app selection, etc.) have no way to
+quickly toggle all items. A single keypress to select or deselect everything
+saves time when a technician wants to start from "all on" or "all off".
+
+Scope:
+
+- In `Select-WinPulseMultiMenuItem` (the function that drives all multi-select
+  menus in bootstrap.ps1), inside the key-dispatch loop, add a case for `A`:
+
+  ```powershell
+  'A' {
+      $allSelected = @($menuItems | Where-Object { -not $_.Separator -and $_.Selected }).Count -eq @($menuItems | Where-Object { -not $_.Separator }).Count
+      foreach ($item in $menuItems) {
+          if (-not $item.Separator) { $item.Selected = -not $allSelected }
+      }
+  }
+  ```
+
+  Logic: if every non-separator item is already selected, deselect all;
+  otherwise select all. One press toggles the whole list either way.
+
+- Update the help bar line inside `Select-WinPulseMultiMenuItem` to include
+  the new shortcut, e.g.:
+  `Space Toggle  A All/None  Enter Confirm  Esc Cancel`
+
+- Do NOT change any other key handler, the scroll/viewport logic, the item
+  rendering, or any other function.
+
+Acceptance (non-elevated, no visual check required for logic; visual check
+for help bar):
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0 (smoke drives non-interactive paths, multi-select
+  is not exercised — this just confirms nothing regressed).
+- Code review: confirm the new `A` case does not touch any existing case and
+  that the help bar string is ASCII-only and fits within the box width (88 chars).
+
+Out of scope: single-select menus (`Select-WinPulseMenuItem`), Ctrl+A, any
+change to menu rendering beyond the help bar text.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
