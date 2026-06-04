@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.5-20260604'
+$script:WinPulseVersion = '0.14.6-20260604'
 $script:WinPulseBoxColor = 'Gray'
 
 function Test-WinPulseIsAdmin {
@@ -2500,7 +2500,7 @@ function Show-WinPulseDashboard {
     $fLabel = if ($findings.Count -gt 0) { ' Findings ({0}) ' -f $findings.Count } else { ' No findings ' }
     $fLeftLine  = [string][char]0x2550 * 2
     $fRightLine = [string][char]0x2550 * [math]::Max(1, $w - 4 - $fLabel.Length)
-    $fLabelColor = if ($findings.Count -gt 0) { 'Yellow' } else { 'Gray' }
+    $fLabelColor = if ($findings.Count -gt 0) { 'White' } else { $script:WinPulseBoxColor }
     Write-Host -NoNewline ('  {0}{1}' -f ([char]0x2560), $fLeftLine) -ForegroundColor $script:WinPulseBoxColor
     Write-Host -NoNewline $fLabel -ForegroundColor $fLabelColor
     Write-Host ('{0}{1}' -f $fRightLine, ([char]0x2563)) -ForegroundColor $script:WinPulseBoxColor
