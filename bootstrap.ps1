@@ -1986,7 +1986,7 @@ function Select-WinPulseMultiMenuItem {
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor Yellow
             $drawnLines++
-            $helpText = '  {0}/{1} Navigate  Space Toggle  Enter Confirm  Esc Cancel    {2} selected' -f ([char]0x2191), ([char]0x2193), $checked.Count
+            $helpText = '  Up/Down Navigate  Space Toggle  A All/None  Enter Confirm  Esc Cancel  {0} selected' -f $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
 
@@ -1997,6 +1997,13 @@ function Select-WinPulseMultiMenuItem {
                 38 { $sel = if ($sel -gt 0) { $sel - 1 } else { $selectableIdx.Count - 1 } }
                 40 { $sel = if ($sel -lt $selectableIdx.Count - 1) { $sel + 1 } else { 0 } }
                 32 { if ($checked.ContainsKey($selectableIdx[$sel])) { $checked.Remove($selectableIdx[$sel]) } else { $checked[$selectableIdx[$sel]] = $true } }
+                65 {
+                    $allSelected = ($checked.Count -eq $selectableIdx.Count)
+                    $checked.Clear()
+                    if (-not $allSelected) {
+                        foreach ($idx in $selectableIdx) { $checked[$idx] = $true }
+                    }
+                }
                 13 { return @($checked.Keys | Sort-Object | ForEach-Object { $Items[$_]['Key'] }) }
                 27 { return @() }
             }
