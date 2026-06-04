@@ -1512,6 +1512,211 @@ for help bar):
 Out of scope: single-select menus (`Select-WinPulseMenuItem`), Ctrl+A, any
 change to menu rendering beyond the help bar text.
 
+### Task C29 - Reduce services-finding noise: whitelist and threshold
+
+Why: the triage finding "Failed auto-start services: N" fires when more than 3
+auto-start services are stopped. Update agents (Google, Edge), telemetry
+(DiagTrack), and on-demand services (Maps, Smart Card) are routinely stopped on
+managed or user-configured machines and do not indicate a real problem. The
+finding produces noise that distracts from genuine issues.
+
+Scope:
+
+- Add a `$script:WinPulseServiceNoiselist` array near the version/color constants
+  at the top of `bootstrap.ps1`:
+
+  ```powershell
+  $script:WinPulseServiceNoiselist = @(
+      'DiagTrack', 'dmwappushservice', 'DoSvc',
+      'edgeupdate', 'edgeupdatem',
+      'gupdate', 'gupdatem',
+      'MapsBroker', 'SCardSvr', 'sppsvc',
+      'MozillaMaintenance', 'AdobeARMservice', 'Fax', 'WbioSrvc'
+  )
+  ```
+
+- In `Get-WinPulseTriageFindings`, replace the existing services finding block:
+
+  ```powershell
+  if ($scan.Startup -and $scan.Startup.FailedAutoServices) {
+      $problematic = @($scan.Startup.FailedAutoServices | Where-Object {
+          $n = [string]$_['Name']
+          ($n -notin $script:WinPulseServiceNoiselist) -and ($n -notlike 'GoogleUpdater*')
+      })
+      if ($problematic.Count -gt 5) {
+          $findings += [pscustomobject]@{
+              Severity = 'Warning'
+              Message  = ('Failed auto-start services: {0} (of {1} total stopped)' -f
+                          $problematic.Count, $scan.Startup.FailedAutoServices.Count)
+          }
+      }
+  }
+  ```
+
+  Key changes: filter out known-noisy services; raise threshold from 3 to 5;
+  include total count in message for context.
+
+- In `Show-WinPulseDiagnosticsServices` (Services detail from C25), add a note
+  below the failed services list showing how many were hidden:
+
+  ```powershell
+  $noisy = @($scan.Startup.FailedAutoServices | Where-Object {
+      $n = [string]$_['Name']
+      ($n -in $script:WinPulseServiceNoiselist) -or ($n -like 'GoogleUpdater*')
+  })
+  if ($noisy.Count -gt 0) {
+      Write-Host ('  ({0} update/telemetry/on-demand services hidden - likely benign)' -f
+                  $noisy.Count) -ForegroundColor DarkGray
+  }
+  ```
+
+- Do NOT change `Get-WinPulseStartupAnalysis` - it still collects all failed
+  auto-start services. Filtering is only in findings and display.
+
+Acceptance (non-elevated, no visual check needed):
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four smoke modes exit 0.
+- Code review: whitelist is at script scope; filter uses `-notin` (not `-ne`);
+  threshold is 5; hidden-services note appears only when `$noisy.Count -gt 0`.
+
+Out of scope: changing what `Get-WinPulseStartupAnalysis` collects, filtering by
+DisplayName, adding more services to the whitelist beyond those listed above.
+
+### Task C30 - Remote backup via SMB C$ (Phase 1 MVP)
+
+Why: technicians often need to pull a user's data from a remote PC over the
+network without logging into it physically. WinPulse's robocopy engine already
+handles UNC paths natively and `Get-WinPulseMigrationProfiles` already accepts a
+`-Root` parameter from Task C1. This task adds source selection and UNC plumbing.
+
+Safety boundaries (FIXED - do not change without asking Claude):
+- Use the technician's current Windows token only (transparent Kerberos/NTLM).
+  No `Get-Credential`, no `New-SmbMapping`, no credential prompts in Phase 1.
+- No PSRemoting (`Enter-PSSession`, `Invoke-Command`), no remote WMI execution.
+  SMB file copy does not execute code on the remote host - this is by design.
+- Locked files on a live PC (NTUSER.DAT, open browser DBs, OST) will silently
+  fail to copy. This is expected for live machines; document it in the plan
+  summary but do not treat it as a backup failure.
+- The remote root must resolve to a UNC path `\\HOST\C$\Users`. Reject anything
+  that does not produce a valid UNC.
+
+Scope:
+
+**1. Top-level parameter**
+
+Add `-BackupSourceHost <string>` to the top `param()` block. Plumb it through
+`Invoke-WinPulseMode` to `Invoke-WinPulseMigrationBackup` and the elevation
+passthrough (mirror `-BackupHashSample` and other backup switches).
+
+**2. Helper: `Get-WinPulseRemoteUsersRoot`**
+
+Add near the other `Get-WinPulse*` migration helpers:
+
+```powershell
+function Get-WinPulseRemoteUsersRoot {
+    param([Parameter(Mandatory)][string]$Hostname)
+    $hostname = $Hostname.Trim().TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($hostname)) { return $null }
+    $uncRoot = '\\{0}\C$\Users' -f $hostname
+    Write-Host ('  Checking reachability: {0} ...' -f $uncRoot) -ForegroundColor Gray
+    try {
+        if (-not (Test-Path -LiteralPath ('\\{0}\C$' -f $hostname) -ErrorAction Stop)) {
+            Write-Host '  Remote C$ not reachable. Check hostname, admin rights and firewall.' -ForegroundColor Red
+            return $null
+        }
+    }
+    catch {
+        Write-Host ('  Remote C$ not reachable: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        return $null
+    }
+    Write-Host '  Remote C$ reachable.' -ForegroundColor Green
+    return $uncRoot
+}
+```
+
+**3. Source selection in `Invoke-WinPulseMigrationBackup`**
+
+At the very start of `Invoke-WinPulseMigrationBackup`, before profile discovery,
+determine the profiles root. This REPLACES the existing `$profilesRoot = $null`
+or `-BackupProfilesRoot` default assignment. Use the existing `-BackupProfilesRoot`
+parameter to pass the UNC root through to `Get-WinPulseMigrationProfiles -Root`
+(it already exists from Task C1 — do not add a second root parameter).
+
+Non-interactive (when `-BackupSourceHost` is provided):
+```powershell
+if (-not [string]::IsNullOrWhiteSpace($BackupSourceHost)) {
+    $resolvedRoot = Get-WinPulseRemoteUsersRoot -Hostname $BackupSourceHost
+    if (-not $resolvedRoot) { return }
+    $BackupProfilesRoot = $resolvedRoot
+}
+```
+
+Interactive (when `-BackupSourceHost` is absent AND `-BackupProfilesRoot` is not
+already set by the caller):
+```powershell
+$srcChoice = Select-WinPulseMenuItem -Title 'Backup source' -Items @(
+    @{ Label = 'This PC';              Key = 'L'; Hint = 'Local C:\Users' }
+    @{ Label = 'Remote PC  (via C$)';  Key = 'R'; Hint = 'Pull from another PC over the network' }
+)
+if (-not $srcChoice) { return }
+if ($srcChoice -eq 'R') {
+    $hostname = Read-Host '  Remote hostname or IP'
+    if ([string]::IsNullOrWhiteSpace($hostname)) { return }
+    $resolvedRoot = Get-WinPulseRemoteUsersRoot -Hostname $hostname
+    if (-not $resolvedRoot) { return }
+    $BackupProfilesRoot = $resolvedRoot
+}
+# else: BackupProfilesRoot stays null = existing default (C:\Users)
+```
+
+Guard the interactive block with the same non-interactive check used elsewhere
+in the function (i.e. do NOT show the picker when the caller is already running
+non-interactively via params).
+
+**4. Manifest**
+
+Add `SourceHost` to the manifest Tool section:
+```powershell
+SourceHost = if (-not [string]::IsNullOrWhiteSpace($BackupSourceHost)) { $BackupSourceHost } else { $env:COMPUTERNAME }
+```
+
+**5. Plan/summary display**
+
+When a remote root is in use, add two lines to the pre-copy plan output
+(near where `Excluded files` and `Opt-in scope` are shown):
+```
+  Source host : \\HOSTNAME\C$\Users
+  Note: locked files on a live PC (open DBs, NTUSER.DAT) will be skipped.
+```
+
+**6. Repeat-command hint (C10)**
+
+In the post-backup repeat-command hint, append `-BackupSourceHost <hostname>`
+when a remote source was used.
+
+**7. Visual verification required**
+
+The two-item source picker (This PC / Remote PC) uses `Select-WinPulseMenuItem`.
+Build on `dev`, validate parser + ASCII + all smoke modes, then report.
+Claude will verify the picker visually before merge to main.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four migration smoke modes exit 0. Smoke uses local `-BackupProfilesRoot`
+  so the remote path is never exercised - this confirms nothing regressed.
+- Code review: `Get-WinPulseRemoteUsersRoot` contains no PSRemoting or remote
+  WMI; the UNC root is passed through the existing `-BackupProfilesRoot`
+  mechanism; the locked-files note appears in the plan summary when remote is used.
+- Visual check (Claude before merge): source picker shows "This PC / Remote PC";
+  selecting Remote prompts for hostname; unreachable host prints a clear red error
+  and cancels without crashing.
+
+Out of scope: `Get-Credential`, `New-SmbMapping`, remote restore or verify,
+VSS shadow copies, drive label enumeration, incremental over slow links,
+PSRemoting or any remote code execution.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
