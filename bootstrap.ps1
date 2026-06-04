@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.14.7-20260604'
+$script:WinPulseVersion = '0.14.8-20260604'
 $script:WinPulseBoxColor = 'Gray'
 
 function Test-WinPulseIsAdmin {
@@ -1266,6 +1266,19 @@ function Get-WinPulseVirtualizationInfo {
     }
 }
 
+function Write-WinPulseBootLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [ValidateSet('OK', 'FAIL', 'SKIP')][string]$Status = 'OK'
+    )
+    $statusText  = switch ($Status) { 'OK' { '  OK  ' } 'FAIL' { ' FAIL ' } default { ' SKIP ' } }
+    $statusColor = switch ($Status) { 'OK' { 'Green' } 'FAIL' { 'Red' } default { 'DarkGray' } }
+    Write-Host -NoNewline '[' -ForegroundColor DarkGray
+    Write-Host -NoNewline $statusText -ForegroundColor $statusColor
+    Write-Host -NoNewline '] ' -ForegroundColor DarkGray
+    Write-Host $Message -ForegroundColor Gray
+}
+
 function Invoke-CoreScan {
     [CmdletBinding()]
     param()
@@ -1349,6 +1362,7 @@ function Invoke-CoreScan {
     # is queried only once.
     $os = $null
 
+    $_ec = $result.Errors.Count
     try {
         $computer = Get-CimInstance -ClassName Win32_ComputerSystem
         $bios = Get-CimInstance -ClassName Win32_BIOS
@@ -1392,7 +1406,9 @@ function Invoke-CoreScan {
     }
     catch { }
     $result.System['DumpInfo'] = $dumpInfo
+    Write-WinPulseBootLine 'System information' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
+    $_ec = $result.Errors.Count
     try {
         if (-not $os) { $os = Get-CimInstance -ClassName Win32_OperatingSystem }
         $totalMemory = [double]$os.TotalVisibleMemorySize * 1KB
@@ -1445,7 +1461,9 @@ function Invoke-CoreScan {
     catch {
         $result.Errors += "HARDWARE scan failed: $($_.Exception.Message)"
     }
+    Write-WinPulseBootLine 'Hardware' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
+    $_ec = $result.Errors.Count
     try {
         $defenderStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
         $avProducts = @(Get-WinPulseAntivirusProducts | Where-Object { $_ -and $_.PSObject.Properties['Name'] })
@@ -1496,7 +1514,9 @@ function Invoke-CoreScan {
     catch {
         $result.Errors += "SECURITY scan failed: $($_.Exception.Message)"
     }
+    Write-WinPulseBootLine 'Security' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
+    $_ec = $result.Errors.Count
     try {
         $bsodEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 1001; StartTime = (Get-Date).AddDays(-7) } -ErrorAction SilentlyContinue)
         $wuErrors = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'; Level = 2; StartTime = (Get-Date).AddHours(-24) } -ErrorAction SilentlyContinue)
@@ -1553,7 +1573,9 @@ function Invoke-CoreScan {
     catch {
         $result.Errors += "HEALTH scan failed: $($_.Exception.Message)"
     }
+    Write-WinPulseBootLine 'Event logs and health' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
+    $_ec = $result.Errors.Count
     try {
         $ipCfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1
         $dns = if ($ipCfg) { @($ipCfg.DNSServer.ServerAddresses) } else { @() }
@@ -1580,42 +1602,43 @@ function Invoke-CoreScan {
     catch {
         $result.Errors += "NETWORK scan failed: $($_.Exception.Message)"
     }
+    Write-WinPulseBootLine 'Network' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
     # -- Extended diagnostic sections -----------------------------------------
-    Write-Host '  Scanning hardware details...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.HardwareDetail = Get-WinPulseHardwareDetail }
     catch { $result.Errors += "HW DETAIL: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'Hardware details' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning temperatures...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.Temperatures = Get-WinPulseTemperatures }
     catch { $result.Errors += "TEMPERATURES: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'Temperatures' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning TPM...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.TPM = Get-WinPulseTPMStatus }
     catch { $result.Errors += "TPM: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'TPM' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning drivers (this may take a moment)...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.Drivers = Get-WinPulseDriverAnalysis }
     catch { $result.Errors += "DRIVERS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'Drivers' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning startup items...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.Startup = Get-WinPulseStartupAnalysis }
     catch { $result.Errors += "STARTUP: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'Startup services' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning printers...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.Printers = Get-WinPulsePrinterStatus }
     catch { $result.Errors += "PRINTERS: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'Printers' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
-    Write-Host '  Scanning license...' -ForegroundColor Gray -NoNewline
+    $_ec = $result.Errors.Count
     try { $result.License = Get-WinPulseLicenseInfo }
     catch { $result.Errors += "LICENSE: $($_.Exception.Message)" }
-    Write-Host ' done' -ForegroundColor Gray
+    Write-WinPulseBootLine 'License' $(if ($result.Errors.Count -gt $_ec) { 'FAIL' } else { 'OK' })
 
     # Detail-only collectors (installed software, scheduled tasks, user
     # accounts, network detail, virtualization) are NOT needed for the dashboard
@@ -11114,18 +11137,20 @@ function Invoke-WinPulseMode {
 
     switch ($mode) {
         'Triage' {
+            try { $Host.UI.RawUI.BackgroundColor = 'Black' } catch {}
             Clear-Host
-            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor Gray
             Write-Host ''
-            Write-Host '  Loading system information...' -ForegroundColor Gray
-
+            Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
+            Write-Host ''
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
             Show-WinPulseTriageMenu -scan $scan
         }
         'Repair' {
+            try { $Host.UI.RawUI.BackgroundColor = 'Black' } catch {}
             Clear-Host
-            Write-Host ('WinPulse build: {0}' -f $script:WinPulseVersion) -ForegroundColor Gray
+            Write-Host ''
+            Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
             Write-Host ''
             Write-Host '  Loading system information...' -ForegroundColor Gray
 
