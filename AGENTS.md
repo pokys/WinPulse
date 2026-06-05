@@ -1938,6 +1938,136 @@ Do NOT merge to main until Claude approves visually.
 Out of scope: `Get-Credential`, `New-SmbMapping`, VSS shadow copies, remote
 restore or verify, incremental copy, drive label enumeration, PSRemoting.
 
+### Task C31 - Post-run "open report / log / folder" action menu
+
+Why: after a migration backup/restore/verify/apps/live run completes, the report
+and log paths are printed but the technician has to copy-paste them into Explorer
+to view them. A small action menu that opens the report, the log, or the
+containing folder with one keypress saves friction.
+
+**IMPORTANT - visual verification required.** This adds an interactive menu.
+Build on `dev`, validate parser + ASCII + all smoke modes, then report. Claude
+verifies visually before merge to main.
+
+**CRITICAL smoke-safety rule:** the action menu is interactive and MUST NEVER be
+shown on a non-interactive/scripted run (it would hang waiting for a key and
+break every smoke test). Only call it from interactive code paths - see wiring
+below. Each migration function already distinguishes interactive vs
+non-interactive; respect that.
+
+#### New helper: `Show-WinPulsePostRunActions`
+
+Add near the other `Show-WinPulse*` helpers:
+
+```powershell
+function Show-WinPulsePostRunActions {
+    [CmdletBinding()]
+    param(
+        [string]$ReportPath = $null,
+        [string]$LogPath = $null
+    )
+
+    # Folder is derived from whichever artifact exists (report preferred).
+    $folderPath = $null
+    foreach ($p in @($ReportPath, $LogPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path -LiteralPath $p)) {
+            $folderPath = Split-Path -Path $p -Parent
+            break
+        }
+    }
+
+    while ($true) {
+        $items = @()
+        if (-not [string]::IsNullOrWhiteSpace($ReportPath) -and (Test-Path -LiteralPath $ReportPath)) {
+            $items += @{ Label = 'Open report (HTML)'; Key = 'O' }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogPath) -and (Test-Path -LiteralPath $LogPath)) {
+            $items += @{ Label = 'Open log';            Key = 'L' }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($folderPath) -and (Test-Path -LiteralPath $folderPath)) {
+            $items += @{ Label = 'Open containing folder'; Key = 'F' }
+        }
+        $items += @{ Separator = $true }
+        $items += @{ Label = 'Continue'; Key = 'C'; Color = 'DarkGray' }
+
+        $choice = Select-WinPulseMenuItem -Title 'Done - open results?' -Items $items
+        switch ($choice) {
+            'O' { try { Start-Process -FilePath $ReportPath } catch { Write-Host ('  Could not open report: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            'L' { try { Start-Process -FilePath 'notepad.exe' -ArgumentList $LogPath } catch { Write-Host ('  Could not open log: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            'F' { try { Start-Process -FilePath 'explorer.exe' -ArgumentList $folderPath } catch { Write-Host ('  Could not open folder: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            default { return }
+        }
+    }
+}
+```
+
+Notes:
+- `Select-WinPulseMenuItem` returns the `Key` of the chosen item, `$null` on Esc.
+  Esc / 'C' both return (the `default` switch arm).
+- Loop so the user can open several artifacts before continuing.
+- Every open is wrapped in try/catch and is non-fatal.
+
+#### Wiring (do NOT change the migration functions' internals or returns)
+
+The migration functions already return objects carrying `ReportHtmlPath` and
+`LogPath`. Wire the helper at the INTERACTIVE call sites only.
+
+**1. `Show-WinPulseMigrationMenu`** - this is the interactive menu. It currently
+does e.g. `Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey`. For
+Backup, Restore, Verify, and Apps, capture the return and replace the trailing
+`Wait-WinPulseKey` with the action menu (fall back to `Wait-WinPulseKey` when the
+run returned nothing, e.g. cancelled):
+
+```powershell
+'B' {
+    $r = Invoke-WinPulseMigrationBackup
+    if ($r) { Show-WinPulsePostRunActions -ReportPath $r.ReportHtmlPath -LogPath $r.LogPath }
+    else { Wait-WinPulseKey }
+}
+```
+Apply the same pattern to 'R' (Restore), 'V' (Verify), 'A' (Apps) using their
+returned objects' `ReportHtmlPath` / `LogPath`. (Restore/Verify/Apps all expose
+`ReportHtmlPath` and `LogPath`; confirm each return object before wiring - if a
+field is absent on one, pass `$null` for it, do not invent it.)
+
+**2. `Invoke-WinPulseMigrationLive`** - it has its own trailing
+`if (-not $nonInteractive) { Wait-WinPulseKey }`. Replace that single line with:
+
+```powershell
+if (-not $nonInteractive) {
+    if ($LiveExecute -and $backupResult) {
+        Show-WinPulsePostRunActions -ReportPath $backupResult.ReportHtmlPath -LogPath $backupResult.LogPath
+    }
+    else {
+        Wait-WinPulseKey
+    }
+}
+```
+(Use the Phase-1 backup result's report/log - that is the live run's artifact.)
+
+#### Constraints
+
+- Do NOT call `Show-WinPulsePostRunActions` from any non-interactive path, the
+  `Invoke-WinPulseMode` dispatch, or anywhere a scripted run reaches. Smoke MUST
+  stay green.
+- Do NOT change what the migration functions collect, return, or print, beyond
+  swapping the trailing interactive `Wait-WinPulseKey` for the action menu.
+- `Start-Process` opening a local file the tool just wrote is allowed and is not a
+  safety-boundary concern (no remote execution, no secrets).
+- ASCII-only, StrictMode-safe, PS 5.1 compatible.
+
+#### Acceptance
+
+- Parser clean, ASCII check empty, git diff --check clean.
+- All four (or five, if MigrationLive smoke is present) smoke modes exit 0 - this
+  proves the interactive menu is never reached on a scripted run.
+- Visual check (Claude): after an interactive backup/restore/verify/apps/live run,
+  the "Done - open results?" menu appears, shows only the actions whose files
+  exist, opens report/log/folder, loops, and Continue/Esc returns to the menu.
+
+Out of scope: opening artifacts on non-interactive runs, a "delete backup" action,
+emailing/uploading reports, changing report/log content or location.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
