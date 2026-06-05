@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.15.1-20260605'
+$script:WinPulseVersion = '0.15.2-20260605'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -5781,7 +5781,8 @@ function Invoke-WinPulseMigrationBackup {
         [switch]$BackupIncludeAppData,
         [switch]$BackupHashSample,
         [switch]$SkipBackupAppList,
-        [string]$BackupProfilesRoot = $null
+        [string]$BackupProfilesRoot = $null,
+        [string]$BackupSourceHost = $null
     )
 
     $hasBackupParameters = (
@@ -6024,6 +6025,7 @@ function Invoke-WinPulseMigrationBackup {
             Action        = if ($dryRun) { 'DryRun' } else { 'Execute' }
             GeneratedAt   = (Get-Date).ToString('o')
             SchemaVersion = '0.1'
+            SourceHost    = if (-not [string]::IsNullOrWhiteSpace($BackupSourceHost)) { $BackupSourceHost } else { $computerName }
         }
         Computer        = $computerName
         DestinationRoot = $destinationRoot
@@ -7492,6 +7494,7 @@ function Invoke-WinPulseMigrationLive {
         -BackupUsers $selectedUserKeys `
         -BackupFolders $selectedFolders `
         -BackupDestination $destination `
+        -BackupSourceHost $hostname `
         -BackupExecute:$LiveExecute
 
     # Step 8 - Phase 2: restore the local backup into the local users root.
