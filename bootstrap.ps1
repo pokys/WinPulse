@@ -2304,6 +2304,60 @@ function Select-WinPulseFolderPath {
     }
 }
 
+function Show-WinPulsePostRunActions {
+    [CmdletBinding()]
+    param(
+        [string]$ReportPath = $null,
+        [string]$LogPath = $null
+    )
+
+    # Folder is derived from whichever artifact exists (report preferred).
+    $folderPath = $null
+    foreach ($p in @($ReportPath, $LogPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path -LiteralPath $p)) {
+            $folderPath = Split-Path -Path $p -Parent
+            break
+        }
+    }
+
+    while ($true) {
+        $items = @()
+        if (-not [string]::IsNullOrWhiteSpace($ReportPath) -and (Test-Path -LiteralPath $ReportPath)) {
+            $items += @{ Label = 'Open report (HTML)'; Key = 'O' }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogPath) -and (Test-Path -LiteralPath $LogPath)) {
+            $items += @{ Label = 'Open log';            Key = 'L' }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($folderPath) -and (Test-Path -LiteralPath $folderPath)) {
+            $items += @{ Label = 'Open containing folder'; Key = 'F' }
+        }
+        $items += @{ Separator = $true }
+        $items += @{ Label = 'Continue'; Key = 'C'; Color = 'DarkGray' }
+
+        $choice = Select-WinPulseMenuItem -Title 'Done - open results?' -Items $items
+        switch ($choice) {
+            'O' {
+                # Open the HTML report in Edge InPrivate (Edge is present on all
+                # target machines); fall back to the default handler if Edge is
+                # missing.
+                $opened = $false
+                try {
+                    Start-Process -FilePath 'msedge.exe' -ArgumentList '--inprivate', ('"{0}"' -f $ReportPath)
+                    $opened = $true
+                }
+                catch { $opened = $false }
+                if (-not $opened) {
+                    try { Start-Process -FilePath $ReportPath }
+                    catch { Write-Host ('  Could not open report: {0}' -f $_.Exception.Message) -ForegroundColor Yellow }
+                }
+            }
+            'L' { try { Start-Process -FilePath 'notepad.exe' -ArgumentList $LogPath } catch { Write-Host ('  Could not open log: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            'F' { try { Start-Process -FilePath 'explorer.exe' -ArgumentList $folderPath } catch { Write-Host ('  Could not open folder: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            default { return }
+        }
+    }
+}
+
 function Write-WinPulseDashboardLine {
     [CmdletBinding()]
     param(
@@ -7476,7 +7530,14 @@ function Invoke-WinPulseMigrationLive {
         Write-Host ('    {0}' -f ($cmd -join ' ')) -ForegroundColor Cyan
     }
 
-    if (-not $nonInteractive) { Wait-WinPulseKey }
+    if (-not $nonInteractive) {
+        if ($LiveExecute -and $backupResult) {
+            Show-WinPulsePostRunActions -ReportPath $backupResult.ReportHtmlPath -LogPath $backupResult.LogPath
+        }
+        else {
+            Wait-WinPulseKey
+        }
+    }
 
     return [pscustomobject][ordered]@{
         SourceHost      = $hostname
@@ -10784,10 +10845,42 @@ function Show-WinPulseMigrationMenu {
         )
         switch ($choice) {
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
-            'B' { Invoke-WinPulseMigrationBackup | Out-Null; Wait-WinPulseKey }
-            'R' { Invoke-WinPulseMigrationRestore | Out-Null; Wait-WinPulseKey }
-            'V' { Invoke-WinPulseMigrationVerify | Out-Null; Wait-WinPulseKey }
-            'A' { Invoke-WinPulseMigrationAppReinstall | Out-Null; Wait-WinPulseKey }
+            'B' {
+                $r = Invoke-WinPulseMigrationBackup
+                if ($r) {
+                    $reportPath = if ($r.PSObject.Properties['ReportHtmlPath']) { [string]$r.ReportHtmlPath } else { $null }
+                    $logPath = if ($r.PSObject.Properties['LogPath']) { [string]$r.LogPath } else { $null }
+                    Show-WinPulsePostRunActions -ReportPath $reportPath -LogPath $logPath
+                }
+                else { Wait-WinPulseKey }
+            }
+            'R' {
+                $r = Invoke-WinPulseMigrationRestore
+                if ($r) {
+                    $reportPath = if ($r.PSObject.Properties['ReportHtmlPath']) { [string]$r.ReportHtmlPath } else { $null }
+                    $logPath = if ($r.PSObject.Properties['LogPath']) { [string]$r.LogPath } else { $null }
+                    Show-WinPulsePostRunActions -ReportPath $reportPath -LogPath $logPath
+                }
+                else { Wait-WinPulseKey }
+            }
+            'V' {
+                $r = Invoke-WinPulseMigrationVerify
+                if ($r) {
+                    $reportPath = if ($r.PSObject.Properties['ReportHtmlPath']) { [string]$r.ReportHtmlPath } else { $null }
+                    $logPath = if ($r.PSObject.Properties['LogPath']) { [string]$r.LogPath } else { $null }
+                    Show-WinPulsePostRunActions -ReportPath $reportPath -LogPath $logPath
+                }
+                else { Wait-WinPulseKey }
+            }
+            'A' {
+                $r = Invoke-WinPulseMigrationAppReinstall
+                if ($r) {
+                    $reportPath = if ($r.PSObject.Properties['ReportHtmlPath']) { [string]$r.ReportHtmlPath } else { $null }
+                    $logPath = if ($r.PSObject.Properties['LogPath']) { [string]$r.LogPath } else { $null }
+                    Show-WinPulsePostRunActions -ReportPath $reportPath -LogPath $logPath
+                }
+                else { Wait-WinPulseKey }
+            }
             'L' { Invoke-WinPulseMode -Mode MigrationLive | Out-Null }
             default { return }
         }
