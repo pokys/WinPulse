@@ -1992,7 +1992,21 @@ function Show-WinPulsePostRunActions {
 
         $choice = Select-WinPulseMenuItem -Title 'Done - open results?' -Items $items
         switch ($choice) {
-            'O' { try { Start-Process -FilePath $ReportPath } catch { Write-Host ('  Could not open report: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
+            'O' {
+                # Open the HTML report in Edge InPrivate (Edge is present on all
+                # target machines); fall back to the default handler if Edge is
+                # missing.
+                $opened = $false
+                try {
+                    Start-Process -FilePath 'msedge.exe' -ArgumentList '--inprivate', ('"{0}"' -f $ReportPath)
+                    $opened = $true
+                }
+                catch { $opened = $false }
+                if (-not $opened) {
+                    try { Start-Process -FilePath $ReportPath }
+                    catch { Write-Host ('  Could not open report: {0}' -f $_.Exception.Message) -ForegroundColor Yellow }
+                }
+            }
             'L' { try { Start-Process -FilePath 'notepad.exe' -ArgumentList $LogPath } catch { Write-Host ('  Could not open log: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
             'F' { try { Start-Process -FilePath 'explorer.exe' -ArgumentList $folderPath } catch { Write-Host ('  Could not open folder: {0}' -f $_.Exception.Message) -ForegroundColor Yellow } }
             default { return }
@@ -2000,6 +2014,10 @@ function Show-WinPulsePostRunActions {
     }
 }
 ```
+
+Note on Edge InPrivate: `Start-Process msedge.exe` resolves via the App Paths
+registry key on a standard Windows install. The try/catch fallback to the default
+handler covers the rare machine where `msedge.exe` is not on PATH/App Paths.
 
 Notes:
 - `Select-WinPulseMenuItem` returns the `Key` of the chosen item, `$null` on Esc.
