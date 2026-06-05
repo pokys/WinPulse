@@ -3698,6 +3698,13 @@ function Get-WinPulseMigrationProfiles {
         return @()
     }
 
+    # Recursive size estimation over a network share (UNC root, e.g. a remote
+    # \\HOST\C$\Users live-migration source) is prohibitively slow - it would
+    # sum every byte of every profile over the wire. Skip sizing for UNC roots
+    # and report 'n/a (remote)'; local roots keep full size estimates.
+    $isRemoteRoot = ($usersRoot -like '\\*')
+    $remoteSizeStub = [pscustomobject][ordered]@{ Bytes = 0; Size = 'n/a (remote)' }
+
     foreach ($profile in (Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $excludeNames })) {
         $desktop = Join-Path -Path $profile.FullName -ChildPath 'Desktop'
         $documents = Join-Path -Path $profile.FullName -ChildPath 'Documents'
@@ -3707,14 +3714,26 @@ function Get-WinPulseMigrationProfiles {
         $music = Join-Path -Path $profile.FullName -ChildPath 'Music'
         $appData = Join-Path -Path $profile.FullName -ChildPath 'AppData'
 
-        $totalSize = Get-WinPulsePathSize -path $profile.FullName
-        $desktopSize = Get-WinPulsePathSize -path $desktop
-        $documentsSize = Get-WinPulsePathSize -path $documents
-        $downloadsSize = Get-WinPulsePathSize -path $downloads
-        $picturesSize = Get-WinPulsePathSize -path $pictures
-        $videosSize = Get-WinPulsePathSize -path $videos
-        $musicSize = Get-WinPulsePathSize -path $music
-        $appDataSize = Get-WinPulsePathSize -path $appData
+        if ($isRemoteRoot) {
+            $totalSize = $remoteSizeStub
+            $desktopSize = $remoteSizeStub
+            $documentsSize = $remoteSizeStub
+            $downloadsSize = $remoteSizeStub
+            $picturesSize = $remoteSizeStub
+            $videosSize = $remoteSizeStub
+            $musicSize = $remoteSizeStub
+            $appDataSize = $remoteSizeStub
+        }
+        else {
+            $totalSize = Get-WinPulsePathSize -path $profile.FullName
+            $desktopSize = Get-WinPulsePathSize -path $desktop
+            $documentsSize = Get-WinPulsePathSize -path $documents
+            $downloadsSize = Get-WinPulsePathSize -path $downloads
+            $picturesSize = Get-WinPulsePathSize -path $pictures
+            $videosSize = Get-WinPulsePathSize -path $videos
+            $musicSize = Get-WinPulsePathSize -path $music
+            $appDataSize = Get-WinPulsePathSize -path $appData
+        }
 
         $profiles += [pscustomobject][ordered]@{
             UserName            = $profile.Name
@@ -7316,6 +7335,7 @@ function Invoke-WinPulseMigrationLive {
     }
 
     # Step 3 - Profile discovery.
+    Write-Host '  Discovering user profiles on the source...' -ForegroundColor Gray
     $profiles = @(Get-WinPulseMigrationProfiles -Root $remoteUsersRoot)
     if ($profiles.Count -eq 0) {
         Write-Host '  No user profiles found on remote PC.' -ForegroundColor Yellow
