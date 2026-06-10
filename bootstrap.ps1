@@ -5231,6 +5231,8 @@ function Invoke-WinPulseRobocopy {
 
         [bool]$copyDirMetadata = $true,
 
+        [int]$multiThread = 0,
+
         [switch]$DryRun
     )
 
@@ -5255,6 +5257,9 @@ function Invoke-WinPulseRobocopy {
     foreach ($f in @($excludeFiles)) { $arguments += '/XF'; $arguments += $f }
     foreach ($d in @($excludeDirs)) { $arguments += '/XD'; $arguments += $d }
     $arguments += ('/LOG+:{0}' -f $logPath)
+    if ($multiThread -gt 0 -and -not $DryRun) {
+        $arguments += ('/MT:{0}' -f $multiThread)
+    }
 
     $note = ''
     try {
@@ -5269,11 +5274,26 @@ function Invoke-WinPulseRobocopy {
             # robocopy's per-file output to us; we show the current file on a
             # single rewriting status line. Full detail still goes to the log.
             $arguments += @('/NDL', '/TEE')
-            & $robocopy.Source @arguments | ForEach-Object {
-                $line = ([string]$_).Trim()
-                if ($line.Length -eq 0) { return }
-                if ($line.Length -gt 76) { $line = '...' + $line.Substring($line.Length - 73) }
-                Write-Host (("`r    {0}" -f $line).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor Gray
+            if ($multiThread -gt 0) {
+                $copyLineCount = 0
+                & $robocopy.Source @arguments | ForEach-Object {
+                    $line = ([string]$_).Trim()
+                    if ($line.Length -eq 0) { return }
+                    if ($line -match '^-{5,}$') { return }
+                    $copyLineCount++
+                    if (($copyLineCount % 25) -eq 0) {
+                        $statusLine = 'copying... ~{0} files done' -f $copyLineCount
+                        Write-Host (("`r    {0}" -f $statusLine).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor Gray
+                    }
+                }
+            }
+            else {
+                & $robocopy.Source @arguments | ForEach-Object {
+                    $line = ([string]$_).Trim()
+                    if ($line.Length -eq 0) { return }
+                    if ($line.Length -gt 76) { $line = '...' + $line.Substring($line.Length - 73) }
+                    Write-Host (("`r    {0}" -f $line).PadRight(84).Substring(0, 84)) -NoNewline -ForegroundColor Gray
+                }
             }
             $code = $LASTEXITCODE
             # Clear the status line so the next folder's message starts clean.
@@ -6239,9 +6259,10 @@ function Invoke-WinPulseMigrationBackup {
 
         $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
         $verb = if ($dryRun) { 'Planning' } else { 'Copying' }
-        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor Gray
+        $itemLine = if ($dryRun) { '  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder } else { '  {0} {1}\{2} ({3})...' -f $verb, $item.UserName, $item.Folder, $item.Size }
+        Write-Host $itemLine -ForegroundColor Gray
         $itemExcludeFiles = @($exclusions.Files) + @($item.ExtraExcludeFiles)
-        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -DryRun:$dryRun
+        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -multiThread 8 -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
         if ($rc.Partial) {
@@ -7508,8 +7529,9 @@ function Invoke-WinPulseMigrationRestore {
 
         $itemLog = Join-Path -Path $logFolder -ChildPath ('robocopy-{0}-{1}.log' -f $item.UserName, $item.Folder)
         $verb = if ($dryRun) { 'Planning' } else { 'Restoring' }
-        Write-Host ('  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder) -ForegroundColor Gray
-        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Target -logPath $itemLog -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -copyDirMetadata:$false -DryRun:$dryRun
+        $itemLine = if ($dryRun) { '  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder } else { '  {0} {1}\{2} ({3})...' -f $verb, $item.UserName, $item.Folder, $item.Size }
+        Write-Host $itemLine -ForegroundColor Gray
+        $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Target -logPath $itemLog -excludeFiles $restoreExclusions.Files -excludeDirs $restoreExclusions.Dirs -copyDirMetadata:$false -multiThread 8 -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
         if ($rc.Partial) {
