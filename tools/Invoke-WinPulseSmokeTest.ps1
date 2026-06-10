@@ -126,6 +126,78 @@ function Get-SmokeLatestAppsRecord {
         Select-Object -First 1
 }
 
+function Invoke-SmokeDownloadVerificationAssertions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BootstrapPath
+    )
+
+    $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeDownloadVerification-{0}' -f ([Guid]::NewGuid().ToString('N')))
+    New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
+
+    try {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($BootstrapPath, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) {
+            throw 'Could not parse bootstrap.ps1 for download verification assertions.'
+        }
+
+        $functionAst = $ast.Find({
+                param($node)
+                return ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-WinPulseDownloadedBinary')
+            }, $true)
+        if (-not $functionAst) {
+            throw 'Test-WinPulseDownloadedBinary function not found.'
+        }
+        Invoke-Expression $functionAst.Extent.Text
+
+        $payloadPath = Join-Path -Path $tempRoot -ChildPath 'payload.bin'
+        Set-Content -Path $payloadPath -Value 'WinPulse download verification smoke fixture' -Encoding ASCII
+        $correctHash = (Get-FileHash -Path $payloadPath -Algorithm SHA256 -ErrorAction Stop).Hash
+
+        $okHash = Test-WinPulseDownloadedBinary -path $payloadPath -sha256 $correctHash
+        if (-not $okHash.Ok) {
+            throw ('Correct SHA256 check failed: {0}' -f $okHash.Note)
+        }
+
+        $wrongHash = Test-WinPulseDownloadedBinary -path $payloadPath -sha256 ('0' * 64)
+        if ($wrongHash.Ok) {
+            throw 'Wrong SHA256 check unexpectedly passed.'
+        }
+        if ([string]$wrongHash.Note -notmatch 'SHA256 mismatch') {
+            throw ('Wrong SHA256 check returned an unexpected note: {0}' -f $wrongHash.Note)
+        }
+
+        $unsignedExe = Join-Path -Path $tempRoot -ChildPath 'unsigned.exe'
+        $className = 'WinPulseUnsigned' + ([Guid]::NewGuid().ToString('N'))
+        $source = 'public class {0} {{ public static void Main() {{ }} }}' -f $className
+        Add-Type -TypeDefinition $source -OutputAssembly $unsignedExe -OutputType ConsoleApplication -ErrorAction Stop
+        $unsignedCheck = Test-WinPulseDownloadedBinary -path $unsignedExe -requireSignature $true
+        if ($unsignedCheck.Ok) {
+            throw 'Unsigned executable signature check unexpectedly passed.'
+        }
+        if ([string]$unsignedCheck.Note -notmatch 'NotSigned') {
+            throw ('Unsigned executable signature note did not include NotSigned: {0}' -f $unsignedCheck.Note)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            try {
+                $resolvedTempRoot = (Resolve-Path -LiteralPath $tempRoot -ErrorAction Stop).Path
+                $resolvedTemp = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath()) -ErrorAction Stop).Path.TrimEnd('\')
+                $tempPrefix = '{0}\' -f $resolvedTemp
+                if ($resolvedTempRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force -ErrorAction Stop
+                }
+            }
+            catch {
+            }
+        }
+    }
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -183,6 +255,8 @@ $stdoutParts = @()
 $stderrParts = @()
 
 try {
+    Invoke-SmokeDownloadVerificationAssertions -BootstrapPath $BootstrapPath
+
     if ($Mode -in @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
         $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
         $usersRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('Users')

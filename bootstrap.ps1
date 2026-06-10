@@ -7886,6 +7886,7 @@ function Get-WinPulseToolCatalog {
         Autoruns = [ordered]@{
             Url = 'https://download.sysinternals.com/files/Autoruns.zip'
             Binary = 'Autoruns64.exe'
+            VerifySignature = $true
         }
         OpenHardwareMonitor = [ordered]@{
             Url = 'https://openhardwaremonitor.org/files/openhardwaremonitor-v0.9.6.zip'
@@ -7922,10 +7923,12 @@ function Get-WinPulseToolCatalog {
                 'https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe'
             )
             BinaryCandidates = @('OOSU10.exe')
+            VerifySignature = $true
         }
         SysinternalsSuite = [ordered]@{
             Url = 'https://download.sysinternals.com/files/SysinternalsSuite.zip'
             BinaryCandidates = @('procexp64.exe', 'procexp.exe', 'procmon64.exe', 'procmon.exe')
+            VerifySignature = $true
         }
     }
 }
@@ -8004,6 +8007,56 @@ function Resolve-WinPulseDownloadUrl {
     return $null
 }
 
+function Test-WinPulseDownloadedBinary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path,
+
+        [bool]$requireSignature = $false,
+
+        [string]$sha256 = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject][ordered]@{ Ok = $false; Note = ('File not found: {0}' -f $path) }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($sha256)) {
+        $expectedHash = $sha256.Trim()
+        if ($expectedHash -notmatch '^[0-9A-Fa-f]{64}$') {
+            return [pscustomobject][ordered]@{ Ok = $false; Note = 'Configured SHA256 is not a 64-character hex string.' }
+        }
+
+        try {
+            $actualHash = (Get-FileHash -Path $path -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        catch {
+            return [pscustomobject][ordered]@{ Ok = $false; Note = ('SHA256 check failed: {0}' -f $_.Exception.Message) }
+        }
+
+        if (-not [string]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject][ordered]@{ Ok = $false; Note = ('SHA256 mismatch: expected {0}, got {1}.' -f $expectedHash, $actualHash) }
+        }
+    }
+
+    if ($requireSignature) {
+        try {
+            $signature = Get-AuthenticodeSignature -FilePath $path -ErrorAction Stop
+        }
+        catch {
+            return [pscustomobject][ordered]@{ Ok = $false; Note = ('Authenticode signature check failed: {0}' -f $_.Exception.Message) }
+        }
+
+        $status = if ($signature) { [string]$signature.Status } else { 'Unknown' }
+        if ($status -ne 'Valid') {
+            return [pscustomobject][ordered]@{ Ok = $false; Note = ('Authenticode signature status: {0}.' -f $status) }
+        }
+    }
+
+    return [pscustomobject][ordered]@{ Ok = $true; Note = 'Verification passed.' }
+}
+
 function Ensure-ToolInstalled {
     [CmdletBinding()]
     param(
@@ -8017,6 +8070,15 @@ function Ensure-ToolInstalled {
     }
 
     $tool = $catalog[$name]
+    $requireSignature = $false
+    if ($tool.Contains('VerifySignature')) {
+        $requireSignature = [bool]$tool['VerifySignature']
+    }
+    $sha256 = $null
+    if ($tool.Contains('Sha256')) {
+        $sha256 = [string]$tool['Sha256']
+    }
+    $hasVerification = ($requireSignature -or -not [string]::IsNullOrWhiteSpace($sha256))
     $targetDir = Join-Path $script:WinPulsePaths.Bin $name
     $binaryCandidates = @()
     if ($tool.PSObject.Properties['BinaryCandidates'] -and $tool.BinaryCandidates) {
@@ -8029,6 +8091,14 @@ function Ensure-ToolInstalled {
     foreach ($candidate in $binaryCandidates) {
         $binaryPath = Join-Path $targetDir $candidate
         if (Test-Path -Path $binaryPath) {
+            if ($requireSignature) {
+                $cachedCheck = Test-WinPulseDownloadedBinary -path $binaryPath -requireSignature $true
+                if (-not $cachedCheck.Ok) {
+                    Write-Log -level 'WARNING' -message ('Cached tool {0} failed signature verification: {1}' -f $name, $cachedCheck.Note)
+                    Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+                    throw ("{0} failed signature verification - not running it." -f $name)
+                }
+            }
             return $binaryPath
         }
     }
@@ -8046,6 +8116,7 @@ function Ensure-ToolInstalled {
     }
 
     $downloadSucceeded = $false
+    $lastDownloadError = ''
     foreach ($source in $downloadSources) {
         $directUrl = Resolve-WinPulseDownloadUrl -sourceurl $source -toolname $name
         if (-not $directUrl) {
@@ -8067,6 +8138,13 @@ function Ensure-ToolInstalled {
         try {
             Write-Log -level 'INFO' -message ("Downloading tool {0} from {1}" -f $name, $directUrl)
             Invoke-WebRequest -Uri $directUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+
+            if (-not [string]::IsNullOrWhiteSpace($sha256)) {
+                $hashCheck = Test-WinPulseDownloadedBinary -path $downloadPath -sha256 $sha256
+                if (-not $hashCheck.Ok) {
+                    throw $hashCheck.Note
+                }
+            }
 
             if ($downloadPath -match '\.zip$') {
                 $isZip = $false
@@ -8091,7 +8169,21 @@ function Ensure-ToolInstalled {
                 Expand-Archive -Path $downloadPath -DestinationPath $targetDir -Force
             }
             elseif ($downloadPath -match '\.exe$') {
-                $destinationExe = Join-Path $targetDir ([System.IO.Path]::GetFileName($downloadPath))
+                $destinationName = [System.IO.Path]::GetFileName($downloadPath)
+                if (@($binaryCandidates).Count -eq 1) {
+                    $destinationName = [string]$binaryCandidates[0]
+                }
+                else {
+                    try {
+                        $urlFileName = [System.IO.Path]::GetFileName(([Uri]$directUrl).AbsolutePath)
+                        if (-not [string]::IsNullOrWhiteSpace($urlFileName)) {
+                            $destinationName = $urlFileName
+                        }
+                    }
+                    catch {
+                    }
+                }
+                $destinationExe = Join-Path $targetDir $destinationName
                 Copy-Item -Path $downloadPath -Destination $destinationExe -Force
             }
 
@@ -8100,12 +8192,16 @@ function Ensure-ToolInstalled {
             break
         }
         catch {
+            $lastDownloadError = $_.Exception.Message
             Write-Log -level 'WARNING' -message ("Download attempt failed for {0} ({1}): {2}" -f $name, $directUrl, $_.Exception.Message)
             Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
         }
     }
 
     if (-not $downloadSucceeded) {
+        if (-not [string]::IsNullOrWhiteSpace($lastDownloadError)) {
+            throw ("Failed to download {0} from configured sources. Last error: {1}" -f $name, $lastDownloadError)
+        }
         throw "Failed to download $name from configured sources."
     }
 
@@ -8128,6 +8224,18 @@ function Ensure-ToolInstalled {
     }
     if (-not $resolved) {
         throw "Downloaded $name but expected binary was not found."
+    }
+
+    if ($requireSignature) {
+        $signatureCheck = Test-WinPulseDownloadedBinary -path $resolved.FullName -requireSignature $true
+        if (-not $signatureCheck.Ok) {
+            Write-Log -level 'WARNING' -message ('Downloaded tool {0} failed signature verification: {1}' -f $name, $signatureCheck.Note)
+            Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+            throw ("{0} failed signature verification - not running it." -f $name)
+        }
+    }
+    elseif (-not $hasVerification) {
+        Write-Host ('  Note: {0} is not signature-verified (vendor ships unsigned binaries).' -f $name) -ForegroundColor Yellow
     }
 
     return $resolved.FullName
@@ -8419,22 +8527,12 @@ function Start-WinPulseOOShutUp {
 
     Write-Host 'O&O ShutUp10++ can change privacy/policy settings. Review options before applying.' -ForegroundColor Yellow
 
-    $targetDir = Join-Path $script:WinPulsePaths.Bin 'OOShutUp10'
-    if (-not (Test-Path -Path $targetDir)) {
-        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+    try {
+        $targetExe = Ensure-ToolInstalled -name 'OOShutUp10'
     }
-    $targetExe = Join-Path $targetDir 'OOSU10.exe'
-
-    if (-not (Test-Path -Path $targetExe)) {
-        $directUrl = 'https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe'
-        try {
-            Invoke-WebRequest -Uri $directUrl -OutFile $targetExe -UseBasicParsing -ErrorAction Stop
-        }
-        catch {
-            Write-Host ('O&O direct download failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
-            Write-Host ('Direct link: {0}' -f $directUrl) -ForegroundColor Yellow
-            return
-        }
+    catch {
+        Write-Host ('O&O download or verification failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        return
     }
 
     if (Test-Path -Path $targetExe) {
@@ -8442,8 +8540,7 @@ function Start-WinPulseOOShutUp {
         return
     }
 
-    Write-Host 'O&O executable not found after direct download.' -ForegroundColor Red
-    Write-Host 'Direct link used: https://dl5.oo-software.com/files/ooshutup10/OOSU10.exe' -ForegroundColor Yellow
+    Write-Host 'O&O executable not found after download.' -ForegroundColor Red
 }
 
 function Start-WinPulseSysinternalsSuite {
@@ -8482,6 +8579,13 @@ function Start-WinPulseSysinternalsSuite {
     }
 
     if ($exePath) {
+        $signatureCheck = Test-WinPulseDownloadedBinary -path $exePath -requireSignature $true
+        if (-not $signatureCheck.Ok) {
+            Write-Log -level 'WARNING' -message ('Process Explorer failed signature verification: {0}' -f $signatureCheck.Note)
+            Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host 'Process Explorer failed signature verification - not running it.' -ForegroundColor Red
+            return
+        }
         try {
             Write-Host ('Starting Process Explorer: {0}' -f $exePath) -ForegroundColor Cyan
             Start-Process -FilePath $exePath
