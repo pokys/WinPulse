@@ -27,8 +27,11 @@ Done 2026-06-10:
   non-interactive abort on low space). All six smoke modes green.
 - New Codex tasks queued: C33 (failed-file list from robocopy logs), C34
   (download integrity checks), C35 (multi-select '/' filter, visual verify),
-  C36 (robocopy /MT + progress counter, visual verify). Codex: start with
-  C33/C34.
+  C36 (robocopy /MT + progress counter, visual verify).
+- C33 and C34 DONE same day (Codex implemented, Claude reviewed + re-ran all
+  five non-elevated smoke modes green). Version bumped to 0.16.0-20260610.
+  Remaining from Batch 4: C35 and C36 - TUI tasks, Codex can build them but
+  Claude/owner must verify visually before merge to main.
 
 Done 2026-06-03 (second batch, not in previous note):
 - C23: CPU load % in Hardware row; WiFi SSID+signal in Network row (segment renderer).
@@ -2182,6 +2185,13 @@ Kept for reference.
 
 ### Task C33 - Name the files that failed to copy (parse robocopy logs)
 
+Status: DONE - implemented by Codex (`Get-WinPulseRobocopyFailedEntries`,
+uniform `FailedEntries`/`FailedEntryCount` on backup+restore items, console
+summary via `Write-WinPulseFailedEntrySummary`, text/HTML report sections,
+locked-file smoke fixture), reviewed by Claude 2026-06-10. Verified live in
+smoke output: locked file surfaces as `ERROR 32: Copying File ... - <message>`.
+(Kept below for reference.)
+
 Why: a PARTIAL backup/restore says only "some files could not be copied". The
 detail is in the per-item robocopy log, but nobody greps logs during a
 migration. Parse the log, surface the failed entries in the manifest, the
@@ -2235,6 +2245,14 @@ Out of scope: changing robocopy flags, retrying failed files, VSS, parsing
 non-error log lines.
 
 ### Task C34 - Integrity verification for downloaded external tools
+
+Status: DONE - implemented by Codex (`Test-WinPulseDownloadedBinary`,
+`VerifySignature` on Autoruns/SysinternalsSuite/OOSU10 only, pre-extraction
+Sha256 hook, cached-binary re-check, cleanup+throw on failure, OOShutUp
+rerouted through Ensure-ToolInstalled, Process Explorer live-path check,
+no-network smoke assertions incl. compiled unsigned exe), reviewed by Claude
+2026-06-10. NirSoft/OpenHardwareMonitor left unverified by design (unsigned
+vendors). (Kept below for reference.)
 
 Why: `Ensure-ToolInstalled` downloads EXEs/ZIPs and runs them with admin
 rights after only a ZIP magic-byte probe. A compromised mirror means arbitrary
