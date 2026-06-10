@@ -5402,6 +5402,45 @@ function Write-WinPulseFailedEntrySummary {
     Write-Host ''
 }
 
+function Get-WinPulseExtendedPath {
+    [CmdletBinding()]
+    param(
+        [string]$path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path)) { return $path }
+    if ($path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) { return $path }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($path)
+    }
+    catch {
+        return $path
+    }
+
+    if ($fullPath.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
+        return ('\\?\UNC\{0}' -f $fullPath.Substring(2))
+    }
+
+    return ('\\?\{0}' -f $fullPath)
+}
+
+function ConvertFrom-WinPulseExtendedPath {
+    [CmdletBinding()]
+    param(
+        [string]$path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($path)) { return $path }
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        return ('\\{0}' -f $path.Substring(8))
+    }
+    if ($path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        return $path.Substring(4)
+    }
+    return $path
+}
+
 function Get-WinPulseFilteredFiles {
     # Returns the files under a folder, skipping anything that matches the given
     # file name patterns or that lives under one of the excluded folder names.
@@ -5415,27 +5454,75 @@ function Get-WinPulseFilteredFiles {
     )
 
     $out = New-Object System.Collections.Generic.List[object]
-    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
         return $out.ToArray()
     }
 
-    $exDirs = @(@($excludeDirs) | ForEach-Object { $_.ToLowerInvariant() })
-    $rootLen = $path.TrimEnd('\').Length
+    try {
+        $rootPath = [System.IO.Path]::GetFullPath($path)
+    }
+    catch {
+        $rootPath = $path
+    }
+    $rootPath = (ConvertFrom-WinPulseExtendedPath -path $rootPath).TrimEnd('\')
+    $extendedRoot = Get-WinPulseExtendedPath -path $rootPath
+    if (-not [System.IO.Directory]::Exists($extendedRoot)) {
+        return $out.ToArray()
+    }
 
-    foreach ($file in (Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
-        $skip = $false
-        foreach ($pat in @($excludeFiles)) {
-            if ($file.Name -like $pat) { $skip = $true; break }
+    $exDirs = @(@($excludeDirs) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $rootLen = $rootPath.Length
+    $stack = New-Object System.Collections.Stack
+    try {
+        [void]$stack.Push((New-Object System.IO.DirectoryInfo -ArgumentList $extendedRoot))
+    }
+    catch {
+        return $out.ToArray()
+    }
+
+    while ($stack.Count -gt 0) {
+        $dir = [System.IO.DirectoryInfo]$stack.Pop()
+        $files = @()
+        try {
+            $files = $dir.GetFiles()
         }
-        if (-not $skip -and $exDirs.Count -gt 0) {
-            $dir = $file.DirectoryName
-            $relDir = if ($dir.Length -gt $rootLen) { $dir.Substring($rootLen) } else { '' }
+        catch {
+            $files = @()
+        }
+        foreach ($file in @($files)) {
+            $skip = $false
+            foreach ($pat in @($excludeFiles)) {
+                if ($file.Name -like $pat) { $skip = $true; break }
+            }
+            if ($skip) { continue }
+
+            $normalFullName = ConvertFrom-WinPulseExtendedPath -path $file.FullName
+            $normalDirectoryName = ConvertFrom-WinPulseExtendedPath -path $file.DirectoryName
+            [void]$out.Add([pscustomobject][ordered]@{
+                    Name          = $file.Name
+                    FullName      = $normalFullName
+                    DirectoryName = $normalDirectoryName
+                    Length        = $file.Length
+                })
+        }
+
+        $dirs = @()
+        try {
+            $dirs = $dir.GetDirectories()
+        }
+        catch {
+            $dirs = @()
+        }
+        foreach ($childDir in @($dirs)) {
+            $skip = $false
+            $normalDirName = ConvertFrom-WinPulseExtendedPath -path $childDir.FullName
+            $relDir = if ($normalDirName.Length -gt $rootLen) { $normalDirName.Substring($rootLen) } else { '' }
             foreach ($seg in ($relDir -split '[\\/]' | Where-Object { $_ })) {
                 if ($exDirs -contains $seg.ToLowerInvariant()) { $skip = $true; break }
             }
+            if ($skip) { continue }
+            [void]$stack.Push($childDir)
         }
-        if ($skip) { continue }
-        [void]$out.Add($file)
     }
 
     # .ToArray() instead of @($out): under StrictMode, @()-wrapping or piping a

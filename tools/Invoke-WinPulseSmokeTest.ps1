@@ -36,6 +36,46 @@ function Join-SmokePath {
     return $result
 }
 
+function Convert-SmokeExtendedPath {
+    [CmdletBinding()]
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    if ($Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) { return $Path }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        return $Path
+    }
+
+    if ($fullPath.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
+        return ('\\?\UNC\{0}' -f $fullPath.Substring(2))
+    }
+
+    return ('\\?\{0}' -f $fullPath)
+}
+
+function Remove-SmokeDirectoryTree {
+    [CmdletBinding()]
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    try {
+        [System.IO.Directory]::Delete((Convert-SmokeExtendedPath -Path $Path), $true)
+    }
+    catch {
+        if (Test-Path -LiteralPath $Path) {
+            try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch { }
+        }
+    }
+}
+
 function Convert-SmokeArgument {
     [CmdletBinding()]
     param(
@@ -84,9 +124,41 @@ function Assert-SmokeFile {
         [string]$Path
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
+    if (-not [System.IO.File]::Exists((Convert-SmokeExtendedPath -Path $Path))) {
         throw ('Expected file missing: {0}' -f $Path)
     }
+}
+
+function Get-SmokeBootstrapFunctionText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BootstrapPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Name
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($BootstrapPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) {
+        throw 'Could not parse bootstrap.ps1 for smoke helper assertions.'
+    }
+
+    $functionTexts = New-Object System.Collections.Generic.List[string]
+    foreach ($functionName in @($Name)) {
+        $functionAst = $ast.Find({
+                param($node)
+                return ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName)
+            }, $true)
+        if (-not $functionAst) {
+            throw ('{0} function not found.' -f $functionName)
+        }
+        [void]$functionTexts.Add($functionAst.Extent.Text)
+    }
+
+    return $functionTexts.ToArray()
 }
 
 function Assert-SmokeManifestCounts {
@@ -137,21 +209,9 @@ function Invoke-SmokeDownloadVerificationAssertions {
     New-Item -Path $tempRoot -ItemType Directory -Force | Out-Null
 
     try {
-        $tokens = $null
-        $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($BootstrapPath, [ref]$tokens, [ref]$errors)
-        if ($errors.Count -gt 0) {
-            throw 'Could not parse bootstrap.ps1 for download verification assertions.'
+        foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $BootstrapPath -Name @('Test-WinPulseDownloadedBinary'))) {
+            Invoke-Expression $functionText
         }
-
-        $functionAst = $ast.Find({
-                param($node)
-                return ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-WinPulseDownloadedBinary')
-            }, $true)
-        if (-not $functionAst) {
-            throw 'Test-WinPulseDownloadedBinary function not found.'
-        }
-        Invoke-Expression $functionAst.Extent.Text
 
         $payloadPath = Join-Path -Path $tempRoot -ChildPath 'payload.bin'
         Set-Content -Path $payloadPath -Value 'WinPulse download verification smoke fixture' -Encoding ASCII
@@ -189,12 +249,80 @@ function Invoke-SmokeDownloadVerificationAssertions {
                 $resolvedTemp = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath()) -ErrorAction Stop).Path.TrimEnd('\')
                 $tempPrefix = '{0}\' -f $resolvedTemp
                 if ($resolvedTempRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                    Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force -ErrorAction Stop
+                    Remove-SmokeDirectoryTree -Path $resolvedTempRoot
                 }
             }
             catch {
             }
         }
+    }
+}
+
+function Invoke-SmokeLongPathEnumerationAssertions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BootstrapPath
+    )
+
+    $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeLongPath-{0}' -f ([Guid]::NewGuid().ToString('N')))
+
+    try {
+        foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $BootstrapPath -Name @(
+                    'Get-WinPulseExtendedPath',
+                    'ConvertFrom-WinPulseExtendedPath',
+                    'Get-WinPulseFilteredFiles',
+                    'Measure-WinPulseFolderFiltered'
+                ))) {
+            Invoke-Expression $functionText
+        }
+
+        $root = Join-Path -Path $tempRoot -ChildPath 'root'
+        $segments = @(
+            'LongPathSegment0000000001',
+            'LongPathSegment0000000002',
+            'LongPathSegment0000000003',
+            'LongPathSegment0000000004',
+            'LongPathSegment0000000005',
+            'LongPathSegment0000000006',
+            'LongPathSegment0000000007',
+            'LongPathSegment0000000008',
+            'LongPathSegment0000000009',
+            'LongPathSegment0000000010'
+        )
+        $deepDir = Join-SmokePath -Path $root -ChildPath $segments
+        [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $deepDir)) | Out-Null
+        $keepFile = Join-Path -Path $deepDir -ChildPath 'keep.txt'
+        $skipFile = Join-Path -Path $deepDir -ChildPath 'skip.skip'
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path $keepFile), 'keep')
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path $skipFile), 'skip')
+
+        $excludedDir = Join-Path -Path $deepDir -ChildPath 'excluded'
+        [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $excludedDir)) | Out-Null
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path (Join-Path -Path $excludedDir -ChildPath 'hidden.txt')), 'hidden')
+
+        if ($keepFile.Length -le 260) {
+            throw 'Long-path enumeration fixture did not exceed 260 characters.'
+        }
+
+        $files = @(Get-WinPulseFilteredFiles -path $root -excludeFiles @('*.skip') -excludeDirs @('excluded'))
+        if (@($files).Count -ne 1) {
+            throw ('Long-path enumeration returned {0} files, expected 1.' -f @($files).Count)
+        }
+        if ([string]$files[0].Name -ne 'keep.txt') {
+            throw ('Long-path enumeration returned the wrong file: {0}' -f $files[0].Name)
+        }
+        if ([string]$files[0].FullName -match '^\\\\\?\\') {
+            throw 'Long-path enumeration returned an extended path for display.'
+        }
+
+        $measure = Measure-WinPulseFolderFiltered -path $root -excludeFiles @('*.skip') -excludeDirs @('excluded')
+        if ([int]$measure.Files -ne 1 -or [double]$measure.Bytes -le 0) {
+            throw ('Long-path filtered measurement returned Files={0}, Bytes={1}.' -f $measure.Files, $measure.Bytes)
+        }
+    }
+    finally {
+        Remove-SmokeDirectoryTree -Path $tempRoot
     }
 }
 
@@ -253,9 +381,12 @@ $fixtureCleaned = $false
 $processExitCode = 0
 $stdoutParts = @()
 $stderrParts = @()
+$longDesktopSegments = @()
+$longDesktopFileName = 'deep-file.txt'
 
 try {
     Invoke-SmokeDownloadVerificationAssertions -BootstrapPath $BootstrapPath
+    Invoke-SmokeLongPathEnumerationAssertions -BootstrapPath $BootstrapPath
 
     if ($Mode -in @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
         $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
@@ -270,6 +401,25 @@ try {
         $remapRestoreRoot = Join-SmokePath -Path $fixtureRoot -ChildPath @('RestoreRemap')
         New-Item -Path $desktop -ItemType Directory -Force | Out-Null
         Set-Content -Path (Join-Path -Path $desktop -ChildPath 'sample.txt') -Value 'WinPulse smoke fixture' -Encoding ASCII
+        $longDesktopSegments = @(
+            'LongPathSegment0000000001',
+            'LongPathSegment0000000002',
+            'LongPathSegment0000000003',
+            'LongPathSegment0000000004',
+            'LongPathSegment0000000005',
+            'LongPathSegment0000000006',
+            'LongPathSegment0000000007',
+            'LongPathSegment0000000008',
+            'LongPathSegment0000000009',
+            'LongPathSegment0000000010'
+        )
+        $longDesktopDirectory = Join-SmokePath -Path $desktop -ChildPath $longDesktopSegments
+        [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $longDesktopDirectory)) | Out-Null
+        $longDesktopFixtureFile = Join-Path -Path $longDesktopDirectory -ChildPath $longDesktopFileName
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path $longDesktopFixtureFile), 'WinPulse deep smoke fixture')
+        if ($longDesktopFixtureFile.Length -le 260) {
+            throw 'MigrationBackup long-path fixture did not exceed 260 characters.'
+        }
         $chromeProfile = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default')
         $firefoxProfile = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Roaming', 'Mozilla', 'Firefox', 'Profiles', 'abc.default-release')
         $outlookRoot = Join-SmokePath -Path $usersRoot -ChildPath @('tester', 'AppData', 'Local', 'Microsoft', 'Outlook')
@@ -414,6 +564,12 @@ try {
         }
         if ((Get-Content -LiteralPath $skipReportHtmlPath -Raw) -match 'failed copy entries') {
             throw 'MigrationBackup clean HTML report rendered a failed-entry section.'
+        }
+        $skipLongBackupFile = Join-SmokePath -Path $skipAppListBackupRoot -ChildPath (@('tester', 'Desktop') + $longDesktopSegments + @($longDesktopFileName))
+        Assert-SmokeFile -Path $skipLongBackupFile
+        $skipDesktopItem = $skipManifest.Items | Where-Object { $_.Folder -eq 'Desktop' } | Select-Object -First 1
+        if (-not $skipDesktopItem -or -not $skipDesktopItem.PSObject.Properties['Verification'] -or [string]$skipDesktopItem.Verification.Status -ne 'Verified') {
+            throw 'MigrationBackup clean long-path fixture did not verify the Desktop item.'
         }
         $expectedFilesPresent = $true
 
@@ -803,8 +959,11 @@ if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {
         $resolvedTemp = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath()) -ErrorAction Stop).Path.TrimEnd('\')
         $tempPrefix = '{0}\' -f $resolvedTemp
         if ($resolvedFixture.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -LiteralPath $resolvedFixture -Recurse -Force -ErrorAction Stop
-            $fixtureCleaned = $true
+            Remove-SmokeDirectoryTree -Path $resolvedFixture
+            $fixtureCleaned = -not [System.IO.Directory]::Exists((Convert-SmokeExtendedPath -Path $resolvedFixture))
+            if (-not $fixtureCleaned) {
+                throw ('Fixture directory still exists after cleanup: {0}' -f $resolvedFixture)
+            }
         }
         else {
             throw ('Refusing to remove fixture outside temp path: {0}' -f $resolvedFixture)
