@@ -2039,7 +2039,7 @@ function Select-WinPulseMultiMenuItem {
                     continue
                 }
 
-                $isActive  = ($selectableIdx[$sel] -eq $i)
+                $isActive  = ($visibleSelectableIdx.Count -gt 0 -and $visibleSelectableIdx[$sel] -eq $i)
                 $isChecked = $checked.ContainsKey($i)
                 $pointer   = if ($isActive) { '>' } else { ' ' }
                 $box       = if ($isChecked) { '[x]' } else { '[ ]' }
