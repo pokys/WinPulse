@@ -19,15 +19,18 @@ fixing it unilaterally.
 Current state: `main` and `dev/migration-preflight-foundation` in sync at
 `0.16.0-20260610`, both pushed. Clean tree.
 
-TODO - NEXT CODEX SESSION (queued 2026-06-10, Codex was out of limit): do
-tasks C35 (multi-select '/' filter) and C36 (robocopy /MT + progress counter)
-from "Work Queue - Batch 4" below, in that order, one commit each on
-`dev/migration-preflight-foundation` after `git merge main --ff-only`. Both
-change live TUI rendering: build + validate (parser check, ASCII check,
-git diff --check, all five non-elevated smoke modes), but do NOT push to main
-and do NOT claim visual correctness - Claude and the owner verify on a real
-terminal before merge. Full specs and constraints are in the C35/C36 sections
-of Batch 4.
+AWAITING OWNER VISUAL VERIFY (2026-06-10): C35 (multi-select '/' filter) and
+C36 (robocopy /MT + progress counter) are implemented by Codex and reviewed by
+Claude on `dev` (commits 92210f6, dfe722e, plus Claude fix 04a02ef). All five
+non-elevated smoke modes exit 0. These are live-TUI changes - the owner must
+verify on a real terminal before Claude bumps the version and merges to main.
+What to check: (1) in a multi-select menu (e.g. MigrationApps package list or
+backup user/folder pick) press '/', type to filter, confirm typing letters
+does NOT toggle items / All-None / confirm the menu (the bug Claude fixed),
+Space/A act on the filtered view, ticks survive clearing the filter, Esc-Esc
+cancels, and menus look unchanged when '/' is never pressed; (2) on a real
+multi-GB backup the copy shows '~N files done' counter, no garbled output, and
+is faster on a many-small-files folder.
 
 Done 2026-06-10:
 - Full product/code review by Claude -> 17 findings recorded in
@@ -2318,6 +2321,14 @@ Out of scope: GPG/cosign, certificate pinning to a specific publisher CN
 
 ### Task C35 - Type-to-filter ('/') in multi-select menus
 
+Status: DONE - implemented by Codex (92210f6), reviewed by Claude. Claude fixed
+a real bug (04a02ef): 'continue' inside a switch does NOT re-iterate the while
+loop in PowerShell, so filter-edit keystrokes leaked into the main key switch
+(typing 'a' triggered All/None, Enter confirmed the menu). Rewrote filter-edit
+as an if/elseif chain ending in one 'continue' inside the if; shortened the
+help bar to 83 chars to avoid wrapping at 88 cols. Awaiting owner visual
+verify. (Kept below for reference.)
+
 **IMPORTANT - visual verification required.** TUI rendering change. Build on
 `dev`, validate parser + ASCII + all smoke modes, report; Claude verifies
 visually before merge.
@@ -2362,6 +2373,13 @@ Out of scope: `Select-WinPulseMenuItem` (single-select), fuzzy matching,
 highlighting matched substrings, the folder picker.
 
 ### Task C36 - Robocopy /MT multithreading + copy progress counter
+
+Status: DONE - implemented by Codex (dfe722e), reviewed by Claude (matches
+spec: -multiThread param, /MT:8 on real backup/restore copies only, '~N files
+done' counter throttled every 25 lines, per-file line unchanged when
+multiThread=0, item size added to real copy lines). Smoke drives real /MT
+copies, all green. Awaiting owner visual verify on a real multi-GB copy.
+(Kept below for reference.)
 
 **IMPORTANT - visual verification required.** Changes the live copy status
 line. Build on `dev`, validate parser + ASCII + all smoke modes, report;
