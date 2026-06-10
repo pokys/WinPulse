@@ -19,18 +19,16 @@ fixing it unilaterally.
 Current state: `main` and `dev/migration-preflight-foundation` in sync at
 `0.16.0-20260610`, both pushed. Clean tree.
 
-AWAITING OWNER VISUAL VERIFY (2026-06-10): C35 (multi-select '/' filter) and
-C36 (robocopy /MT + progress counter) are implemented by Codex and reviewed by
-Claude on `dev` (commits 92210f6, dfe722e, plus Claude fix 04a02ef). All five
-non-elevated smoke modes exit 0. These are live-TUI changes - the owner must
-verify on a real terminal before Claude bumps the version and merges to main.
-What to check: (1) in a multi-select menu (e.g. MigrationApps package list or
-backup user/folder pick) press '/', type to filter, confirm typing letters
-does NOT toggle items / All-None / confirm the menu (the bug Claude fixed),
-Space/A act on the filtered view, ticks survive clearing the filter, Esc-Esc
-cancels, and menus look unchanged when '/' is never pressed; (2) on a real
-multi-GB backup the copy shows '~N files done' counter, no garbled output, and
-is faster on a many-small-files folder.
+Current state: C35 (multi-select '/' filter) and C36 (robocopy /MT + progress)
+done by Codex, reviewed + fixed by Claude, OWNER-VERIFIED on a real terminal
+2026-06-10. Version bumped to 0.18.0-20260610 on `dev`. READY TO MERGE to main
+on the owner's "hod to do mainu" signal (not merged yet).
+Claude fixed two real C35 bugs Codex's smoke could not catch: (1) 04a02ef -
+'continue' inside a switch does not re-iterate the while loop in PowerShell, so
+filter-edit keys leaked into the main key switch; (2) bf53eaf - render computed
+the active row from the unfiltered $selectableIdx while nav/toggle used the
+filtered $visibleSelectableIdx, so the cursor and the toggled row diverged
+under an active filter.
 
 Done 2026-06-10:
 - Full product/code review by Claude -> 17 findings recorded in
