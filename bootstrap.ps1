@@ -10507,6 +10507,466 @@ function Test-WeakServiceConfiguration {
     return $suspicious | Select-Object Name, DisplayName, StartName, PathName
 }
 
+function New-WinPulseCleanupTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$key,
+
+        [Parameter(Mandatory = $true)]
+        [string]$label,
+
+        [string[]]$paths = @(),
+
+        [ValidateSet('contents', 'items')]
+        [string]$mode = 'contents',
+
+        [bool]$preTicked = $false,
+
+        [bool]$needsServiceStop = $false,
+
+        [string[]]$services = @(),
+
+        [string]$note = ''
+    )
+
+    return [ordered]@{
+        Key              = $key
+        Label            = $label
+        Paths            = @($paths)
+        Mode             = $mode
+        PreTicked        = [bool]$preTicked
+        NeedsServiceStop = [bool]$needsServiceStop
+        Services         = @($services)
+        Note             = $note
+    }
+}
+
+function Get-WinPulseCleanupTargets {
+    [CmdletBinding()]
+    param(
+        [string]$tempPath = $env:TEMP,
+        [string]$windowsRoot = $env:SystemRoot,
+        [string]$programDataPath = $env:ProgramData,
+        [string]$localAppDataPath = $env:LOCALAPPDATA,
+        [string]$appDataPath = $env:APPDATA
+    )
+
+    $targets = New-Object System.Collections.Generic.List[object]
+
+    if (-not [string]::IsNullOrWhiteSpace($tempPath)) {
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'usertemp' -label 'User temporary files' -paths @($tempPath) -mode 'contents' -preTicked $true -note 'Current user temp'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($windowsRoot)) {
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'wintemp' -label 'Windows temporary files' -paths @((Join-Path -Path $windowsRoot -ChildPath 'Temp')) -mode 'contents' -preTicked $true -note 'Windows temp'))
+    }
+
+    [void]$targets.Add((New-WinPulseCleanupTarget -key 'recyclebin' -label 'Recycle Bin' -paths @() -mode 'items' -preTicked $true -note 'All fixed drives'))
+
+    if (-not [string]::IsNullOrWhiteSpace($windowsRoot)) {
+        try {
+            $windowsParent = Split-Path -Path ([System.IO.Path]::GetFullPath($windowsRoot)) -Parent
+            if (-not [string]::IsNullOrWhiteSpace($windowsParent)) {
+                $windowsOld = Join-Path -Path $windowsParent -ChildPath 'Windows.old'
+                if (Test-Path -LiteralPath $windowsOld) {
+                    [void]$targets.Add((New-WinPulseCleanupTarget -key 'windowsold' -label 'Previous Windows installation' -paths @($windowsOld) -mode 'items' -preTicked $true -note 'C:\Windows.old'))
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($windowsRoot)) {
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'wucache' -label 'Windows Update download cache' -paths @((Join-Path -Path $windowsRoot -ChildPath 'SoftwareDistribution\Download')) -mode 'contents' -needsServiceStop $true -services @('wuauserv', 'bits') -note 'Stops Windows Update services'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($programDataPath)) {
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'deliveryopt' -label 'Delivery Optimization cache' -paths @((Join-Path -Path $programDataPath -ChildPath 'Microsoft\Windows\DeliveryOptimization\Cache')) -mode 'contents' -needsServiceStop $true -services @('DoSvc', 'bits') -note 'Stops Delivery Optimization'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($localAppDataPath)) {
+        $explorerPath = Join-Path -Path $localAppDataPath -ChildPath 'Microsoft\Windows\Explorer'
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'thumbcache' -label 'Thumbnail and icon cache' -paths @(
+                    (Join-Path -Path $explorerPath -ChildPath 'thumbcache_*.db'),
+                    (Join-Path -Path $explorerPath -ChildPath 'iconcache_*.db')
+                ) -mode 'items' -note 'Explorer cache databases'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($programDataPath)) {
+        $werRoot = Join-Path -Path $programDataPath -ChildPath 'Microsoft\Windows\WER'
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'wer' -label 'Windows Error Reporting archives' -paths @(
+                    (Join-Path -Path $werRoot -ChildPath 'ReportArchive'),
+                    (Join-Path -Path $werRoot -ChildPath 'ReportQueue'),
+                    (Join-Path -Path $werRoot -ChildPath 'Temp')
+                ) -mode 'contents' -note 'Crash report queues'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($windowsRoot)) {
+        $cbsRoot = Join-Path -Path $windowsRoot -ChildPath 'Logs\CBS'
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'cbslogs' -label 'CBS log archives' -paths @(
+                    (Join-Path -Path $cbsRoot -ChildPath '*.log'),
+                    (Join-Path -Path $cbsRoot -ChildPath '*.cab')
+                ) -mode 'items' -note 'Component servicing logs'))
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'prefetch' -label 'Prefetch cache' -paths @((Join-Path -Path $windowsRoot -ChildPath 'Prefetch')) -mode 'contents' -note 'Application launch traces'))
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'memorydumps' -label 'Memory dump files' -paths @(
+                    (Join-Path -Path $windowsRoot -ChildPath 'MEMORY.DMP'),
+                    (Join-Path -Path (Join-Path -Path $windowsRoot -ChildPath 'Minidump') -ChildPath '*.dmp')
+                ) -mode 'items' -note 'Crash dumps'))
+    }
+
+    $browserPaths = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($localAppDataPath)) {
+        [void]$browserPaths.Add((Join-Path -Path $localAppDataPath -ChildPath 'Google\Chrome\User Data\Default\Cache'))
+        [void]$browserPaths.Add((Join-Path -Path $localAppDataPath -ChildPath 'Google\Chrome\User Data\Default\Code Cache'))
+        [void]$browserPaths.Add((Join-Path -Path $localAppDataPath -ChildPath 'Microsoft\Edge\User Data\Default\Cache'))
+        [void]$browserPaths.Add((Join-Path -Path $localAppDataPath -ChildPath 'Microsoft\Edge\User Data\Default\Code Cache'))
+        [void]$browserPaths.Add((Join-Path -Path $localAppDataPath -ChildPath 'Mozilla\Firefox\Profiles\*\cache2'))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($appDataPath)) {
+        [void]$browserPaths.Add((Join-Path -Path $appDataPath -ChildPath 'Mozilla\Firefox\Profiles\*\cache2'))
+    }
+    if ($browserPaths.Count -gt 0) {
+        [void]$targets.Add((New-WinPulseCleanupTarget -key 'browsercache' -label 'Browser caches' -paths $browserPaths.ToArray() -mode 'contents' -note 'Chrome, Edge, Firefox'))
+    }
+
+    return $targets.ToArray()
+}
+
+function New-WinPulseCleanupPathItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$fullName,
+
+        [bool]$isDirectory = $false,
+
+        [double]$length = 0
+    )
+
+    return [ordered]@{
+        FullName    = (ConvertFrom-WinPulseExtendedPath -path $fullName)
+        IsDirectory = [bool]$isDirectory
+        Length      = [double]$length
+    }
+}
+
+function Resolve-WinPulseCleanupPathItems {
+    [CmdletBinding()]
+    param(
+        [string[]]$paths = @()
+    )
+
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($rawPath in @($paths)) {
+        if ([string]::IsNullOrWhiteSpace($rawPath)) { continue }
+
+        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($rawPath)) {
+            $parent = Split-Path -Path $rawPath -Parent
+            $filter = Split-Path -Path $rawPath -Leaf
+            if ([string]::IsNullOrWhiteSpace($parent) -or [string]::IsNullOrWhiteSpace($filter)) { continue }
+            if (-not [System.IO.Directory]::Exists((Get-WinPulseExtendedPath -path $parent))) { continue }
+            foreach ($item in @(Get-ChildItem -LiteralPath $parent -Filter $filter -Force -ErrorAction SilentlyContinue)) {
+                if ($item.PSIsContainer) {
+                    [void]$items.Add((New-WinPulseCleanupPathItem -fullName $item.FullName -isDirectory $true))
+                }
+                else {
+                    [void]$items.Add((New-WinPulseCleanupPathItem -fullName $item.FullName -isDirectory $false -length $item.Length))
+                }
+            }
+        }
+        else {
+            $extendedPath = Get-WinPulseExtendedPath -path $rawPath
+            if ([System.IO.Directory]::Exists($extendedPath)) {
+                [void]$items.Add((New-WinPulseCleanupPathItem -fullName $rawPath -isDirectory $true))
+            }
+            elseif ([System.IO.File]::Exists($extendedPath)) {
+                $fileInfo = New-Object System.IO.FileInfo -ArgumentList $extendedPath
+                [void]$items.Add((New-WinPulseCleanupPathItem -fullName $rawPath -isDirectory $false -length $fileInfo.Length))
+            }
+        }
+    }
+
+    return $items.ToArray()
+}
+
+function Measure-WinPulseCleanupTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$target
+    )
+
+    $files = 0
+    $bytes = [double]0
+    $existingPathCount = 0
+    $key = [string]$target['Key']
+
+    if ($key -eq 'recyclebin') {
+        foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+            if ([string]::IsNullOrWhiteSpace([string]$drive.Root)) { continue }
+            $recyclePath = Join-Path -Path $drive.Root -ChildPath '$Recycle.Bin'
+            if (-not [System.IO.Directory]::Exists((Get-WinPulseExtendedPath -path $recyclePath))) { continue }
+            $existingPathCount++
+            $measure = Measure-WinPulseFolderFiltered -path $recyclePath
+            $files += [int]$measure.Files
+            $bytes += [double]$measure.Bytes
+        }
+    }
+    else {
+        foreach ($item in @(Resolve-WinPulseCleanupPathItems -paths @($target['Paths']))) {
+            $existingPathCount++
+            if ([bool]$item['IsDirectory']) {
+                $measure = Measure-WinPulseFolderFiltered -path ([string]$item['FullName'])
+                $files += [int]$measure.Files
+                $bytes += [double]$measure.Bytes
+            }
+            else {
+                $files++
+                $bytes += [double]$item['Length']
+            }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        Key               = $key
+        Label             = [string]$target['Label']
+        Files             = $files
+        Bytes             = $bytes
+        ExistingPathCount = $existingPathCount
+        PathCount         = @($target['Paths']).Count
+        Note              = [string]$target['Note']
+    }
+}
+
+function Get-WinPulseCleanupContentItems {
+    [CmdletBinding()]
+    param(
+        [string[]]$paths = @()
+    )
+
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @(Resolve-WinPulseCleanupPathItems -paths $paths)) {
+        if ([bool]$item['IsDirectory']) {
+            foreach ($child in @(Get-ChildItem -LiteralPath ([string]$item['FullName']) -Force -ErrorAction SilentlyContinue)) {
+                if ($child.PSIsContainer) {
+                    [void]$items.Add((New-WinPulseCleanupPathItem -fullName $child.FullName -isDirectory $true))
+                }
+                else {
+                    [void]$items.Add((New-WinPulseCleanupPathItem -fullName $child.FullName -isDirectory $false -length $child.Length))
+                }
+            }
+        }
+        else {
+            [void]$items.Add($item)
+        }
+    }
+    return $items.ToArray()
+}
+
+function Remove-WinPulseCleanupPathItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$item
+    )
+
+    $path = [string]$item['FullName']
+    $extendedPath = Get-WinPulseExtendedPath -path $path
+    if ([bool]$item['IsDirectory']) {
+        [System.IO.Directory]::Delete($extendedPath, $true)
+    }
+    else {
+        [System.IO.File]::Delete($extendedPath)
+    }
+}
+
+function Wait-WinPulseCleanupServiceStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$expectedStatus
+    )
+
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $service = Get-Service -Name $name -ErrorAction Stop
+            if ([string]$service.Status -eq $expectedStatus) { return $true }
+        }
+        catch {
+            return $false
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Invoke-WinPulseCleanupSelected {
+    [CmdletBinding()]
+    param(
+        [object[]]$targets = @()
+    )
+
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($target in @($targets)) {
+        $label = [string]$target['Label']
+        $errors = New-Object System.Collections.Generic.List[string]
+        $before = Measure-WinPulseCleanupTarget -target $target
+
+        if ([bool]$target['NeedsServiceStop']) {
+            foreach ($svc in @($target['Services'])) {
+                try {
+                    $service = Get-Service -Name $svc -ErrorAction Stop
+                    if ([string]$service.Status -ne 'Stopped') {
+                        Stop-Service -Name $svc -Force -ErrorAction Stop
+                    }
+                    if (-not (Wait-WinPulseCleanupServiceStatus -name $svc -expectedStatus 'Stopped')) {
+                        [void]$errors.Add(('Service {0} did not stop.' -f $svc))
+                    }
+                }
+                catch {
+                    [void]$errors.Add(('Could not stop service {0}: {1}' -f $svc, $_.Exception.Message))
+                }
+            }
+        }
+
+        try {
+            if ([string]$target['Key'] -eq 'recyclebin') {
+                $clearRecycleBin = Get-Command -Name Clear-RecycleBin -ErrorAction SilentlyContinue
+                if ($clearRecycleBin) {
+                    Clear-RecycleBin -Force -ErrorAction Stop
+                }
+                else {
+                    foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+                        if ([string]::IsNullOrWhiteSpace([string]$drive.Root)) { continue }
+                        $recyclePath = Join-Path -Path $drive.Root -ChildPath '$Recycle.Bin'
+                        foreach ($item in @(Get-WinPulseCleanupContentItems -paths @($recyclePath))) {
+                            try { Remove-WinPulseCleanupPathItem -item $item } catch { [void]$errors.Add($_.Exception.Message) }
+                        }
+                    }
+                }
+            }
+            else {
+                $deleteItems = if ([string]$target['Mode'] -eq 'contents') {
+                    @(Get-WinPulseCleanupContentItems -paths @($target['Paths']))
+                }
+                else {
+                    @(Resolve-WinPulseCleanupPathItems -paths @($target['Paths']))
+                }
+
+                foreach ($item in @($deleteItems)) {
+                    try {
+                        Remove-WinPulseCleanupPathItem -item $item
+                    }
+                    catch {
+                        [void]$errors.Add(('{0}: {1}' -f $item['FullName'], $_.Exception.Message))
+                    }
+                }
+            }
+        }
+        catch {
+            [void]$errors.Add($_.Exception.Message)
+        }
+        finally {
+            if ([bool]$target['NeedsServiceStop']) {
+                foreach ($svc in @($target['Services'])) {
+                    try {
+                        Start-Service -Name $svc -ErrorAction Stop
+                        if (-not (Wait-WinPulseCleanupServiceStatus -name $svc -expectedStatus 'Running')) {
+                            [void]$errors.Add(('Service {0} did not restart.' -f $svc))
+                        }
+                    }
+                    catch {
+                        [void]$errors.Add(('Could not restart service {0}: {1}' -f $svc, $_.Exception.Message))
+                    }
+                }
+            }
+        }
+
+        $after = Measure-WinPulseCleanupTarget -target $target
+        $freedBytes = [math]::Max([double]0, ([double]$before.Bytes - [double]$after.Bytes))
+        $result = [pscustomobject][ordered]@{
+            Key         = [string]$target['Key']
+            Label       = $label
+            BeforeBytes = [double]$before.Bytes
+            AfterBytes  = [double]$after.Bytes
+            FreedBytes  = $freedBytes
+            ErrorCount  = $errors.Count
+            Errors      = $errors.ToArray()
+        }
+        [void]$results.Add($result)
+
+        $color = if ($errors.Count -gt 0) { 'Yellow' } else { 'Green' }
+        Write-Host ('{0}: freed {1}' -f $label, (ConvertTo-ReadableSize -bytes $freedBytes)) -ForegroundColor $color
+        foreach ($errorText in $errors.ToArray()) {
+            Write-Host ('  - {0}' -f $errorText) -ForegroundColor Red
+        }
+    }
+
+    return $results.ToArray()
+}
+
+function Invoke-WinPulseOSJunkCleanupMenu {
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-WinPulseHeader -title 'OS Junk Cleanup'
+    Write-Host 'Scanning cleanup targets...' -ForegroundColor Gray
+
+    $targets = @(Get-WinPulseCleanupTargets)
+    $measureByKey = @{}
+    $menuItems = New-Object System.Collections.Generic.List[object]
+    foreach ($target in $targets) {
+        $measure = Measure-WinPulseCleanupTarget -target $target
+        $measureByKey[[string]$target['Key']] = $measure
+        [void]$menuItems.Add(@{
+                Label    = [string]$target['Label']
+                Key      = [string]$target['Key']
+                Hint     = (ConvertTo-ReadableSize -bytes ([double]$measure.Bytes))
+                Selected = [bool]$target['PreTicked']
+            })
+    }
+
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'OS junk cleanup targets' -Items $menuItems.ToArray())
+    if ($selectedKeys.Count -eq 0) {
+        Write-Host 'Cancelled.' -ForegroundColor Yellow
+        return
+    }
+
+    $selectedTargets = @($targets | Where-Object { $item = $_; $selectedKeys -contains [string]$item['Key'] })
+    $totalBytes = [double]0
+    foreach ($target in @($selectedTargets)) {
+        $key = [string]$target['Key']
+        if ($measureByKey.ContainsKey($key)) {
+            $totalBytes += [double]$measureByKey[$key].Bytes
+        }
+    }
+
+    $confirm = Select-WinPulseMenuItem -Title ('Delete selected OS junk?  Estimated: {0}' -f (ConvertTo-ReadableSize -bytes $totalBytes)) -Items @(
+        @{ Label = 'No - cancel'; Key = 'N'; Hint = 'Default'; Color = 'DarkGray' },
+        @{ Label = 'YES - delete selected'; Key = 'Y'; Hint = 'Irreversible'; Color = 'Red' }
+    )
+    if ($confirm -ne 'Y') {
+        Write-Host 'Cancelled.' -ForegroundColor Yellow
+        return
+    }
+
+    $results = @(Invoke-WinPulseCleanupSelected -targets $selectedTargets)
+    $freed = [double]0
+    $errorCount = 0
+    foreach ($result in @($results)) {
+        $freed += [double]$result.FreedBytes
+        $errorCount += [int]$result.ErrorCount
+    }
+    $summaryColor = if ($errorCount -gt 0) { 'Yellow' } else { 'Green' }
+    Write-Host ('OS junk cleanup complete. Freed {0}; errors {1}.' -f (ConvertTo-ReadableSize -bytes $freed), $errorCount) -ForegroundColor $summaryColor
+}
+
 function Invoke-WinPulseLightCleanup {
     [CmdletBinding()]
     param()
@@ -11580,13 +12040,15 @@ function Show-WinPulseCleanupMenu {
         $choice = Select-WinPulseMenuItem -Title 'Cleanup' -Items @(
             @{ Label = 'Full artifact cleanup';   Key = 'A'; Hint = 'Data/cache' },
             @{ Label = 'Light cleanup';            Key = 'L'; Hint = 'Exports only' },
-            @{ Label = 'Remove WinPulse folder';   Key = 'F'; Hint = 'Complete'; Color = 'DarkYellow' }
+            @{ Label = 'Remove WinPulse folder';   Key = 'F'; Hint = 'Complete'; Color = 'DarkYellow' },
+            @{ Label = 'OS junk cleanup';          Key = 'O'; Hint = 'Temp/cache/recycle'; Color = 'DarkYellow' }
         )
         if (-not $choice) { return }
         switch ($choice) {
             'A' { Invoke-WinPulseFullArtifactCleanup; Wait-WinPulseKey }
             'L' { Invoke-WinPulseLightCleanup; Wait-WinPulseKey }
             'F' { Remove-WinPulseCompletely; Wait-WinPulseKey }
+            'O' { Invoke-WinPulseOSJunkCleanupMenu; Wait-WinPulseKey }
             default { return }
         }
     }

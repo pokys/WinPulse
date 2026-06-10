@@ -326,6 +326,98 @@ function Invoke-SmokeLongPathEnumerationAssertions {
     }
 }
 
+function Invoke-SmokeCleanupLogicAssertions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BootstrapPath
+    )
+
+    $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeCleanup-{0}' -f ([Guid]::NewGuid().ToString('N')))
+
+    try {
+        foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $BootstrapPath -Name @(
+                    'ConvertTo-ReadableSize',
+                    'Get-WinPulseExtendedPath',
+                    'ConvertFrom-WinPulseExtendedPath',
+                    'Get-WinPulseFilteredFiles',
+                    'Measure-WinPulseFolderFiltered',
+                    'New-WinPulseCleanupTarget',
+                    'Get-WinPulseCleanupTargets',
+                    'New-WinPulseCleanupPathItem',
+                    'Resolve-WinPulseCleanupPathItems',
+                    'Measure-WinPulseCleanupTarget',
+                    'Get-WinPulseCleanupContentItems',
+                    'Remove-WinPulseCleanupPathItem',
+                    'Wait-WinPulseCleanupServiceStatus',
+                    'Invoke-WinPulseCleanupSelected'
+                ))) {
+            Invoke-Expression $functionText
+        }
+
+        $fixtureTemp = Join-SmokePath -Path $tempRoot -ChildPath @('UserTemp')
+        $fixtureNested = Join-SmokePath -Path $fixtureTemp -ChildPath @('nested')
+        [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $fixtureNested)) | Out-Null
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path (Join-Path -Path $fixtureTemp -ChildPath 'a.tmp')), 'abc')
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path (Join-Path -Path $fixtureNested -ChildPath 'b.tmp')), '12345')
+
+        $fixtureTarget = New-WinPulseCleanupTarget -key 'fixture' -label 'Fixture temp' -paths @($fixtureTemp) -mode 'contents'
+        $fixtureMeasure = Measure-WinPulseCleanupTarget -target $fixtureTarget
+        if ([int]$fixtureMeasure.Files -ne 2 -or [double]$fixtureMeasure.Bytes -ne 8) {
+            throw ('Cleanup measurement returned Files={0}, Bytes={1}, expected 2/8.' -f $fixtureMeasure.Files, $fixtureMeasure.Bytes)
+        }
+
+        $windowsRoot = Join-SmokePath -Path $tempRoot -ChildPath @('Windows')
+        $programData = Join-SmokePath -Path $tempRoot -ChildPath @('ProgramData')
+        $localAppData = Join-SmokePath -Path $tempRoot -ChildPath @('LocalAppData')
+        $appData = Join-SmokePath -Path $tempRoot -ChildPath @('AppData')
+        foreach ($path in @($windowsRoot, $programData, $localAppData, $appData)) {
+            [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $path)) | Out-Null
+        }
+
+        $targets = @(Get-WinPulseCleanupTargets -tempPath $fixtureTemp -windowsRoot $windowsRoot -programDataPath $programData -localAppDataPath $localAppData -appDataPath $appData)
+        $keys = @($targets | ForEach-Object { $item = $_; [string]$item['Key'] })
+        foreach ($requiredKey in @('usertemp', 'wintemp', 'recyclebin', 'wucache', 'deliveryopt', 'thumbcache', 'wer', 'cbslogs', 'prefetch', 'browsercache', 'memorydumps')) {
+            if ($keys -notcontains $requiredKey) {
+                throw ('Cleanup catalog did not include {0}.' -f $requiredKey)
+            }
+        }
+        if ($keys -contains 'windowsold') {
+            throw 'Cleanup catalog included windowsold even though the fixture path is absent.'
+        }
+
+        $userTempTarget = $targets | Where-Object { $item = $_; [string]$item['Key'] -eq 'usertemp' } | Select-Object -First 1
+        $winTempTarget = $targets | Where-Object { $item = $_; [string]$item['Key'] -eq 'wintemp' } | Select-Object -First 1
+        $recycleTarget = $targets | Where-Object { $item = $_; [string]$item['Key'] -eq 'recyclebin' } | Select-Object -First 1
+        $wuTarget = $targets | Where-Object { $item = $_; [string]$item['Key'] -eq 'wucache' } | Select-Object -First 1
+        if (-not [bool]$userTempTarget['PreTicked'] -or -not [bool]$winTempTarget['PreTicked'] -or -not [bool]$recycleTarget['PreTicked']) {
+            throw 'Cleanup catalog did not pre-tick the expected safe defaults.'
+        }
+        if ([bool]$wuTarget['PreTicked']) {
+            throw 'Cleanup catalog pre-ticked Windows Update cache unexpectedly.'
+        }
+
+        $deleteRoot = Join-SmokePath -Path $tempRoot -ChildPath @('DeleteOnly')
+        [System.IO.Directory]::CreateDirectory((Convert-SmokeExtendedPath -Path $deleteRoot)) | Out-Null
+        $deleteFile = Join-Path -Path $deleteRoot -ChildPath 'delete.tmp'
+        [System.IO.File]::WriteAllText((Convert-SmokeExtendedPath -Path $deleteFile), 'delete me')
+        $deleteTarget = New-WinPulseCleanupTarget -key 'deletefixture' -label 'Delete fixture' -paths @($deleteRoot) -mode 'contents'
+        $deleteResult = @(Invoke-WinPulseCleanupSelected -targets @($deleteTarget)) | Select-Object -First 1
+        if (-not $deleteResult -or [int]$deleteResult.ErrorCount -ne 0) {
+            throw 'Cleanup temp deletion fixture reported an error.'
+        }
+        if ([System.IO.File]::Exists((Convert-SmokeExtendedPath -Path $deleteFile))) {
+            throw 'Cleanup temp deletion fixture did not remove the temp file.'
+        }
+        if (-not [System.IO.Directory]::Exists((Convert-SmokeExtendedPath -Path $deleteRoot))) {
+            throw 'Cleanup temp deletion fixture removed the container directory.'
+        }
+    }
+    finally {
+        Remove-SmokeDirectoryTree -Path $tempRoot
+    }
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -387,6 +479,7 @@ $longDesktopFileName = 'deep-file.txt'
 try {
     Invoke-SmokeDownloadVerificationAssertions -BootstrapPath $BootstrapPath
     Invoke-SmokeLongPathEnumerationAssertions -BootstrapPath $BootstrapPath
+    Invoke-SmokeCleanupLogicAssertions -BootstrapPath $BootstrapPath
 
     if ($Mode -in @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
         $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
