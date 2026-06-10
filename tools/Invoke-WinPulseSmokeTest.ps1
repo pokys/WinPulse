@@ -174,6 +174,8 @@ $appVerifyRecordPath = $null
 $appsModeBackupRoot = $null
 $appsModeRecordPath = $null
 $appsModeMissingBackupRoot = $null
+$lockedFixturePath = $null
+$lockedFixtureStream = $null
 $expectedFilesPresent = $false
 $fixtureCleaned = $false
 $processExitCode = 0
@@ -228,6 +230,10 @@ try {
             throw 'MigrationBackup dry-run fixture wrote an apps sidecar folder.'
         }
 
+        $lockedFixturePath = Join-Path -Path $desktop -ChildPath 'locked-copy.txt'
+        Set-Content -Path $lockedFixturePath -Value 'locked smoke fixture' -Encoding ASCII
+        $lockedFixtureStream = [System.IO.File]::Open($lockedFixturePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+
         $backupArguments = @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
@@ -270,6 +276,29 @@ try {
         if (-not [bool]$backupManifest.AppCapture.WingetAvailable -and -not [string]::IsNullOrWhiteSpace([string]$backupManifest.AppCapture.WingetExportFile)) {
             throw 'MigrationBackup fixture recorded a winget export file while WingetAvailable was false.'
         }
+        $lockedItem = $backupManifest.Items | Where-Object { $_.Folder -eq 'Desktop' } | Select-Object -First 1
+        if (-not $lockedItem -or -not [bool]$lockedItem.Partial) {
+            throw 'MigrationBackup locked-file fixture did not record a partial item.'
+        }
+        if (-not $lockedItem.PSObject.Properties['FailedEntryCount'] -or [int]$lockedItem.FailedEntryCount -lt 1) {
+            throw 'MigrationBackup locked-file fixture did not record FailedEntryCount.'
+        }
+        $lockedEntriesText = (@($lockedItem.FailedEntries) -join "`n")
+        if ($lockedEntriesText -notmatch 'locked-copy\.txt') {
+            throw 'MigrationBackup locked-file fixture failed entries did not mention locked-copy.txt.'
+        }
+        $backupReportTextPath = Join-Path -Path $backupRoot -ChildPath 'migration-backup-report.txt'
+        $backupReportHtmlPath = Join-Path -Path $backupRoot -ChildPath 'migration-backup-report.html'
+        if ((Get-Content -LiteralPath $backupReportTextPath -Raw) -notmatch 'locked-copy\.txt') {
+            throw 'MigrationBackup text report did not include the locked-file failed entry.'
+        }
+        if ((Get-Content -LiteralPath $backupReportHtmlPath -Raw) -notmatch 'locked-copy\.txt') {
+            throw 'MigrationBackup HTML report did not include the locked-file failed entry.'
+        }
+        if ($lockedFixtureStream) {
+            $lockedFixtureStream.Dispose()
+            $lockedFixtureStream = $null
+        }
 
         $skipAppListArguments = @(
             '-NoProfile',
@@ -299,6 +328,18 @@ try {
         $skipManifest = Get-Content -LiteralPath $skipManifestPath -Raw | ConvertFrom-Json
         if ($skipManifest.PSObject.Properties['AppCapture'] -and $null -ne $skipManifest.AppCapture) {
             throw 'MigrationBackup SkipBackupAppList fixture recorded AppCapture.'
+        }
+        $skipFailedItem = $skipManifest.Items | Where-Object { $_.PSObject.Properties['FailedEntryCount'] -and [int]$_.FailedEntryCount -ne 0 } | Select-Object -First 1
+        if ($skipFailedItem) {
+            throw 'MigrationBackup clean fixture recorded failed entries.'
+        }
+        $skipReportTextPath = Join-Path -Path $skipAppListBackupRoot -ChildPath 'migration-backup-report.txt'
+        $skipReportHtmlPath = Join-Path -Path $skipAppListBackupRoot -ChildPath 'migration-backup-report.html'
+        if ((Get-Content -LiteralPath $skipReportTextPath -Raw) -match 'failed copy entries') {
+            throw 'MigrationBackup clean text report rendered a failed-entry section.'
+        }
+        if ((Get-Content -LiteralPath $skipReportHtmlPath -Raw) -match 'failed copy entries') {
+            throw 'MigrationBackup clean HTML report rendered a failed-entry section.'
         }
         $expectedFilesPresent = $true
 
@@ -669,6 +710,17 @@ try {
 catch {
     $processExitCode = 1
     $stderrParts += $_.Exception.Message
+}
+
+if ($lockedFixtureStream) {
+    try {
+        $lockedFixtureStream.Dispose()
+    }
+    catch {
+        $processExitCode = 1
+        $stderrParts += ('Locked fixture cleanup failed: {0}' -f $_.Exception.Message)
+    }
+    $lockedFixtureStream = $null
 }
 
 if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {

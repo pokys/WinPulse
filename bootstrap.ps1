@@ -5193,6 +5193,78 @@ function Invoke-WinPulseRobocopy {
     }
 }
 
+function Get-WinPulseRobocopyFailedEntries {
+    # Extracts actionable failed-copy details from a robocopy log. Missing or
+    # unreadable logs are treated as "no parsed entries" so copy reporting never
+    # fails because log parsing failed.
+    [CmdletBinding()]
+    param(
+        [string]$logPath
+    )
+
+    $entries = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($logPath) -or -not (Test-Path -LiteralPath $logPath)) {
+        return $entries.ToArray()
+    }
+
+    try {
+        $lines = @(Get-Content -LiteralPath $logPath -ErrorAction Stop)
+    }
+    catch {
+        return $entries.ToArray()
+    }
+
+    $seen = @{}
+    $errorPattern = 'ERROR\s+(\d+)\s+\(0x[0-9A-Fa-f]{8}\)\s*(.*)$'
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = [string]$lines[$i]
+        $match = [regex]::Match($line, $errorPattern)
+        if (-not $match.Success) { continue }
+
+        $detail = ('ERROR {0}: {1}' -f $match.Groups[1].Value, $match.Groups[2].Value.Trim())
+        if (($i + 1) -lt $lines.Count) {
+            $next = ([string]$lines[$i + 1]).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($next) -and $next -notmatch $errorPattern) {
+                $detail = ('{0} - {1}' -f $detail, $next)
+            }
+        }
+
+        if (-not $seen.ContainsKey($detail)) {
+            $seen[$detail] = $true
+            [void]$entries.Add($detail)
+            if ($entries.Count -ge 200) { break }
+        }
+    }
+
+    return $entries.ToArray()
+}
+
+function Write-WinPulseFailedEntrySummary {
+    [CmdletBinding()]
+    param(
+        [object[]]$items
+    )
+
+    $all = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($items)) {
+        if (-not $item.PSObject.Properties['FailedEntryCount'] -or [int]$item.FailedEntryCount -le 0) { continue }
+        foreach ($entry in @($item.FailedEntries)) {
+            [void]$all.Add(('{0}\{1}: {2}' -f $item.UserName, $item.Folder, $entry))
+        }
+    }
+
+    if ($all.Count -eq 0) { return }
+
+    Write-Host '  Failed copy entries:' -ForegroundColor Yellow
+    foreach ($entry in ($all.ToArray() | Select-Object -First 10)) {
+        Write-Host ('    - {0}' -f $entry) -ForegroundColor Yellow
+    }
+    if ($all.Count -gt 10) {
+        Write-Host ('    (+{0} more - see the robocopy logs and the report)' -f ($all.Count - 10)) -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
+
 function Get-WinPulseFilteredFiles {
     # Returns the files under a folder, skipping anything that matches the given
     # file name patterns or that lives under one of the excluded folder names.
@@ -5358,18 +5430,28 @@ function ConvertTo-WinPulseCopyReportRows {
                 $hash = ('{0}/{1}' -f $item.Verification.HashMatched, $item.Verification.HashSampled)
             }
         }
+        $failedEntries = @()
+        if ($item.PSObject.Properties['FailedEntries'] -and $item.FailedEntries) {
+            $failedEntries = @($item.FailedEntries)
+        }
+        $failedEntryCount = 0
+        if ($item.PSObject.Properties['FailedEntryCount']) {
+            $failedEntryCount = [int]$item.FailedEntryCount
+        }
 
         $rows += [pscustomobject][ordered]@{
-            User        = [string]$item.UserName
-            Folder      = [string]$item.Folder
-            Result      = $result
-            Verify      = $verify
-            SrcFiles    = $srcFiles
-            DestFiles   = $destFiles
-            Hash        = $hash
-            Exit        = $item.ExitCode
-            Destination = $dest
-            Note        = [string]$item.Note
+            User             = [string]$item.UserName
+            Folder           = [string]$item.Folder
+            Result           = $result
+            Verify           = $verify
+            SrcFiles         = $srcFiles
+            DestFiles        = $destFiles
+            Hash             = $hash
+            Exit             = $item.ExitCode
+            Destination      = $dest
+            Note             = [string]$item.Note
+            FailedEntryCount = $failedEntryCount
+            FailedEntries    = @($failedEntries)
         }
     }
 
@@ -5421,6 +5503,15 @@ function Export-WinPulseMigrationCopyReportText {
         $verifyText = if ($row.Verify -eq '-') { '' } else { (' | verify={0} ({1}->{2} files)' -f $row.Verify, $row.SrcFiles, $row.DestFiles) }
         $hashText = if ($row.Hash -eq '-') { '' } else { (' | hash {0} matched' -f $row.Hash) }
         $lines.Add(('- {0}\{1}: {2} (exit {3}){4}{5}' -f $row.User, $row.Folder, $row.Result, $row.Exit, $verifyText, $hashText))
+        if ([int]$row.FailedEntryCount -gt 0) {
+            $entries = @($row.FailedEntries)
+            foreach ($entry in ($entries | Select-Object -First 50)) {
+                $lines.Add(('    - {0}' -f $entry))
+            }
+            if ($entries.Count -gt 50) {
+                $lines.Add(('    +{0} more' -f ($entries.Count - 50)))
+            }
+        }
     }
     if (@($manifest.Items).Count -eq 0) {
         $lines.Add('- No items.')
@@ -5540,6 +5631,20 @@ footer{font-size:.8rem;border-top:1px solid var(--border);padding-top:16px;margi
 
     [void]$sb.Append('<section><h2>Items</h2>')
     [void]$sb.Append((ConvertTo-WinPulseMigrationHtmlTable -data $rows -columns @('User', 'Folder', 'Result', 'Verify', 'SrcFiles', 'DestFiles', 'Hash', 'Exit', 'Destination', 'Note')))
+    foreach ($row in @($rows)) {
+        if ([int]$row.FailedEntryCount -le 0) { continue }
+        [void]$sb.Append(('<p><span class="badge attention">{0}\{1}: failed copy entries</span></p><ul>' -f
+                (ConvertTo-WinPulseHtmlText -value $row.User),
+                (ConvertTo-WinPulseHtmlText -value $row.Folder)))
+        $entries = @($row.FailedEntries)
+        foreach ($entry in ($entries | Select-Object -First 50)) {
+            [void]$sb.Append(('<li class="attention">{0}</li>' -f (ConvertTo-WinPulseHtmlText -value $entry)))
+        }
+        if ($entries.Count -gt 50) {
+            [void]$sb.Append(('<li class="attention">+{0} more</li>' -f ($entries.Count - 50)))
+        }
+        [void]$sb.Append('</ul>')
+    }
     [void]$sb.Append('</section>')
 
     [void]$sb.Append('<section><h2>Safety Notes</h2><ul>')
@@ -6012,7 +6117,7 @@ function Invoke-WinPulseMigrationBackup {
         Write-Progress -Activity 'Migration backup' -Status ('Folder {0} of {1}: {2}\{3}' -f $itemIndex, $totalItems, $item.UserName, $item.Folder) -PercentComplete $pct
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip missing source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'Source missing.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $true; Partial = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; FailedEntries = @(); FailedEntryCount = 0; Note = 'Source missing.' }
             continue
         }
 
@@ -6026,6 +6131,10 @@ function Invoke-WinPulseMigrationBackup {
         if ($rc.Partial) {
             Write-Host ('    some files could not be copied (access-denied/in-use); the rest copied') -ForegroundColor Yellow
         }
+        $failedEntries = @()
+        if ($rc.Partial -or (-not $rc.Success -and -not $dryRun)) {
+            $failedEntries = @(Get-WinPulseRobocopyFailedEntries -logPath $itemLog)
+        }
 
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
@@ -6036,7 +6145,7 @@ function Invoke-WinPulseMigrationBackup {
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; AppKey = $(if ($item.PSObject.Properties['AppKey']) { $item.AppKey } else { $null }); Relative = $item.Relative; ExtraExcludeFiles = @($item.ExtraExcludeFiles); Source = $item.Source; Destination = $item.Destination; Skipped = $false; Partial = [bool]$rc.Partial; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; FailedEntries = @($failedEntries); FailedEntryCount = @($failedEntries).Count; Note = $rc.Note }
     }
     Write-Progress -Activity 'Migration backup' -Completed
 
@@ -6114,6 +6223,7 @@ function Invoke-WinPulseMigrationBackup {
         Write-Host ('    {0,-8} {1}\{2}  {3}' -f $st, $r.UserName, $r.Folder, $detail) -ForegroundColor $stColor
     }
     Write-Host ''
+    Write-WinPulseFailedEntrySummary -items $results
     if ($dryRun) {
         Write-Host 'Dry-run plan complete. No files were copied.' -ForegroundColor Green
     }
@@ -7276,7 +7386,7 @@ function Invoke-WinPulseMigrationRestore {
         Write-Progress -Activity 'Migration restore' -Status ('Folder {0} of {1}: {2}\{3}' -f $itemIndex, $totalItems, $item.UserName, $item.Folder) -PercentComplete $pct
         if (-not $item.Exists) {
             Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Skip empty source: {0}' -f $item.Source)
-            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; Note = 'No data in backup.' }
+            $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $true; Partial = $false; Overwrite = $false; ExitCode = $null; Success = $true; LogPath = $null; Verification = $null; FailedEntries = @(); FailedEntryCount = 0; Note = 'No data in backup.' }
             continue
         }
 
@@ -7289,6 +7399,10 @@ function Invoke-WinPulseMigrationRestore {
         if ($rc.Partial) {
             Write-Host ('    some files could not be copied (access-denied/in-use); the rest copied') -ForegroundColor Yellow
         }
+        $failedEntries = @()
+        if ($rc.Partial -or (-not $rc.Success -and -not $dryRun)) {
+            $failedEntries = @(Get-WinPulseRobocopyFailedEntries -logPath $itemLog)
+        }
 
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
@@ -7299,7 +7413,7 @@ function Invoke-WinPulseMigrationRestore {
             }
         }
 
-        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; Note = $rc.Note }
+        $results += [pscustomobject][ordered]@{ UserName = $item.UserName; Folder = $item.Folder; Relative = $item.Relative; Source = $item.Source; Target = $item.Target; Skipped = $false; Partial = [bool]$rc.Partial; Overwrite = [bool]$item.TargetExists; ExitCode = $rc.ExitCode; Success = $rc.Success; LogPath = $itemLog; Verification = $verify; FailedEntries = @($failedEntries); FailedEntryCount = @($failedEntries).Count; Note = $rc.Note }
     }
     Write-Progress -Activity 'Migration restore' -Completed
 
@@ -7368,6 +7482,7 @@ function Invoke-WinPulseMigrationRestore {
         Write-Host ('    {0,-8} {1}\{2}  {3}' -f $st, $r.UserName, $r.Folder, $detail) -ForegroundColor $stColor
     }
     Write-Host ''
+    Write-WinPulseFailedEntrySummary -items $results
     if ($dryRun) {
         Write-Host 'Dry-run restore plan complete. No files were copied.' -ForegroundColor Green
     }
