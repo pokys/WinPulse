@@ -16,8 +16,18 @@ fixing it unilaterally.
 
 ## Resume Here (next session)
 
-Current state: `dev/migration-preflight-foundation` at `0.15.3-20260610`
-(ahead of origin; main last synced at 0.15.2).
+Current state: `main` and `dev/migration-preflight-foundation` in sync at
+`0.16.0-20260610`, both pushed. Clean tree.
+
+TODO - NEXT CODEX SESSION (queued 2026-06-10, Codex was out of limit): do
+tasks C35 (multi-select '/' filter) and C36 (robocopy /MT + progress counter)
+from "Work Queue - Batch 4" below, in that order, one commit each on
+`dev/migration-preflight-foundation` after `git merge main --ff-only`. Both
+change live TUI rendering: build + validate (parser check, ASCII check,
+git diff --check, all five non-elevated smoke modes), but do NOT push to main
+and do NOT claim visual correctness - Claude and the owner verify on a real
+terminal before merge. Full specs and constraints are in the C35/C36 sections
+of Batch 4.
 
 Done 2026-06-10:
 - Full product/code review by Claude -> 17 findings recorded in
@@ -29,9 +39,9 @@ Done 2026-06-10:
   (download integrity checks), C35 (multi-select '/' filter, visual verify),
   C36 (robocopy /MT + progress counter, visual verify).
 - C33 and C34 DONE same day (Codex implemented, Claude reviewed + re-ran all
-  five non-elevated smoke modes green). Version bumped to 0.16.0-20260610.
-  Remaining from Batch 4: C35 and C36 - TUI tasks, Codex can build them but
-  Claude/owner must verify visually before merge to main.
+  five non-elevated smoke modes green). Version bumped to 0.16.0-20260610,
+  merged to main. Remaining from Batch 4: C35 and C36 - queued for the next
+  Codex session (see the TODO at the top of this section).
 
 Done 2026-06-03 (second batch, not in previous note):
 - C23: CPU load % in Hardware row; WiFi SSID+signal in Network row (segment renderer).
