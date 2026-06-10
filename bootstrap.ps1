@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.15.2-20260605'
+$script:WinPulseVersion = '0.15.3-20260610'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -3505,6 +3505,29 @@ function Get-WinPulsePathSize {
     return [pscustomobject]$result
 }
 
+function Get-WinPulseDestinationFreeBytes {
+    # Free bytes on the drive that holds the given path. Returns $null when it
+    # cannot be determined (UNC path, unmapped or not-ready drive) - callers
+    # must treat $null as "unknown", never as zero.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$path
+    )
+
+    try {
+        $full = [System.IO.Path]::GetFullPath($path)
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if ([string]::IsNullOrWhiteSpace($root) -or $root.StartsWith('\\')) { return $null }
+        $drive = New-Object -TypeName System.IO.DriveInfo -ArgumentList $root
+        if (-not $drive.IsReady) { return $null }
+        return [double]$drive.AvailableFreeSpace
+    }
+    catch {
+        return $null
+    }
+}
+
 function ConvertTo-WinPulseFileSummary {
     [CmdletBinding()]
     param(
@@ -5912,6 +5935,18 @@ function Invoke-WinPulseMigrationBackup {
     }
     Write-Host ('  Installed software list: {0}' -f $(if ($captureAppList) { 'yes' } else { 'no' })) -ForegroundColor Yellow
 
+    # Free-space guard: warn up front when the destination drive cannot hold
+    # the planned bytes (5% headroom). $null free bytes = unknown (UNC) - skip.
+    $destFreeBytes = Get-WinPulseDestinationFreeBytes -path $destinationRoot
+    $destLowSpace = ($null -ne $destFreeBytes -and $destFreeBytes -lt ($plan.TotalBytes * 1.05))
+    if ($null -ne $destFreeBytes) {
+        $freeColor = if ($destLowSpace) { 'Red' } else { 'Gray' }
+        Write-Host ('  Free space on destination drive: {0}' -f (ConvertTo-ReadableSize -bytes $destFreeBytes)) -ForegroundColor $freeColor
+    }
+    if ($destLowSpace) {
+        Write-Host ('  WARNING: the destination drive may not hold the planned {0}.' -f $plan.TotalSize) -ForegroundColor Red
+    }
+
     Write-Host ''
     if ($nonInteractive) {
         $action = if ($BackupExecute) { 'X' } else { 'D' }
@@ -5933,7 +5968,15 @@ function Invoke-WinPulseMigrationBackup {
     $hashSampleSize = 0
     if (-not $dryRun) {
         Write-Host ''
+        if ($destLowSpace -and $nonInteractive) {
+            Write-Host ('  Aborting: free space {0} on the destination drive is below the planned {1}.' -f (ConvertTo-ReadableSize -bytes $destFreeBytes), $plan.TotalSize) -ForegroundColor Red
+            Write-Host '  Free up space, use a larger destination, or select fewer folders.' -ForegroundColor Red
+            return $null
+        }
         Write-Host ('  About to copy {0} into {1}.' -f $plan.TotalSize, $destinationRoot) -ForegroundColor Yellow
+        if ($destLowSpace) {
+            Write-Host ('  WARNING: free space {0} is less than the planned {1}. The copy may fail mid-way.' -f (ConvertTo-ReadableSize -bytes $destFreeBytes), $plan.TotalSize) -ForegroundColor Red
+        }
         if (-not $nonInteractive) {
             $confirm = Read-Host '  Type YES to proceed'
             if ($confirm -ne 'YES') {
@@ -7141,6 +7184,18 @@ function Invoke-WinPulseMigrationRestore {
     Write-Host ''
     Write-Host ('  Not restored: {0} (known-folder attributes left untouched)' -f ($restoreExclusions.Files -join ', ')) -ForegroundColor Yellow
 
+    # Free-space guard: warn up front when the restore root drive cannot hold
+    # the planned bytes (5% headroom). $null free bytes = unknown (UNC) - skip.
+    $rootFreeBytes = Get-WinPulseDestinationFreeBytes -path $restoreRoot
+    $rootLowSpace = ($null -ne $rootFreeBytes -and $rootFreeBytes -lt ($plan.TotalBytes * 1.05))
+    if ($null -ne $rootFreeBytes) {
+        $freeColor = if ($rootLowSpace) { 'Red' } else { 'Gray' }
+        Write-Host ('  Free space on restore drive: {0}' -f (ConvertTo-ReadableSize -bytes $rootFreeBytes)) -ForegroundColor $freeColor
+    }
+    if ($rootLowSpace) {
+        Write-Host ('  WARNING: the restore drive may not hold the planned {0}.' -f $plan.TotalSize) -ForegroundColor Red
+    }
+
     Write-Host ''
     if ($nonInteractive) {
         $action = if ($RestoreExecute) { 'X' } else { 'D' }
@@ -7162,10 +7217,20 @@ function Invoke-WinPulseMigrationRestore {
     $hashSampleSize = 0
     if (-not $dryRun) {
         Write-Host ''
+        # Hard-stop only when nothing is overwritten: an overwrite restore can
+        # land largely in place, so low free space is a warning there, not a block.
+        if ($rootLowSpace -and $nonInteractive -and $plan.OverwriteCount -eq 0) {
+            Write-Host ('  Aborting: free space {0} on the restore drive is below the planned {1}.' -f (ConvertTo-ReadableSize -bytes $rootFreeBytes), $plan.TotalSize) -ForegroundColor Red
+            Write-Host '  Free up space, use a different restore root, or select fewer folders.' -ForegroundColor Red
+            return $null
+        }
         if ($plan.OverwriteCount -gt 0) {
             Write-Host ('  WARNING: {0} target folder(s) already exist and will be overwritten.' -f $plan.OverwriteCount) -ForegroundColor Yellow
         }
         Write-Host ('  About to restore {0} into {1}.' -f $plan.TotalSize, $restoreRoot) -ForegroundColor Yellow
+        if ($rootLowSpace) {
+            Write-Host ('  WARNING: free space {0} is less than the planned {1}. The restore may fail mid-way.' -f (ConvertTo-ReadableSize -bytes $rootFreeBytes), $plan.TotalSize) -ForegroundColor Red
+        }
         if (-not $nonInteractive) {
             $confirm = Read-Host '  Type YES to proceed'
             if ($confirm -ne 'YES') {
