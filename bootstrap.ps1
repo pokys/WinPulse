@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.17.0-20260610'
+$script:WinPulseVersion = '0.17.1-20260610'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -7934,11 +7934,12 @@ function Get-WinPulseToolCatalog {
 }
 
 function Get-WinPulseNirSoftCatalog {
-    # NirSoft launcher catalog. The credential/key tools (ProduKey,
-    # WirelessKeyView, Mail PassView) are commonly flagged by AV as HackTool/PUA
-    # and some ship in password-protected ZIPs - both are handled at launch by
-    # Start-WinPulseNirSoftTool with a manual-download fallback. All NirSoft
-    # binaries are unsigned, so none carry VerifySignature.
+    # NirSoft launcher catalog. NirSoft serves its AV-sensitive password/key
+    # tools (WirelessKeyView, Mail PassView) only from /toolsdownload/ and
+    # rejects requests without an HTTP Referer (anti-hotlink). The download in
+    # Start-WinPulseNirSoftTool always sends Referer = InfoUrl, so both /utils
+    # and /toolsdownload URLs resolve. All NirSoft binaries are unsigned, so
+    # none carry VerifySignature.
     [CmdletBinding()]
     param()
 
@@ -7946,24 +7947,23 @@ function Get-WinPulseNirSoftCatalog {
         produkey = [ordered]@{
             Label      = 'ProduKey'
             Binary     = 'ProduKey.exe'
-            Urls       = @('https://www.nirsoft.net/utils/produkey-x64.zip', 'https://www.nirsoft.net/utils/produkey.zip')
+            Urls       = @('https://www.nirsoft.net/utils/produkey-x64.zip', 'https://www.nirsoft.net/toolsdownload/produkey-x64.zip', 'https://www.nirsoft.net/utils/produkey.zip')
             InfoUrl    = 'https://www.nirsoft.net/utils/product_cd_key_viewer.html'
             AvFlagged  = $true
             Credential = $true
         }
         wirelesskeyview = [ordered]@{
-            Label       = 'WirelessKeyView'
-            Binary      = 'WirelessKeyView.exe'
-            Urls        = @('https://www.nirsoft.net/utils/wirelesskeyview-x64.zip', 'https://www.nirsoft.net/utils/wirelesskeyview.zip')
-            InfoUrl     = 'https://www.nirsoft.net/utils/wireless_key.html'
-            ZipPassword = 'WKey4567#'
-            AvFlagged   = $true
-            Credential  = $true
+            Label      = 'WirelessKeyView'
+            Binary     = 'WirelessKeyView.exe'
+            Urls       = @('https://www.nirsoft.net/toolsdownload/wirelesskeyview-x64.zip', 'https://www.nirsoft.net/toolsdownload/wirelesskeyview.zip')
+            InfoUrl    = 'https://www.nirsoft.net/utils/wireless_key.html'
+            AvFlagged  = $true
+            Credential = $true
         }
         mailpv = [ordered]@{
             Label      = 'Mail PassView'
             Binary     = 'mailpv.exe'
-            Urls       = @('https://www.nirsoft.net/utils/mailpv.zip')
+            Urls       = @('https://www.nirsoft.net/toolsdownload/mailpv.zip')
             InfoUrl    = 'https://www.nirsoft.net/utils/mailpv.html'
             AvFlagged  = $true
             Credential = $true
@@ -7971,72 +7971,46 @@ function Get-WinPulseNirSoftCatalog {
         usbdeview = [ordered]@{
             Label   = 'USBDeview'
             Binary  = 'USBDeview.exe'
-            Urls    = @('https://www.nirsoft.net/utils/usbdeview-x64.zip', 'https://www.nirsoft.net/utils/usbdeview.zip')
+            Urls    = @('https://www.nirsoft.net/utils/usbdeview-x64.zip', 'https://www.nirsoft.net/toolsdownload/usbdeview-x64.zip', 'https://www.nirsoft.net/utils/usbdeview.zip')
             InfoUrl = 'https://www.nirsoft.net/utils/usb_devices_view.html'
         }
         browsinghistoryview = [ordered]@{
             Label   = 'BrowsingHistoryView'
             Binary  = 'BrowsingHistoryView.exe'
-            Urls    = @('https://www.nirsoft.net/utils/browsinghistoryview-x64.zip', 'https://www.nirsoft.net/utils/browsinghistoryview.zip')
+            Urls    = @('https://www.nirsoft.net/utils/browsinghistoryview-x64.zip', 'https://www.nirsoft.net/toolsdownload/browsinghistoryview-x64.zip')
             InfoUrl = 'https://www.nirsoft.net/utils/browsing_history_view.html'
         }
         winupdatesview = [ordered]@{
             Label   = 'WinUpdatesView'
             Binary  = 'WinUpdatesView.exe'
-            Urls    = @('https://www.nirsoft.net/utils/winupdatesview-x64.zip', 'https://www.nirsoft.net/utils/winupdatesview.zip')
+            Urls    = @('https://www.nirsoft.net/utils/winupdatesview-x64.zip', 'https://www.nirsoft.net/toolsdownload/winupdatesview-x64.zip')
             InfoUrl = 'https://www.nirsoft.net/utils/windows_updates_history_viewer.html'
         }
         installedappview = [ordered]@{
             Label   = 'InstalledAppView'
             Binary  = 'InstalledAppView.exe'
-            Urls    = @('https://www.nirsoft.net/utils/installedappview-x64.zip', 'https://www.nirsoft.net/utils/installedappview.zip')
+            Urls    = @('https://www.nirsoft.net/utils/installedappview-x64.zip', 'https://www.nirsoft.net/toolsdownload/installedappview-x64.zip')
             InfoUrl = 'https://www.nirsoft.net/utils/installed_application_view.html'
         }
-    }
-}
-
-function Get-WinPulse7ZipPath {
-    # Locate 7z.exe (needed only for password-protected archives). Optionally
-    # install 7-Zip via winget when missing. Best-effort: returns $null if not
-    # found and not installable.
-    [CmdletBinding()]
-    param([switch]$installIfMissing)
-
-    $candidates = @()
-    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles '7-Zip\7z.exe') }
-    $pf86 = ${env:ProgramFiles(x86)}
-    if ($pf86) { $candidates += (Join-Path $pf86 '7-Zip\7z.exe') }
-
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
-    }
-    $cmd = Get-Command -Name '7z.exe' -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    if ($installIfMissing) {
-        [void](Install-WinPulseWingetCandidates -ids @('7zip.7zip'))
-        foreach ($c in $candidates) {
-            if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+        bluescreenview = [ordered]@{
+            Label   = 'BlueScreenView'
+            Binary  = 'BlueScreenView.exe'
+            Urls    = @('https://www.nirsoft.net/utils/bluescreenview-x64.zip', 'https://www.nirsoft.net/utils/bluescreenview.zip')
+            InfoUrl = 'https://www.nirsoft.net/utils/blue_screen_view.html'
         }
-        $cmd = Get-Command -Name '7z.exe' -ErrorAction SilentlyContinue
-        if ($cmd) { return $cmd.Source }
     }
-    return $null
 }
 
 function Expand-WinPulseArchive {
-    # Extract a ZIP to a destination. Plain ZIPs use Expand-Archive; a non-empty
-    # password routes through 7-Zip (Expand-Archive cannot read encrypted ZIPs).
-    # Returns $true on success, $false on any failure (caller handles fallback).
+    # Extract a plain ZIP to a destination. Returns $true on success, $false on
+    # any failure (caller handles fallback). NirSoft tool ZIPs are not encrypted.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$zipPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$destination,
-
-        [string]$password = $null
+        [string]$destination
     )
 
     if (-not (Test-Path -LiteralPath $zipPath)) { return $false }
@@ -8044,38 +8018,21 @@ function Expand-WinPulseArchive {
         New-Item -Path $destination -ItemType Directory -Force | Out-Null
     }
 
-    if ([string]::IsNullOrEmpty($password)) {
-        try {
-            Expand-Archive -LiteralPath $zipPath -DestinationPath $destination -Force -ErrorAction Stop
-            return $true
-        }
-        catch {
-            Write-Log -level 'WARNING' -message ('Expand-Archive failed for {0}: {1}' -f $zipPath, $_.Exception.Message)
-            return $false
-        }
-    }
-
-    $sevenZip = Get-WinPulse7ZipPath -installIfMissing
-    if (-not $sevenZip) {
-        Write-Log -level 'WARNING' -message 'Password-protected archive but 7-Zip is unavailable.'
-        return $false
-    }
     try {
-        $sevenZipArgs = @('x', $zipPath, ('-o{0}' -f $destination), ('-p{0}' -f $password), '-y')
-        & $sevenZip @sevenZipArgs | Out-Null
-        return ($LASTEXITCODE -eq 0)
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $destination -Force -ErrorAction Stop
+        return $true
     }
     catch {
-        Write-Log -level 'WARNING' -message ('7-Zip extract failed for {0}: {1}' -f $zipPath, $_.Exception.Message)
+        Write-Log -level 'WARNING' -message ('Expand-Archive failed for {0}: {1}' -f $zipPath, $_.Exception.Message)
         return $false
     }
 }
 
 function Start-WinPulseNirSoftTool {
     # Download (if needed), extract, and launch a NirSoft tool. Credential/key
-    # tools get an authorization + AV warning. On any failure (AV removed the
-    # download, password ZIP without 7-Zip, etc.) it shows the ZIP password when
-    # known and opens the official NirSoft page for manual download.
+    # tools get an authorization + AV warning. Downloads send a Referer header
+    # (NirSoft blocks hotlinks). On any failure (e.g. AV removed the download)
+    # it opens the official NirSoft page for manual download.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -8092,7 +8049,6 @@ function Start-WinPulseNirSoftTool {
     $label = [string]$tool['Label']
     $binary = [string]$tool['Binary']
     $infoUrl = if ($tool.Contains('InfoUrl')) { [string]$tool['InfoUrl'] } else { '' }
-    $password = if ($tool.Contains('ZipPassword')) { [string]$tool['ZipPassword'] } else { $null }
     $avFlagged = ($tool.Contains('AvFlagged') -and [bool]$tool['AvFlagged'])
     $credential = ($tool.Contains('Credential') -and [bool]$tool['Credential'])
 
@@ -8126,19 +8082,23 @@ function Start-WinPulseNirSoftTool {
     if ($tool.Contains('Urls') -and $tool['Urls']) { $urls = @($tool['Urls']) }
     elseif ($tool.Contains('Url') -and $tool['Url']) { $urls = @($tool['Url']) }
 
+    # NirSoft rejects hotlinked downloads (HTTP 403) unless a Referer is sent;
+    # use the tool's info page. Harmless for the plain /utils URLs.
+    $referer = if (-not [string]::IsNullOrWhiteSpace($infoUrl)) { $infoUrl } else { 'https://www.nirsoft.net/' }
+
     $extracted = $false
     foreach ($url in $urls) {
         $zipPath = Join-Path $script:WinPulsePaths.Bin ('{0}-{1}.zip' -f $toolKey, ([Guid]::NewGuid().ToString('N')))
         try {
             Write-Host ('  Downloading {0}...' -f $label) -ForegroundColor Gray
-            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -Headers @{ Referer = $referer } -ErrorAction Stop
         }
         catch {
             Write-Log -level 'WARNING' -message ('NirSoft download failed for {0} ({1}): {2}' -f $toolKey, $url, $_.Exception.Message)
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
             continue
         }
-        if (Expand-WinPulseArchive -zipPath $zipPath -destination $targetDir -password $password) {
+        if (Expand-WinPulseArchive -zipPath $zipPath -destination $targetDir) {
             $extracted = $true
         }
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
@@ -8155,10 +8115,7 @@ function Start-WinPulseNirSoftTool {
     Write-Host ''
     Write-Host ('  Could not prepare {0} automatically.' -f $label) -ForegroundColor Red
     if ($avFlagged) {
-        Write-Host '  Antivirus likely removed the download, or the ZIP is password-protected.' -ForegroundColor Yellow
-    }
-    if (-not [string]::IsNullOrWhiteSpace($password)) {
-        Write-Host ('  ZIP password (per NirSoft page): {0}' -f $password) -ForegroundColor Cyan
+        Write-Host '  Antivirus may have removed the download (known NirSoft false positive).' -ForegroundColor Yellow
     }
     if (-not [string]::IsNullOrWhiteSpace($infoUrl)) {
         Write-Host ('  Opening the official download page: {0}' -f $infoUrl) -ForegroundColor Gray
@@ -8179,9 +8136,10 @@ function Show-WinPulseNirSoftMenu {
             @{ Label = 'WirelessKeyView';     Key = 'W'; Hint = 'Saved Wi-Fi keys' },
             @{ Label = 'Mail PassView';       Key = 'M'; Hint = 'Mail client passwords' },
             @{ Label = 'USBDeview';           Key = 'U'; Hint = 'USB device history' },
-            @{ Label = 'BrowsingHistoryView'; Key = 'B'; Hint = 'Browser history' },
+            @{ Label = 'BrowsingHistoryView'; Key = 'H'; Hint = 'Browser history' },
             @{ Label = 'WinUpdatesView';      Key = 'I'; Hint = 'Installed updates' },
             @{ Label = 'InstalledAppView';    Key = 'A'; Hint = 'Installed apps' },
+            @{ Label = 'BlueScreenView';      Key = 'B'; Hint = 'BSOD crash dumps' },
             @{ Separator = $true },
             @{ Label = 'Back';                Key = 'X'; Color = 'DarkGray' }
         )
@@ -8191,9 +8149,10 @@ function Show-WinPulseNirSoftMenu {
             'W' { Start-WinPulseNirSoftTool -toolKey 'wirelesskeyview' }
             'M' { Start-WinPulseNirSoftTool -toolKey 'mailpv' }
             'U' { Start-WinPulseNirSoftTool -toolKey 'usbdeview' }
-            'B' { Start-WinPulseNirSoftTool -toolKey 'browsinghistoryview' }
+            'H' { Start-WinPulseNirSoftTool -toolKey 'browsinghistoryview' }
             'I' { Start-WinPulseNirSoftTool -toolKey 'winupdatesview' }
             'A' { Start-WinPulseNirSoftTool -toolKey 'installedappview' }
+            'B' { Start-WinPulseNirSoftTool -toolKey 'bluescreenview' }
             default { return }
         }
         Write-Host ''; Wait-WinPulseKey
@@ -8629,43 +8588,6 @@ function Start-WinPulseAutoruns {
     if (-not (Start-WinPulseAppByName -namepattern 'Autoruns')) {
         Write-Host 'Autoruns launch failed (portable + winget fallback).' -ForegroundColor Red
     }
-}
-
-function Start-WinPulseBlueScreenView {
-    [CmdletBinding()]
-    param()
-
-    $directUrl = 'https://www.nirsoft.net/utils/bluescreenview.zip'
-    $targetDir = Join-Path $script:WinPulsePaths.Bin 'BlueScreenView'
-    $targetExe = Join-Path $targetDir 'BlueScreenView.exe'
-
-    if (-not (Test-Path -Path $targetDir)) {
-        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
-    }
-
-    if (-not (Test-Path -Path $targetExe)) {
-        $zipPath = Join-Path $script:WinPulsePaths.Bin ('BlueScreenView-{0}.zip' -f ([Guid]::NewGuid().ToString('N')))
-        try {
-            Invoke-WebRequest -Uri $directUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
-            Expand-Archive -Path $zipPath -DestinationPath $targetDir -Force
-        }
-        catch {
-            Write-Host ('BlueScreenView download failed (direct link): {0}' -f $_.Exception.Message) -ForegroundColor Red
-            Write-Host ('Direct link: {0}' -f $directUrl) -ForegroundColor Yellow
-            return
-        }
-        finally {
-            Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    if (Test-Path -Path $targetExe) {
-        Start-Process -FilePath $targetExe
-        return
-    }
-
-    Write-Host 'BlueScreenView.exe not found in downloaded ZIP.' -ForegroundColor Red
-    Write-Host ('Direct link used: {0}' -f $directUrl) -ForegroundColor Yellow
 }
 
 function Start-WinPulseOpenHardwareMonitor {
@@ -11112,7 +11034,6 @@ function Show-WinPulseToolsMenu {
         $choice = Select-WinPulseMenuItem -Title 'External Tools' -Items @(
             @{ Label = 'Autoruns';              Key = 'A'; Hint = 'Startup items' },
             @{ Label = 'OpenHardwareMonitor';   Key = 'H'; Hint = 'Temps/voltages' },
-            @{ Label = 'BlueScreenView';        Key = 'B'; Hint = 'BSOD analysis' },
             @{ Label = 'CrystalDiskInfo';       Key = 'C'; Hint = 'Disk SMART' },
             @{ Label = 'StressMyPC';            Key = 'S'; Hint = 'Stress test' },
             @{ Label = 'FurMark';               Key = 'F'; Hint = 'GPU stress' },
@@ -11125,7 +11046,6 @@ function Show-WinPulseToolsMenu {
         switch ($choice) {
             'A' { Start-WinPulseAutoruns }
             'H' { Start-WinPulseOpenHardwareMonitor }
-            'B' { Start-WinPulseBlueScreenView }
             'C' { Start-DeepDiskAnalysis }
             'S' { Start-WinPulseStressMyPC }
             'F' { Start-WinPulseFurMarkAdvanced }
