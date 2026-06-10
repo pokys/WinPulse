@@ -2444,6 +2444,13 @@ visually and on a real machine before merge; do NOT claim it works for real.
 
 ### Task C37 - Long-path-safe verification enumeration
 
+Status: DONE - implemented by Codex (cd71a35: Get-WinPulseExtendedPath +
+ConvertFrom-WinPulseExtendedPath + stack-based .NET DirectoryInfo walk in
+Get-WinPulseFilteredFiles, smoke with a >260-char deep file asserting Verified).
+Reviewed by Claude, who also made hash sampling long-path-safe (Get-FileHash via
+the `\\?\` extended path - it fails on a normal >260 path, which would have been
+a new false-Mismatch). All five smoke modes green. (Kept below for reference.)
+
 Why: robocopy copies paths longer than 260 chars fine, but the verification
 file walk (`Get-WinPulseFilteredFiles`, bootstrap.ps1 ~5405, used by
 `Measure-WinPulseFolderFiltered` and `Get-WinPulseCopyVerification`) uses
@@ -2500,6 +2507,15 @@ copy itself long-path aware (robocopy already is).
 
 ### Task C38 - Harden Repair-WindowsUpdate (real status + clean old .bak)
 
+Status: DONE - implemented by Codex (243a00c: per-service stop/start verify via
+a 20x500ms poll, guarded renames, old SoftwareDistribution.bak.*/catroot2.bak.*
+cleanup before the new rename, truthful issue summary). Reviewed by Claude, who
+fixed a runtime bug: Codex logged `Write-Log -level 'WARN'` but Write-Log's
+ValidateSet only allows INFO/WARNING/ERROR, so every issue path would have
+thrown (parser can't catch a runtime ValidateSet; no smoke covers this elevated
+function) - changed all 'WARN' to 'WARNING'. The real elevated run stays an
+owner task. (Kept below for reference.)
+
 Why: `Repair-WindowsUpdate` (bootstrap.ps1 ~9120) stops services, renames
 `SoftwareDistribution` + `catroot2`, restarts services - every step with
 `-ErrorAction SilentlyContinue`, then unconditionally prints green
@@ -2543,6 +2559,18 @@ Out of scope: DISM/SFC, resetting more services, BITS queue, changing
 `Restart-WindowsUpdateServices`.
 
 ### Task C39 - OS junk cleanup in the Cleanup menu
+
+Status: BUILT by Codex (d185db9: Get-WinPulseCleanupTargets catalog,
+Measure-WinPulseCleanupTarget, Resolve/Remove helpers,
+Invoke-WinPulseCleanupSelected with per-path try/catch + service stop/start,
+Invoke-WinPulseOSJunkCleanupMenu wired as a new Cleanup entry, confirm defaults
+to No, non-destructive temp-fixture smoke). Reviewed by Claude: safe (deletes
+only resolved catalog paths, Recycle Bin via Clear-RecycleBin, all guarded);
+the catalog is fully parameterized so smoke tests it without touching real OS
+paths. Known minor limitation: Firefox `Profiles\*\cache2` mid-path wildcard is
+not expanded (off by default) - acceptable. AWAITING OWNER VISUAL + REAL-MACHINE
+VERIFY before merge (it deletes real OS data; verify on a scratch machine).
+(Kept below for reference.)
 
 **IMPORTANT - visual verification required AND destructive.** This adds an
 interactive menu that DELETES real OS data. Build + validate it (parser, ASCII,

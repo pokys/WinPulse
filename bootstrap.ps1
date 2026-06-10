@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.18.1-20260610'
+$script:WinPulseVersion = '0.19.0-20260610'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -5593,10 +5593,13 @@ function Get-WinPulseCopyVerification {
             $hashSampled++
             $relative = $file.FullName.Substring($srcRoot.Length).TrimStart('\')
             $destFile = Join-Path -Path $destination -ChildPath $relative
-            if (-not (Test-Path -LiteralPath $destFile)) { $hashMismatched++; continue }
+            # Use extended-length paths so Get-FileHash works on >260-char files
+            # (PS 5.1 Get-FileHash fails on a normal long path - see C37).
+            $destFileExt = Get-WinPulseExtendedPath -path $destFile
+            if (-not [System.IO.File]::Exists($destFileExt)) { $hashMismatched++; continue }
             try {
-                $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-                $destHash = (Get-FileHash -LiteralPath $destFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                $sourceHash = (Get-FileHash -LiteralPath (Get-WinPulseExtendedPath -path $file.FullName) -Algorithm SHA256 -ErrorAction Stop).Hash
+                $destHash = (Get-FileHash -LiteralPath $destFileExt -Algorithm SHA256 -ErrorAction Stop).Hash
                 if ($sourceHash -eq $destHash) { $hashMatched++ } else { $hashMismatched++ }
             }
             catch {
@@ -9244,13 +9247,13 @@ function Repair-WindowsUpdate {
             if (-not (& $waitForServiceStatus $svc 'Stopped')) {
                 $message = ('Service {0} did not reach Stopped status.' -f $svc)
                 [void]$issues.Add($message)
-                Write-Log -level 'WARN' -message $message
+                Write-Log -level 'WARNING' -message $message
             }
         }
         catch {
             $message = ('Could not stop service {0}: {1}' -f $svc, $_.Exception.Message)
             [void]$issues.Add($message)
-            Write-Log -level 'WARN' -message $message
+            Write-Log -level 'WARNING' -message $message
         }
     }
 
@@ -9269,7 +9272,7 @@ function Repair-WindowsUpdate {
                     catch {
                         $message = ('Could not remove old backup {0}: {1}' -f $oldBackup.FullName, $_.Exception.Message)
                         [void]$issues.Add($message)
-                        Write-Log -level 'WARN' -message $message
+                        Write-Log -level 'WARNING' -message $message
                     }
                 }
             }
@@ -9277,7 +9280,7 @@ function Repair-WindowsUpdate {
         catch {
             $message = ('Could not enumerate old backups in {0}: {1}' -f $target['Parent'], $_.Exception.Message)
             [void]$issues.Add($message)
-            Write-Log -level 'WARN' -message $message
+            Write-Log -level 'WARNING' -message $message
         }
     }
 
@@ -9307,7 +9310,7 @@ function Repair-WindowsUpdate {
             catch {
                 $message = ('Could not rename {0}: {1}' -f $folder['Source'], $_.Exception.Message)
                 [void]$issues.Add($message)
-                Write-Log -level 'WARN' -message $message
+                Write-Log -level 'WARNING' -message $message
             }
         }
     }
@@ -9318,13 +9321,13 @@ function Repair-WindowsUpdate {
             if (-not (& $waitForServiceStatus $svc 'Running')) {
                 $message = ('Service {0} did not reach Running status.' -f $svc)
                 [void]$issues.Add($message)
-                Write-Log -level 'WARN' -message $message
+                Write-Log -level 'WARNING' -message $message
             }
         }
         catch {
             $message = ('Could not start service {0}: {1}' -f $svc, $_.Exception.Message)
             [void]$issues.Add($message)
-            Write-Log -level 'WARN' -message $message
+            Write-Log -level 'WARNING' -message $message
         }
     }
 
@@ -9337,7 +9340,7 @@ function Repair-WindowsUpdate {
         foreach ($issue in $issues.ToArray()) {
             Write-Host ('  - {0}' -f $issue) -ForegroundColor Red
         }
-        Write-Log -level 'WARN' -message ('Windows Update reset completed with {0} issue(s).' -f $issues.Count)
+        Write-Log -level 'WARNING' -message ('Windows Update reset completed with {0} issue(s).' -f $issues.Count)
     }
 
     if ($skippedFolders.Count -gt 0) {
