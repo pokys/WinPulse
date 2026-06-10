@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.18.0-20260610'
+$script:WinPulseVersion = '0.18.1-20260610'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -1287,7 +1287,7 @@ function Write-WinPulseBootLine {
         [Parameter(Mandatory = $true)][string]$Message,
         [ValidateSet('OK', 'FAIL', 'SKIP')][string]$Status = 'OK'
     )
-    $statusText  = switch ($Status) { 'OK' { '  OK  ' } 'FAIL' { ' FAIL ' } default { ' SKIP ' } }
+    $statusText  = switch ($Status) { 'OK' { 'LOADED' } 'FAIL' { ' FAIL ' } default { ' SKIP ' } }
     $statusColor = switch ($Status) { 'OK' { 'Green' } 'FAIL' { 'Red' } default { 'DarkGray' } }
     Write-Host -NoNewline '[' -ForegroundColor DarkGray
     Write-Host -NoNewline $statusText -ForegroundColor $statusColor

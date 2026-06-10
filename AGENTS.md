@@ -2422,6 +2422,214 @@ Acceptance:
 Out of scope: /MT tuning per folder size, robocopy /NP changes, bandwidth
 limiting, progress bars in Write-Progress beyond what exists.
 
+## Work Queue - Batch 5 (queued 2026-06-10)
+
+Prepared by Claude after the owner reviewed the Batch 4 backlog. Do these in
+order. Same rules as every batch: sync first (`git checkout
+dev/migration-preflight-foundation` then `git merge main --ff-only`; stop if not
+fast-forward), ONE commit per task, do NOT push to main, do NOT bump the version
+(Claude does that), keep `bootstrap.ps1` ASCII-only / StrictMode-safe / PS 5.1
+compatible, use bracket notation for hashtable access. After EACH task run the
+parser check, the ASCII check, `git diff --check`, and ALL five non-elevated
+smoke modes (MigrationBackup/Restore/Verify/Apps/Live) - all exit 0;
+MigrationPreflight needs elevation, skip it and say so. Report changes + full
+test output. Use temp fixtures only, never real C:\Users or real OS paths, never
+run an elevated/destructive action in tests, never claim you verified something
+you could not run. PowerShell footgun reminder: `continue`/`break` inside a
+`switch` do NOT control an enclosing loop - never rely on that (this bit C35).
+
+Do C37 and C38 first (pure logic, smoke-verifiable). C39 changes live TUI AND
+deletes real OS data - build + validate it, but the owner/Claude verify it
+visually and on a real machine before merge; do NOT claim it works for real.
+
+### Task C37 - Long-path-safe verification enumeration
+
+Why: robocopy copies paths longer than 260 chars fine, but the verification
+file walk (`Get-WinPulseFilteredFiles`, bootstrap.ps1 ~5405, used by
+`Measure-WinPulseFolderFiltered` and `Get-WinPulseCopyVerification`) uses
+`Get-ChildItem -LiteralPath -Recurse`, which in Windows PowerShell 5.1 silently
+fails on >260-char paths. Result: files that copied are not counted, producing a
+false Mismatch (or, symmetrically, a false Verified). This corrupts the core
+backup/restore integrity signal.
+
+Scope:
+
+- Add a helper `Get-WinPulseExtendedPath -path <string>` that returns the
+  extended-length form so .NET enumeration can exceed MAX_PATH:
+  - Already prefixed (`\\?\...`) -> return as-is.
+  - UNC (`\\server\share\...`) -> `\\?\UNC\server\share\...`.
+  - Local rooted (`C:\...`) -> `\\?\C:\...`.
+  - Anything else (relative, empty) -> return unchanged (caller still works).
+  Resolve to a full path first via `[System.IO.Path]::GetFullPath` inside
+  try/catch; on any failure return the original path.
+- Rewrite the enumeration inside `Get-WinPulseFilteredFiles` to a manual,
+  stack-based recursive walk using `[System.IO.DirectoryInfo]` on the extended
+  path, so >260-char trees are fully enumerated:
+  - Push the root DirectoryInfo (built from the extended path). For each dir,
+    wrap `EnumerateFiles()` and `EnumerateDirectories()` in their OWN try/catch
+    (skip on UnauthorizedAccess/IO, mirroring today's `-ErrorAction
+    SilentlyContinue` tolerance) and push child dirs onto the stack.
+  - For each file, return an object the existing consumers can use unchanged:
+    they read `.Name`, `.Length`, `.DirectoryName`. `System.IO.FileInfo` already
+    exposes all three, so emitting FileInfo is fine. Strip any `\\?\` (and
+    `\\?\UNC\`) prefix from `.DirectoryName` before the /XD relative-segment
+    comparison so the exclude-dir logic still matches (the prefix must not leak
+    into the relative path math; compute the relative path against the ORIGINAL
+    root length, not the extended one).
+  - Keep the /XF (`-like` on file name) and /XD (excluded dir segment) semantics
+    byte-identical to today. Keep returning `$out.ToArray()` (StrictMode: do not
+    `@()`-wrap a Generic.List).
+- Do NOT change `Measure-WinPulseFolderFiltered`, `Get-WinPulseCopyVerification`,
+  the robocopy wrapper, or the manifest. This is an internal enumeration swap.
+
+Acceptance (non-elevated, temp fixtures):
+
+- Extend the MigrationBackup smoke: build a fixture whose Desktop contains a
+  directory chain deep enough that a leaf file's full path exceeds 260 chars
+  (nest e.g. 12 x a 30-char folder name, with a file inside), run an executed
+  backup, and assert the deep file is copied AND the item verifies as Verified
+  (NOT Mismatch) - i.e. `Measure-WinPulseFolderFiltered` counted it. Before this
+  fix that file would be uncounted.
+- A normal (short-path) fixture still verifies exactly as today; exclude-file
+  and exclude-dir filtering still work (add/keep an assertion that an excluded
+  file is not counted).
+- Parser + ASCII clean; all five smoke modes exit 0.
+
+Out of scope: changing robocopy flags, hashing, manifest schema, or making the
+copy itself long-path aware (robocopy already is).
+
+### Task C38 - Harden Repair-WindowsUpdate (real status + clean old .bak)
+
+Why: `Repair-WindowsUpdate` (bootstrap.ps1 ~9120) stops services, renames
+`SoftwareDistribution` + `catroot2`, restarts services - every step with
+`-ErrorAction SilentlyContinue`, then unconditionally prints green
+"reset complete". If a service will not stop or the rename fails, the technician
+is told it worked when it did not. Also each run leaves a
+`SoftwareDistribution.bak.<stamp>` (often several GB) and `catroot2.bak.<stamp>`
+that nothing ever deletes - a disk leak.
+
+Scope (this function only; do not touch `Restart-WindowsUpdateServices` or
+`Invoke-WinPulseTempCleanup`):
+
+- Stop each of wuauserv/bits/cryptsvc/msiserver, then VERIFY it actually
+  stopped: poll `Get-Service` Status up to a few seconds (e.g. 10 x 500ms) and
+  record which services did not reach Stopped. Collect failures into a list.
+- Only attempt each rename when its source folder exists; capture success/
+  failure per rename (try/catch with `-ErrorAction Stop`). A failed rename while
+  its service is still running is the common real failure - report it clearly.
+- Restart the services and verify they reach Running; record any that did not.
+- Replace the single green line with a truthful summary: green "Windows Update
+  components reset complete." ONLY when all services stopped, both renames
+  succeeded (or the folder was absent), and services restarted; otherwise a
+  yellow/red summary listing exactly what failed (e.g. "wuauserv did not stop;
+  SoftwareDistribution not reset"). Log each outcome via `Write-Log`.
+- Clean up OLD leftovers from previous runs: BEFORE creating today's .bak, find
+  `SoftwareDistribution.bak.*` under `%SystemRoot%` and `catroot2.bak.*` under
+  `%SystemRoot%\System32`, and remove them (`Remove-Item -Recurse -Force` in
+  try/catch, non-fatal, log freed names). Do NOT delete today's freshly created
+  .bak - only prior ones (delete the old ones first, then do the rename so the
+  new .bak is never a target).
+
+Acceptance:
+
+- Parser + ASCII clean; `git diff --check` clean; all five smoke modes exit 0
+  (this function is not on any smoke path - this just proves no regression).
+- Code review: no blanket green on failure; per-service stop/start verification;
+  renames guarded and reported; old .bak cleanup runs before the new rename and
+  is wrapped non-fatally. The real elevated run stays an owner/Claude task -
+  Codex must NOT run it and must NOT claim it ran.
+
+Out of scope: DISM/SFC, resetting more services, BITS queue, changing
+`Restart-WindowsUpdateServices`.
+
+### Task C39 - OS junk cleanup in the Cleanup menu
+
+**IMPORTANT - visual verification required AND destructive.** This adds an
+interactive menu that DELETES real OS data. Build + validate it (parser, ASCII,
+smoke green), but the owner/Claude verify it visually and on a real machine
+before merge. Codex must NEVER delete a real OS path in tests - test only the
+size-scan/enumeration logic on temp fixtures, and the dry behavior. The existing
+WinPulse-artifact cleanup (`Invoke-WinPulseFullArtifactCleanup`,
+`Invoke-WinPulseLightCleanup`, `Remove-WinPulseCompletely`) MUST stay unchanged;
+this is a NEW, separate action.
+
+Why: the owner wants a real OS junk cleaner - select categories, see sizes,
+confirm, delete - not just WinPulse's own artifacts.
+
+Category catalog (FIXED by the owner; each is one selectable item):
+
+- `usertemp`   - `%TEMP%` contents (current user). PRE-TICKED.
+- `wintemp`    - `C:\Windows\Temp` contents. PRE-TICKED.
+- `recyclebin` - Recycle Bin on all drives (use `Clear-RecycleBin -Force`, or
+                 per-drive, in try/catch). PRE-TICKED.
+- `windowsold` - `C:\Windows.old` (only OFFER when it exists). PRE-TICKED.
+- `wucache`    - `C:\Windows\SoftwareDistribution\Download` contents. Default
+                 OFF. Stop wuauserv/bits before clearing, restart after (reuse
+                 the C38-hardened pattern conceptually, but do NOT call
+                 Repair-WindowsUpdate; just stop/clear/start the two services).
+- `deliveryopt`- Delivery Optimization cache
+                 (`C:\Windows\SoftwareDistribution\DeliveryOptimization` or via
+                 `Delete-DeliveryOptimizationFiles` if present). Default OFF.
+- `thumbcache` - Thumbnail/icon cache
+                 (`%LocalAppData%\Microsoft\Windows\Explorer\thumbcache_*.db`,
+                 `iconcache_*.db`). Default OFF.
+- `wer`        - Windows Error Reporting queue/archive
+                 (`%ProgramData%\Microsoft\Windows\WER\*`). Default OFF.
+- `cbslogs`    - `C:\Windows\Logs\CBS\*`. Default OFF.
+- `prefetch`   - `C:\Windows\Prefetch\*` (regenerates). Default OFF.
+- `browsercache` - per-user Edge/Chrome/Firefox HTTP cache dirs only (NOT
+                 history, NOT passwords, NOT profiles). Default OFF. Note in the
+                 confirm screen that open browsers will lock files.
+- `memorydumps`- `C:\Windows\Minidump\*` and `C:\Windows\memory.dmp`. Default
+                 OFF.
+
+Add a couple more standard ones if obviously safe and easy (e.g. upgrade logs
+`C:\Windows\Panther\*`); keep each guarded and OFF by default.
+
+Scope:
+
+- New `Get-WinPulseCleanupTargets`: return an ordered catalog, each item
+  `[ordered]@{ Key; Label; Paths=@(...); Mode='contents'|'items'; PreTicked=
+  $bool; NeedsServiceStop=$bool; Services=@(...); Note='' }`. Resolve env vars
+  at call time. Include `windowsold` only when `C:\Windows.old` exists.
+- New `Measure-WinPulseCleanupTarget` (read-only): sum bytes/files for a
+  target's paths using the SAME long-path-safe walk built in C37 (share the
+  helper) so deep temp trees are measured; tolerate access-denied.
+- New `Invoke-WinPulseCleanupSelected`: delete the chosen targets'
+  contents/items with per-path try/catch (non-fatal, skip locked/in-use);
+  handle `recyclebin` via `Clear-RecycleBin`; for `NeedsServiceStop` stop the
+  listed services first and restart after (verify like C38). Return per-target
+  freed bytes + error count.
+- Rework `Show-WinPulseCleanupMenu`: KEEP the three existing WinPulse-artifact
+  entries, ADD "Clean OS junk (temp, caches, Recycle Bin...)". Selecting it:
+  show "Scanning..." then build a `Select-WinPulseMultiMenuItem` of the catalog
+  with each label showing the measured size (e.g. `User temp           1.2 GB`)
+  and PreTicked items ticked via the `Selected` property. After selection show
+  total reclaimable and a single-select confirm (Yes/No, DEFAULT No - it is
+  destructive). On Yes run the deletion and print a per-category + total
+  freed-space report. Esc/No cancels with nothing deleted.
+- ASCII-only, StrictMode-safe. Wrap every deletion so one failure never aborts
+  the rest. Never delete outside the catalog's resolved paths.
+
+Acceptance:
+
+- Parser + ASCII clean; `git diff --check` clean; all five smoke modes exit 0
+  (the menu is interactive and never reached by scripted smoke).
+- Add a NON-destructive smoke/unit assertion for the logic only: point
+  `Measure-WinPulseCleanupTarget` at a temp fixture folder with known files and
+  assert the byte/file totals; assert `Get-WinPulseCleanupTargets` returns the
+  catalog with the right PreTicked flags and omits `windowsold` when the path is
+  absent. If you exercise `Invoke-WinPulseCleanupSelected`, do it ONLY against a
+  temp fixture dir, NEVER a real OS path.
+- Visual/real-machine check (owner/Claude): the menu scans sizes, pre-ticks
+  Recycle Bin + temps + Windows.old, lets you tick/untick (the new '/' filter
+  works here too), the confirm defaults to No, and after Yes the freed-space
+  report matches reality. Verify on a scratch machine first.
+
+Out of scope: Disk Cleanup (cleanmgr) automation, DISM component-store cleanup
+(`/StartComponentCleanup`), per-app cache deep cleaning, scheduling, registry
+cleaning (never), touching the existing WinPulse-artifact cleanup behavior.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
