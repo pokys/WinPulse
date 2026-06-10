@@ -10814,11 +10814,18 @@ function Invoke-WinPulseCleanupSelected {
         [object[]]$targets = @()
     )
 
+    # Suppress the native progress bar (e.g. Clear-RecycleBin's) - it garbles the
+    # TUI and makes a long delete look like a hang. Function-scoped, auto-restored.
+    $ProgressPreference = 'SilentlyContinue'
+
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($target in @($targets)) {
         $label = [string]$target['Label']
         $errors = New-Object System.Collections.Generic.List[string]
         $before = Measure-WinPulseCleanupTarget -target $target
+
+        $cleaningNote = if ([string]$target['Key'] -eq 'recyclebin') { ' (this can take a while)' } else { '' }
+        Write-Host ('  Cleaning {0}...{1}' -f $label, $cleaningNote) -ForegroundColor Gray
 
         if ([bool]$target['NeedsServiceStop']) {
             foreach ($svc in @($target['Services'])) {
@@ -10841,7 +10848,7 @@ function Invoke-WinPulseCleanupSelected {
             if ([string]$target['Key'] -eq 'recyclebin') {
                 $clearRecycleBin = Get-Command -Name Clear-RecycleBin -ErrorAction SilentlyContinue
                 if ($clearRecycleBin) {
-                    Clear-RecycleBin -Force -ErrorAction Stop
+                    Clear-RecycleBin -Force -Confirm:$false -ErrorAction Stop
                 }
                 else {
                     foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
@@ -10903,10 +10910,16 @@ function Invoke-WinPulseCleanupSelected {
         }
         [void]$results.Add($result)
 
-        $color = if ($errors.Count -gt 0) { 'Yellow' } else { 'Green' }
-        Write-Host ('{0}: freed {1}' -f $label, (ConvertTo-ReadableSize -bytes $freedBytes)) -ForegroundColor $color
-        foreach ($errorText in $errors.ToArray()) {
-            Write-Host ('  - {0}' -f $errorText) -ForegroundColor Red
+        # Locked/in-use temp files are normal and would flood the screen, so show
+        # only a count here; the full list goes to the log for follow-up.
+        if ($errors.Count -gt 0) {
+            Write-Host ('  {0}: freed {1}  ({2} skipped - locked, in use, or access denied)' -f $label, (ConvertTo-ReadableSize -bytes $freedBytes), $errors.Count) -ForegroundColor Yellow
+            foreach ($errorText in $errors.ToArray()) {
+                Write-Log -level 'INFO' -message ('Cleanup skip [{0}]: {1}' -f $label, $errorText)
+            }
+        }
+        else {
+            Write-Host ('  {0}: freed {1}' -f $label, (ConvertTo-ReadableSize -bytes $freedBytes)) -ForegroundColor Green
         }
     }
 
@@ -10959,15 +10972,21 @@ function Invoke-WinPulseOSJunkCleanupMenu {
         return
     }
 
+    Write-Host ''
     $results = @(Invoke-WinPulseCleanupSelected -targets $selectedTargets)
     $freed = [double]0
-    $errorCount = 0
+    $skippedCount = 0
     foreach ($result in @($results)) {
         $freed += [double]$result.FreedBytes
-        $errorCount += [int]$result.ErrorCount
+        $skippedCount += [int]$result.ErrorCount
     }
-    $summaryColor = if ($errorCount -gt 0) { 'Yellow' } else { 'Green' }
-    Write-Host ('OS junk cleanup complete. Freed {0}; errors {1}.' -f (ConvertTo-ReadableSize -bytes $freed), $errorCount) -ForegroundColor $summaryColor
+    Write-Host ''
+    if ($skippedCount -gt 0) {
+        Write-Host ('OS junk cleanup complete. Freed {0}. {1} item(s) skipped (locked/in use) - see the log.' -f (ConvertTo-ReadableSize -bytes $freed), $skippedCount) -ForegroundColor Yellow
+    }
+    else {
+        Write-Host ('OS junk cleanup complete. Freed {0}.' -f (ConvertTo-ReadableSize -bytes $freed)) -ForegroundColor Green
+    }
 }
 
 function Invoke-WinPulseLightCleanup {
