@@ -1942,7 +1942,9 @@ function Select-WinPulseMultiMenuItem {
     $hLine = [string][char]0x2550 * ($w - 2)
     $vLine = [char]0x2551
     $sel = 0
-    $viewTop = 0   # first visible item index in $Items
+    $viewTop = 0   # first visible item position
+    $filterText = ''
+    $filterEditing = $false
 
     [Console]::CursorVisible = $false
     try {
@@ -1951,14 +1953,48 @@ function Select-WinPulseMultiMenuItem {
         $lastLineCount = 0
 
         while ($true) {
-            # Available lines for items: terminal height minus top-border, bottom-border, help, one spare
-            $maxViewport = [math]::Max(1, [Console]::WindowHeight - 4)
+            $filterActive = -not [string]::IsNullOrEmpty($filterText)
+            $visibleIdx = @()
+            $visibleSelectableIdx = @()
+            for ($i = 0; $i -lt $Items.Count; $i++) {
+                $item = $Items[$i]
+                if ($filterActive) {
+                    if ($item['Separator']) { continue }
+                    $label = if ($item['Label']) { [string]$item['Label'] } else { '' }
+                    if ($label.IndexOf($filterText, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                }
 
-            # Keep active item visible: find its position among all items
-            $activeItemIdx = $selectableIdx[$sel]
-            # Scroll viewTop so activeItemIdx stays within [viewTop, viewTop+maxViewport)
-            if ($activeItemIdx -lt $viewTop) { $viewTop = $activeItemIdx }
-            if ($activeItemIdx -ge ($viewTop + $maxViewport)) { $viewTop = $activeItemIdx - $maxViewport + 1 }
+                $visibleIdx += $i
+                if (-not $item['Separator']) {
+                    $visibleSelectableIdx += $i
+                }
+            }
+
+            if ($visibleSelectableIdx.Count -gt 0 -and $sel -ge $visibleSelectableIdx.Count) {
+                $sel = $visibleSelectableIdx.Count - 1
+            }
+            if ($sel -lt 0) { $sel = 0 }
+
+            # Available lines for items: terminal height minus top-border, bottom-border, help, one spare
+            $extraLines = if ($filterEditing -or $filterActive) { 1 } else { 0 }
+            $maxViewport = [math]::Max(1, [Console]::WindowHeight - 4 - $extraLines)
+
+            # Keep active item visible: find its position among visible items.
+            if ($visibleSelectableIdx.Count -gt 0) {
+                $activeItemIdx = $visibleSelectableIdx[$sel]
+                $activeVisiblePos = 0
+                for ($p = 0; $p -lt $visibleIdx.Count; $p++) {
+                    if ($visibleIdx[$p] -eq $activeItemIdx) {
+                        $activeVisiblePos = $p
+                        break
+                    }
+                }
+                if ($activeVisiblePos -lt $viewTop) { $viewTop = $activeVisiblePos }
+                if ($activeVisiblePos -ge ($viewTop + $maxViewport)) { $viewTop = $activeVisiblePos - $maxViewport + 1 }
+            }
+            else {
+                $viewTop = 0
+            }
 
             # Clear previous frame
             if ($lastLineCount -gt 0) {
@@ -1972,7 +2008,7 @@ function Select-WinPulseMultiMenuItem {
             $drawnLines = 0
 
             # Top border + scroll indicator
-            $scrollInfo = if ($Items.Count -gt $maxViewport) { ' {0}/{1} ' -f ($sel + 1), $selectableIdx.Count } else { '' }
+            $scrollInfo = if ($visibleIdx.Count -gt $maxViewport -and $visibleSelectableIdx.Count -gt 0) { ' {0}/{1} ' -f ($sel + 1), $visibleSelectableIdx.Count } else { '' }
             $titleFull = if ($scrollInfo) { '{0}  {1}' -f $Title, $scrollInfo } else { $Title }
             Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
             Write-Host -NoNewline $titleFull -ForegroundColor White
@@ -1981,9 +2017,10 @@ function Select-WinPulseMultiMenuItem {
 
             # Render only items in viewport window
             $rendered = 0
-            for ($i = 0; $i -lt $Items.Count; $i++) {
+            for ($p = 0; $p -lt $visibleIdx.Count; $p++) {
                 if ($rendered -ge $maxViewport) { break }
-                if ($i -lt $viewTop) { continue }
+                if ($p -lt $viewTop) { continue }
+                $i = $visibleIdx[$p]
                 $item = $Items[$i]
 
                 if ($item['Separator']) {
@@ -2027,25 +2064,104 @@ function Select-WinPulseMultiMenuItem {
                 $drawnLines++
                 $rendered++
             }
+            if ($visibleIdx.Count -eq 0) {
+                $emptyText = ' No matching items'
+                $emptyPad = $w - 4 - $emptyText.Length
+                if ($emptyPad -lt 0) { $emptyText = $emptyText.Substring(0, $w - 4); $emptyPad = 0 }
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                Write-Host -NoNewline ($emptyText + (' ' * $emptyPad)) -ForegroundColor DarkGray
+                Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                $drawnLines++
+            }
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
-            $helpText = '  Up/Down Navigate  Space Toggle  A All/None  Enter Confirm  Esc Cancel  {0} selected' -f $checked.Count
+            $helpText = '  Up/Down Navigate  Space Toggle  A All/None  / Filter  Enter Confirm  Esc Cancel  {0} selected' -f $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
+            if ($filterEditing -or $filterActive) {
+                $filterDisplay = if ($filterEditing) { '{0}_' -f $filterText } else { $filterText }
+                $filterLine = '  Filter: {0}' -f $filterDisplay
+                Write-Host ($filterLine + (' ' * [math]::Max(0, $w - $filterLine.Length + 2))) -ForegroundColor Gray
+                $drawnLines++
+            }
 
             $lastLineCount = $drawnLines
 
             $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            if ($filterEditing) {
+                switch ($k.VirtualKeyCode) {
+                    8 {
+                        if ($filterText.Length -gt 0) {
+                            $filterText = $filterText.Substring(0, $filterText.Length - 1)
+                            $sel = 0
+                            $viewTop = 0
+                        }
+                        continue
+                    }
+                    13 { $filterEditing = $false; continue }
+                    27 { $filterText = ''; $filterEditing = $false; $sel = 0; $viewTop = 0; continue }
+                    38 {
+                        $filterEditing = $false
+                        if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -gt 0) { $sel - 1 } else { $visibleSelectableIdx.Count - 1 } }
+                        continue
+                    }
+                    40 {
+                        $filterEditing = $false
+                        if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -lt $visibleSelectableIdx.Count - 1) { $sel + 1 } else { 0 } }
+                        continue
+                    }
+                    default {
+                        $ch = [string]$k.Character
+                        if ($ch -match '^[A-Za-z0-9 ._-]$') {
+                            $filterText += $ch
+                            $sel = 0
+                            $viewTop = 0
+                        }
+                        continue
+                    }
+                }
+            }
+
+            $typed = [string]$k.Character
+            if ($typed -eq '/') {
+                $filterEditing = $true
+                continue
+            }
+
             switch ($k.VirtualKeyCode) {
-                38 { $sel = if ($sel -gt 0) { $sel - 1 } else { $selectableIdx.Count - 1 } }
-                40 { $sel = if ($sel -lt $selectableIdx.Count - 1) { $sel + 1 } else { 0 } }
-                32 { if ($checked.ContainsKey($selectableIdx[$sel])) { $checked.Remove($selectableIdx[$sel]) } else { $checked[$selectableIdx[$sel]] = $true } }
+                38 { if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -gt 0) { $sel - 1 } else { $visibleSelectableIdx.Count - 1 } } }
+                40 { if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -lt $visibleSelectableIdx.Count - 1) { $sel + 1 } else { 0 } } }
+                32 {
+                    if ($visibleSelectableIdx.Count -gt 0) {
+                        $idx = $visibleSelectableIdx[$sel]
+                        if ($checked.ContainsKey($idx)) {
+                            $checked.Remove($idx)
+                            $Items[$idx]['Selected'] = $false
+                        }
+                        else {
+                            $checked[$idx] = $true
+                            $Items[$idx]['Selected'] = $true
+                        }
+                    }
+                }
                 65 {
-                    $allSelected = ($checked.Count -eq $selectableIdx.Count)
-                    $checked.Clear()
-                    if (-not $allSelected) {
-                        foreach ($idx in $selectableIdx) { $checked[$idx] = $true }
+                    $targetIdx = if ($filterActive) { @($visibleSelectableIdx) } else { @($selectableIdx) }
+                    if ($targetIdx.Count -gt 0) {
+                        $allSelected = $true
+                        foreach ($idx in $targetIdx) {
+                            if (-not $checked.ContainsKey($idx)) { $allSelected = $false; break }
+                        }
+                        foreach ($idx in $targetIdx) {
+                            if ($allSelected) {
+                                if ($checked.ContainsKey($idx)) { $checked.Remove($idx) }
+                                $Items[$idx]['Selected'] = $false
+                            }
+                            else {
+                                $checked[$idx] = $true
+                                $Items[$idx]['Selected'] = $true
+                            }
+                        }
                     }
                 }
                 13 { return @($checked.Keys | Sort-Object | ForEach-Object { $Items[$_]['Key'] }) }
