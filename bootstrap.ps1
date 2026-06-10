@@ -2076,7 +2076,7 @@ function Select-WinPulseMultiMenuItem {
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
-            $helpText = '  Up/Down Navigate  Space Toggle  A All/None  / Filter  Enter Confirm  Esc Cancel  {0} selected' -f $checked.Count
+            $helpText = '  Up/Dn Move  Space Toggle  A All/None  / Filter  Enter OK  Esc Cancel  {0} selected' -f $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
             if ($filterEditing -or $filterActive) {
@@ -2089,38 +2089,39 @@ function Select-WinPulseMultiMenuItem {
             $lastLineCount = $drawnLines
 
             $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            # NOTE: in PowerShell 'continue' inside a switch does NOT re-iterate
+            # an enclosing loop - control falls through past the switch. Filter
+            # editing therefore uses an if/elseif chain ending in a single
+            # 'continue' (which DOES restart the while loop from inside an if),
+            # so a typed key never leaks into the main key switch below.
             if ($filterEditing) {
-                switch ($k.VirtualKeyCode) {
-                    8 {
-                        if ($filterText.Length -gt 0) {
-                            $filterText = $filterText.Substring(0, $filterText.Length - 1)
-                            $sel = 0
-                            $viewTop = 0
-                        }
-                        continue
-                    }
-                    13 { $filterEditing = $false; continue }
-                    27 { $filterText = ''; $filterEditing = $false; $sel = 0; $viewTop = 0; continue }
-                    38 {
-                        $filterEditing = $false
-                        if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -gt 0) { $sel - 1 } else { $visibleSelectableIdx.Count - 1 } }
-                        continue
-                    }
-                    40 {
-                        $filterEditing = $false
-                        if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -lt $visibleSelectableIdx.Count - 1) { $sel + 1 } else { 0 } }
-                        continue
-                    }
-                    default {
-                        $ch = [string]$k.Character
-                        if ($ch -match '^[A-Za-z0-9 ._-]$') {
-                            $filterText += $ch
-                            $sel = 0
-                            $viewTop = 0
-                        }
-                        continue
+                $vk = $k.VirtualKeyCode
+                if ($vk -eq 8) {
+                    if ($filterText.Length -gt 0) {
+                        $filterText = $filterText.Substring(0, $filterText.Length - 1)
+                        $sel = 0
+                        $viewTop = 0
                     }
                 }
+                elseif ($vk -eq 13) { $filterEditing = $false }
+                elseif ($vk -eq 27) { $filterText = ''; $filterEditing = $false; $sel = 0; $viewTop = 0 }
+                elseif ($vk -eq 38) {
+                    $filterEditing = $false
+                    if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -gt 0) { $sel - 1 } else { $visibleSelectableIdx.Count - 1 } }
+                }
+                elseif ($vk -eq 40) {
+                    $filterEditing = $false
+                    if ($visibleSelectableIdx.Count -gt 0) { $sel = if ($sel -lt $visibleSelectableIdx.Count - 1) { $sel + 1 } else { 0 } }
+                }
+                else {
+                    $ch = [string]$k.Character
+                    if ($ch -match '^[A-Za-z0-9 ._-]$') {
+                        $filterText += $ch
+                        $sel = 0
+                        $viewTop = 0
+                    }
+                }
+                continue
             }
 
             $typed = [string]$k.Character
