@@ -9211,18 +9211,138 @@ function Repair-WindowsUpdate {
     Write-Log -level 'INFO' -message 'Repairing Windows Update components.'
 
     $services = 'wuauserv', 'bits', 'cryptsvc', 'msiserver'
-    foreach ($svc in $services) {
-        Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+    $issues = New-Object System.Collections.Generic.List[string]
+    $renamedFolders = New-Object System.Collections.Generic.List[string]
+    $skippedFolders = New-Object System.Collections.Generic.List[string]
+    $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+
+    $waitForServiceStatus = {
+        param(
+            [string]$name,
+            [string]$expectedStatus
+        )
+
+        for ($i = 0; $i -lt 20; $i++) {
+            try {
+                $service = Get-Service -Name $name -ErrorAction Stop
+                if ([string]$service.Status -eq $expectedStatus) { return $true }
+            }
+            catch {
+                return $false
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        return $false
     }
 
-    Rename-Item -Path "$env:SystemRoot\SoftwareDistribution" -NewName ('SoftwareDistribution.bak.{0}' -f (Get-Date -Format 'yyyyMMddHHmmss')) -ErrorAction SilentlyContinue
-    Rename-Item -Path "$env:SystemRoot\System32\catroot2" -NewName ('catroot2.bak.{0}' -f (Get-Date -Format 'yyyyMMddHHmmss')) -ErrorAction SilentlyContinue
-
     foreach ($svc in $services) {
-        Start-Service -Name $svc -ErrorAction SilentlyContinue
+        try {
+            $service = Get-Service -Name $svc -ErrorAction Stop
+            if ([string]$service.Status -ne 'Stopped') {
+                Stop-Service -Name $svc -Force -ErrorAction Stop
+            }
+            if (-not (& $waitForServiceStatus $svc 'Stopped')) {
+                $message = ('Service {0} did not reach Stopped status.' -f $svc)
+                [void]$issues.Add($message)
+                Write-Log -level 'WARN' -message $message
+            }
+        }
+        catch {
+            $message = ('Could not stop service {0}: {1}' -f $svc, $_.Exception.Message)
+            [void]$issues.Add($message)
+            Write-Log -level 'WARN' -message $message
+        }
     }
 
-    Write-Host 'Windows Update components reset complete.' -ForegroundColor Green
+    $backupCleanupTargets = @(
+        [ordered]@{ Parent = $env:SystemRoot; Filter = 'SoftwareDistribution.bak.*' },
+        [ordered]@{ Parent = (Join-Path -Path $env:SystemRoot -ChildPath 'System32'); Filter = 'catroot2.bak.*' }
+    )
+    foreach ($target in $backupCleanupTargets) {
+        try {
+            if (Test-Path -LiteralPath $target['Parent']) {
+                foreach ($oldBackup in @(Get-ChildItem -LiteralPath $target['Parent'] -Filter $target['Filter'] -Directory -ErrorAction SilentlyContinue)) {
+                    try {
+                        Remove-Item -LiteralPath $oldBackup.FullName -Recurse -Force -ErrorAction Stop
+                        Write-Log -level 'INFO' -message ('Removed old Windows Update reset backup: {0}' -f $oldBackup.FullName)
+                    }
+                    catch {
+                        $message = ('Could not remove old backup {0}: {1}' -f $oldBackup.FullName, $_.Exception.Message)
+                        [void]$issues.Add($message)
+                        Write-Log -level 'WARN' -message $message
+                    }
+                }
+            }
+        }
+        catch {
+            $message = ('Could not enumerate old backups in {0}: {1}' -f $target['Parent'], $_.Exception.Message)
+            [void]$issues.Add($message)
+            Write-Log -level 'WARN' -message $message
+        }
+    }
+
+    $folderRenames = @(
+        [ordered]@{
+            Name       = 'SoftwareDistribution'
+            Source     = (Join-Path -Path $env:SystemRoot -ChildPath 'SoftwareDistribution')
+            BackupName = ('SoftwareDistribution.bak.{0}' -f $stamp)
+        },
+        [ordered]@{
+            Name       = 'catroot2'
+            Source     = (Join-Path -Path (Join-Path -Path $env:SystemRoot -ChildPath 'System32') -ChildPath 'catroot2')
+            BackupName = ('catroot2.bak.{0}' -f $stamp)
+        }
+    )
+    foreach ($folder in $folderRenames) {
+        if (-not (Test-Path -LiteralPath $folder['Source'])) {
+            [void]$skippedFolders.Add([string]$folder['Name'])
+            Write-Log -level 'INFO' -message ('Windows Update reset folder not present, skipped: {0}' -f $folder['Source'])
+        }
+        else {
+            try {
+                Rename-Item -LiteralPath $folder['Source'] -NewName $folder['BackupName'] -ErrorAction Stop
+                [void]$renamedFolders.Add([string]$folder['Name'])
+                Write-Log -level 'INFO' -message ('Renamed {0} to {1}.' -f $folder['Source'], $folder['BackupName'])
+            }
+            catch {
+                $message = ('Could not rename {0}: {1}' -f $folder['Source'], $_.Exception.Message)
+                [void]$issues.Add($message)
+                Write-Log -level 'WARN' -message $message
+            }
+        }
+    }
+
+    foreach ($svc in $services) {
+        try {
+            Start-Service -Name $svc -ErrorAction Stop
+            if (-not (& $waitForServiceStatus $svc 'Running')) {
+                $message = ('Service {0} did not reach Running status.' -f $svc)
+                [void]$issues.Add($message)
+                Write-Log -level 'WARN' -message $message
+            }
+        }
+        catch {
+            $message = ('Could not start service {0}: {1}' -f $svc, $_.Exception.Message)
+            [void]$issues.Add($message)
+            Write-Log -level 'WARN' -message $message
+        }
+    }
+
+    if ($issues.Count -eq 0) {
+        Write-Host 'Windows Update components reset complete.' -ForegroundColor Green
+        Write-Log -level 'INFO' -message ('Windows Update reset complete. Renamed: {0}; skipped missing: {1}.' -f (($renamedFolders.ToArray()) -join ', '), (($skippedFolders.ToArray()) -join ', '))
+    }
+    else {
+        Write-Host 'Windows Update reset completed with issues:' -ForegroundColor Yellow
+        foreach ($issue in $issues.ToArray()) {
+            Write-Host ('  - {0}' -f $issue) -ForegroundColor Red
+        }
+        Write-Log -level 'WARN' -message ('Windows Update reset completed with {0} issue(s).' -f $issues.Count)
+    }
+
+    if ($skippedFolders.Count -gt 0) {
+        Write-Host ('Skipped missing folders: {0}' -f (($skippedFolders.ToArray()) -join ', ')) -ForegroundColor Yellow
+    }
 }
 
 function Restart-WindowsUpdateServices {
