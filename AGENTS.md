@@ -16,8 +16,19 @@ fixing it unilaterally.
 
 ## Resume Here (next session)
 
-Current state: `main` and `dev/migration-preflight-foundation` are in sync at
-`0.14.0-20260603`. Clean tree.
+Current state: `dev/migration-preflight-foundation` at `0.15.3-20260610`
+(ahead of origin; main last synced at 0.15.2).
+
+Done 2026-06-10:
+- Full product/code review by Claude -> 17 findings recorded in
+  "Work Queue - Batch 4 (2026-06-10 code review)" below.
+- C32 free-space guard for backup/restore destinations implemented by Claude
+  (helper `Get-WinPulseDestinationFreeBytes`, plan-screen free-space line,
+  non-interactive abort on low space). All six smoke modes green.
+- New Codex tasks queued: C33 (failed-file list from robocopy logs), C34
+  (download integrity checks), C35 (multi-select '/' filter, visual verify),
+  C36 (robocopy /MT + progress counter, visual verify). Codex: start with
+  C33/C34.
 
 Done 2026-06-03 (second batch, not in previous note):
 - C23: CPU load % in Hardware row; WiFi SSID+signal in Network row (segment renderer).
@@ -2085,6 +2096,287 @@ if (-not $nonInteractive) {
 
 Out of scope: opening artifacts on non-interactive runs, a "delete backup" action,
 emailing/uploading reports, changing report/log content or location.
+
+## Work Queue - Batch 4 (2026-06-10 code review)
+
+Claude did a full product/code review on 2026-06-10. The complete findings list
+is below (kept here so nothing is lost); the top issues became tasks C32-C36.
+C32 was implemented by Claude the same day. Codex: do C33 and C34 first (pure
+logic, smoke-verifiable), then C35 and C36 (TUI changes, Claude verifies
+visually before merge). Same rules as previous batches: one task per commit on
+`dev/migration-preflight-foundation`, sync with main first, do not push to
+main, do not bump the version, run parser + ASCII + ALL smoke modes after each
+task (MigrationPreflight, MigrationBackup, MigrationRestore, MigrationVerify,
+MigrationApps, MigrationLive), report changes + test output, ask when unsure.
+
+### Review findings 2026-06-10 (full list, with disposition)
+
+Functionality / reliability:
+
+1. Backup/restore did not check destination free space -> Task C32 (DONE).
+2. Long paths (>260 chars): robocopy copies them but the verification
+   enumeration (`Get-ChildItem` in PS 5.1) fails on them -> false
+   Mismatch/Verified. BACKLOG - needs `\\?\`-prefixed .NET enumeration in
+   `Get-WinPulseFilteredFiles` / `Measure-WinPulseFolderFiltered`.
+3. `Repair-WindowsUpdate` is all `-ErrorAction SilentlyContinue`: when the
+   service stop or rename fails it still prints a green success line, and the
+   `SoftwareDistribution.bak.<stamp>` folders are never cleaned up (disk leak).
+   BACKLOG - verify service stop, report the real outcome, clean old .bak.
+4. PARTIAL results name no files; technician must grep robocopy logs by hand
+   -> Task C33.
+5. Exit cleanup wipes Exports (preflight/verify reports) with no archive
+   offer. BACKLOG - offer ExportBundle ZIP in the exit prompt.
+
+Security:
+
+6. Downloaded external tools are not integrity-checked (only a ZIP magic-byte
+   probe) -> Task C34.
+7. `irm | iex` always runs HEAD of main; no release tagging, and a locally
+   saved copy never learns it is stale. BACKLOG - release tags + a cheap
+   startup version check against GitHub.
+
+UX / UI:
+
+8. No way to filter long multi-select lists (MigrationApps can have 100+
+   packages) -> Task C35.
+9. Startup spinner (option A: spinner + phase name) approved earlier, still
+   not implemented. BACKLOG.
+10. Dry-run vs Execute flows look identical until the very end. BACKLOG -
+    colored mode banner above the plan.
+11. No overall copy progress (current file only) -> folded into Task C36.
+12. Deferred TUI items C7 / C9 / C11 still waiting for an interactive session.
+
+Performance:
+
+13. Robocopy runs single-threaded -> Task C36 (/MT).
+14. Verification re-enumerates source over SMB on Live Migration (second full
+    network pass). BACKLOG - reuse plan counts for remote sources.
+
+Maintainability:
+
+15. 10k+ lines in one file is a distribution decision, not necessarily a
+    development one. IDEA - build step assembling bootstrap.ps1 from src/
+    modules; large, strategic, not scheduled.
+16. No Pester unit tests for pure logic (winget export parser, powercfg HTML
+    parser, pnputil parser, plan builders). BACKLOG.
+17. AGENTS.md carries ~2400 lines of mostly DONE tasks. BACKLOG - archive done
+    task specs into docs/ and keep only live instructions here.
+
+### Task C32 - Free-space guard for backup and restore destinations
+
+Status: DONE - implemented by Claude 2026-06-10 (version 0.15.3-20260610).
+Kept for reference.
+
+- New helper `Get-WinPulseDestinationFreeBytes -path <string>`: free bytes on
+  the drive holding the path via `System.IO.DriveInfo`; returns `$null` for
+  UNC paths and unmapped/not-ready drives ($null = unknown, never zero).
+- Backup: after the plan summary, prints "Free space on destination drive: X"
+  (red when below plan TotalBytes * 1.05) plus a red warning line. On execute:
+  non-interactive aborts (`return $null`) when low; interactive shows the red
+  warning before the YES prompt.
+- Restore: same display after the plan; non-interactive execute aborts only
+  when `OverwriteCount -eq 0` (an overwrite restore lands largely in place,
+  and on a fresh profile the known folders always exist), otherwise warns.
+- Verified: parser clean, ASCII clean, all six smoke modes exit 0; helper
+  unit-checked against local, UNC, not-ready (D:) and nonexistent (Z:) drives.
+
+### Task C33 - Name the files that failed to copy (parse robocopy logs)
+
+Why: a PARTIAL backup/restore says only "some files could not be copied". The
+detail is in the per-item robocopy log, but nobody greps logs during a
+migration. Parse the log, surface the failed entries in the manifest, the
+reports, and the console so the technician immediately knows what was skipped
+(and can e.g. re-run after the user logs off). This is finding #4 and the main
+practical pain of Live Migration until VSS exists.
+
+Scope:
+
+- New helper `Get-WinPulseRobocopyFailedEntries -logPath <string>`:
+  - Read the log (if missing/unreadable return `@()`; never throw).
+  - Match lines like
+    `2026/06/05 12:00:00 ERROR 32 (0x00000020) Copying File C:\Users\x\file.dat`
+    with a regex anchored on `ERROR \d+ \(0x[0-9A-Fa-f]{8}\)`. Capture the
+    error code and the tail after the closing paren (action + full path) as
+    one detail string. Do NOT try to surgically split action from path -
+    the combined tail is what a technician needs.
+  - If the immediately following line is a non-empty plain message (e.g. "The
+    process cannot access the file..."), append it to the detail as
+    ` - <message>`.
+  - Dedupe (with `/R:1` each failure can appear twice), preserve order, cap at
+    200 entries. Return an array of strings.
+- Backup loop (`Invoke-WinPulseMigrationBackup`) and restore loop
+  (`Invoke-WinPulseMigrationRestore`): when `$rc.Partial` or (not `$rc.Success`
+  and not dry-run), call the helper on `$itemLog` and add to the per-item
+  result object: `FailedEntries = @(...)` and `FailedEntryCount = <int>`.
+  For clean items set `FailedEntries = @()` / `FailedEntryCount = 0` so the
+  manifest shape is uniform. Additive only - do not change any existing field.
+- Console: after the per-item result list, when any item has FailedEntryCount
+  > 0, print up to 10 entries total (yellow), then
+  `(+N more - see the robocopy logs and the report)`.
+- Reports: in `ConvertTo-WinPulseCopyReportRows` /
+  `Export-WinPulseMigrationCopyReportText` / `...Html`, under each item with
+  FailedEntryCount > 0 list up to 50 entries (text: indented lines; HTML: a
+  sub-list with the warn style), then a `+N more` line. Reuse existing CSS.
+- MigrationVerify is untouched (it has no robocopy logs).
+
+Acceptance (non-elevated, temp fixtures):
+
+- Extend the MigrationBackup smoke: create the fixture, open one fixture file
+  with an exclusive lock (`[System.IO.File]::Open(path, 'Open', 'Read',
+  'None')` held in the smoke process), run the executed backup, assert the
+  item is Partial AND its `FailedEntries` in manifest.json is non-empty and
+  mentions the locked file name; release the lock, clean up. (`/R:1 /W:1`
+  adds ~2s - acceptable.)
+- A fully clean backup run has `FailedEntryCount = 0` everywhere and reports
+  render without the new section.
+- Parser + ASCII clean; ALL smoke modes still exit 0.
+
+Out of scope: changing robocopy flags, retrying failed files, VSS, parsing
+non-error log lines.
+
+### Task C34 - Integrity verification for downloaded external tools
+
+Why: `Ensure-ToolInstalled` downloads EXEs/ZIPs and runs them with admin
+rights after only a ZIP magic-byte probe. A compromised mirror means arbitrary
+code execution. WinPulse's whole identity is "transparent, no unknown
+binaries" - verify what we fetch (finding #6).
+
+Scope:
+
+- Catalog (`Get-WinPulseToolCatalog`): support two OPTIONAL per-tool fields:
+  - `VerifySignature = $true` - the resolved binary must carry a VALID
+    embedded Authenticode signature (`Get-AuthenticodeSignature` Status
+    `Valid`).
+  - `Sha256 = '<64 hex chars>'` - pinned hash of the downloaded artifact
+    (only for stable, versioned URLs - do NOT pin "latest" URLs).
+  Defaults absent = current behavior (no check) so nothing breaks.
+- New helper `Test-WinPulseDownloadedBinary -path <file> -requireSignature
+  <bool> -sha256 <string>` returning `[pscustomobject]@{ Ok; Note }`:
+  - sha256 given: compute `Get-FileHash -Algorithm SHA256`, case-insensitive
+    compare; mismatch -> Ok=$false with both hashes in Note.
+  - requireSignature: `Get-AuthenticodeSignature` must return Status `Valid`;
+    anything else (NotSigned, HashMismatch, UnknownError) -> Ok=$false with
+    the status in Note.
+  - Both checks requested -> both must pass. Neither requested -> Ok=$true.
+- `Ensure-ToolInstalled`:
+  - Sha256 check runs on the downloaded artifact BEFORE extraction/copy;
+    failure -> delete the download, try the next URL source, and if all
+    sources fail throw a clear error.
+  - Signature check runs on the RESOLVED binary path before returning it;
+    failure -> `Remove-Item` the tool's target dir and throw
+    `"<name> failed signature verification - not running it."`.
+  - When a tool has neither field, after install print ONE yellow line:
+    `  Note: <name> is not signature-verified (vendor ships unsigned binaries).`
+- Setting the flags: inspect the catalog and set `VerifySignature = $true`
+  ONLY for vendors that embed Authenticode signatures (Microsoft/Sysinternals
+  Suite, O&O ShutUp10). NirSoft tools are unsigned - leave them unset. When
+  unsure about a vendor, leave it unset and note it in your report. Do not
+  pin Sha256 for any moving "latest" URL.
+
+Acceptance (non-elevated, NO network in tests):
+
+- Smoke-style unit assertions (add to an existing smoke mode or a small
+  dedicated check the smoke wrapper runs): temp file + correct Sha256 ->
+  Ok=$true; wrong Sha256 -> Ok=$false; temp .exe (any bytes) with
+  requireSignature -> Ok=$false (NotSigned). No download is attempted.
+- Code review: failure paths delete the artifact/tool dir; the thrown messages
+  are clear; catalog defaults unchanged for unset tools.
+- Parser + ASCII clean; ALL smoke modes still exit 0.
+- Real signed-tool download verification (Sysinternals, OOSU10) is
+  Claude/owner with network - do not claim it.
+
+Out of scope: GPG/cosign, certificate pinning to a specific publisher CN
+(nice-to-have later), changing download URLs, verifying winget/choco installs.
+
+### Task C35 - Type-to-filter ('/') in multi-select menus
+
+**IMPORTANT - visual verification required.** TUI rendering change. Build on
+`dev`, validate parser + ASCII + all smoke modes, report; Claude verifies
+visually before merge.
+
+Why: `Select-WinPulseMultiMenuItem` lists can be long (MigrationApps winget
+packages 100+, users on a terminal server). Arrow keys alone are slow even
+with the C28 select-all. A `/` filter narrows the list as you type (finding #8).
+
+Scope (all inside `Select-WinPulseMultiMenuItem`; single-select is NOT touched):
+
+- State: `$filterText = ''`, `$filterEditing = $false`. The visible item set is
+  the items whose Label contains `$filterText` (case-insensitive); empty filter
+  = all items. Separators stay visible only when adjacent to visible items
+  (simplest acceptable: hide separators while a filter is active).
+- Keys:
+  - `/` (when not editing) -> enter filter-edit mode.
+  - While editing: printable chars (letters, digits, space, dot, dash,
+    underscore) append; Backspace deletes last char; Enter -> stop editing,
+    keep the filter; Esc -> clear the filter AND stop editing. Arrow keys also
+    stop editing (keep filter) and then navigate.
+  - While NOT editing: all existing keys keep their meaning (Space toggle,
+    `A` select/deselect all, Enter confirm, Esc cancel). `A` applies to the
+    currently VISIBLE (filtered) items only when a filter is active.
+- Selection state (`Selected`) lives on the underlying item objects, so it
+  must survive filter changes - confirm, do not copy items.
+- Cursor/viewport reset to the top whenever the filter text changes.
+- Help bar: append `/ Filter` and, while a filter is active, show
+  `Filter: <text>` (editing: trailing `_` cursor) on its own line in the
+  existing style. Box width must not change.
+- CRITICAL: with no `/` ever pressed, rendering and behavior must be
+  byte-identical to today, including the non-interactive RawUI guard.
+
+Acceptance:
+
+- Parser + ASCII clean; ALL smoke modes exit 0 (smoke never opens menus -
+  proves no regression).
+- Visual check (Claude): filter narrows the MigrationApps package list while
+  typing; Space/A work on the filtered view; ticks survive clearing the
+  filter; Esc-Esc cancels; menus without filtering look unchanged.
+
+Out of scope: `Select-WinPulseMenuItem` (single-select), fuzzy matching,
+highlighting matched substrings, the folder picker.
+
+### Task C36 - Robocopy /MT multithreading + copy progress counter
+
+**IMPORTANT - visual verification required.** Changes the live copy status
+line. Build on `dev`, validate parser + ASCII + all smoke modes, report;
+Claude verifies visually on a real copy before merge.
+
+Why: the copy is single-threaded; `/MT:8` typically speeds up many-small-file
+profiles (Chrome = thousands of tiny files) 2-4x (finding #13). With /MT the
+per-file `/TEE` stream interleaves, so the "current file" status line must
+become a counter - which also addresses the missing overall progress
+(finding #11).
+
+Scope:
+
+- `Invoke-WinPulseRobocopy`: add `[int]$multiThread = 0`. When `> 0` AND not
+  `-DryRun`, append `/MT:<n>` to the arguments. Default 0 = today's behavior,
+  byte-identical (dry-run never gets /MT).
+- Status line in the non-dry-run branch when `$multiThread -gt 0`: replace the
+  current-file display with a throttled counter - count streamed lines that
+  end in a path-ish token (simplest: every non-empty line that is not a header
+  separator), and every 25 lines rewrite the status line as
+  `    copying... ~{N} files done` (same `\r`-rewrite, same 84-char pad).
+  When `$multiThread -eq 0`, keep the existing per-file line EXACTLY as is.
+- Call sites: backup loop and restore loop pass `-multiThread 8`. The
+  per-item line gains the planned size for context, e.g.
+  `  Copying user\Desktop (12.3 GB)...` using the plan item's `Size` (both
+  loops already have the item in scope). MigrationVerify and dry-runs are
+  untouched.
+- Robocopy notes: `/MT` is incompatible with `/IPG` and `/EFSRAW` (we use
+  neither); log writes stay coherent with `/LOG+`; verification is
+  count/byte-based and unaffected by copy order. C33's log parser must still
+  work - /MT error lines keep the same `ERROR n (0x...)` shape.
+
+Acceptance:
+
+- Parser + ASCII clean; ALL smoke modes exit 0 (smoke executes real copies
+  through the wrapper, so the /MT path is exercised end-to-end; manifests
+  must still show zero failures/mismatches).
+- Visual check (Claude/owner): on a real multi-GB backup the counter line
+  updates smoothly, no garbled interleaving, and the copy is measurably
+  faster on a many-small-files folder.
+
+Out of scope: /MT tuning per folder size, robocopy /NP changes, bandwidth
+limiting, progress bars in Write-Progress beyond what exists.
 
 ## Project Direction
 
