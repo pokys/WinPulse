@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.16.0-20260610'
+$script:WinPulseVersion = '0.17.0-20260610'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -7933,6 +7933,273 @@ function Get-WinPulseToolCatalog {
     }
 }
 
+function Get-WinPulseNirSoftCatalog {
+    # NirSoft launcher catalog. The credential/key tools (ProduKey,
+    # WirelessKeyView, Mail PassView) are commonly flagged by AV as HackTool/PUA
+    # and some ship in password-protected ZIPs - both are handled at launch by
+    # Start-WinPulseNirSoftTool with a manual-download fallback. All NirSoft
+    # binaries are unsigned, so none carry VerifySignature.
+    [CmdletBinding()]
+    param()
+
+    return [ordered]@{
+        produkey = [ordered]@{
+            Label      = 'ProduKey'
+            Binary     = 'ProduKey.exe'
+            Urls       = @('https://www.nirsoft.net/utils/produkey-x64.zip', 'https://www.nirsoft.net/utils/produkey.zip')
+            InfoUrl    = 'https://www.nirsoft.net/utils/product_cd_key_viewer.html'
+            AvFlagged  = $true
+            Credential = $true
+        }
+        wirelesskeyview = [ordered]@{
+            Label       = 'WirelessKeyView'
+            Binary      = 'WirelessKeyView.exe'
+            Urls        = @('https://www.nirsoft.net/utils/wirelesskeyview-x64.zip', 'https://www.nirsoft.net/utils/wirelesskeyview.zip')
+            InfoUrl     = 'https://www.nirsoft.net/utils/wireless_key.html'
+            ZipPassword = 'WKey4567#'
+            AvFlagged   = $true
+            Credential  = $true
+        }
+        mailpv = [ordered]@{
+            Label      = 'Mail PassView'
+            Binary     = 'mailpv.exe'
+            Urls       = @('https://www.nirsoft.net/utils/mailpv.zip')
+            InfoUrl    = 'https://www.nirsoft.net/utils/mailpv.html'
+            AvFlagged  = $true
+            Credential = $true
+        }
+        usbdeview = [ordered]@{
+            Label   = 'USBDeview'
+            Binary  = 'USBDeview.exe'
+            Urls    = @('https://www.nirsoft.net/utils/usbdeview-x64.zip', 'https://www.nirsoft.net/utils/usbdeview.zip')
+            InfoUrl = 'https://www.nirsoft.net/utils/usb_devices_view.html'
+        }
+        browsinghistoryview = [ordered]@{
+            Label   = 'BrowsingHistoryView'
+            Binary  = 'BrowsingHistoryView.exe'
+            Urls    = @('https://www.nirsoft.net/utils/browsinghistoryview-x64.zip', 'https://www.nirsoft.net/utils/browsinghistoryview.zip')
+            InfoUrl = 'https://www.nirsoft.net/utils/browsing_history_view.html'
+        }
+        winupdatesview = [ordered]@{
+            Label   = 'WinUpdatesView'
+            Binary  = 'WinUpdatesView.exe'
+            Urls    = @('https://www.nirsoft.net/utils/winupdatesview-x64.zip', 'https://www.nirsoft.net/utils/winupdatesview.zip')
+            InfoUrl = 'https://www.nirsoft.net/utils/windows_updates_history_viewer.html'
+        }
+        installedappview = [ordered]@{
+            Label   = 'InstalledAppView'
+            Binary  = 'InstalledAppView.exe'
+            Urls    = @('https://www.nirsoft.net/utils/installedappview-x64.zip', 'https://www.nirsoft.net/utils/installedappview.zip')
+            InfoUrl = 'https://www.nirsoft.net/utils/installed_application_view.html'
+        }
+    }
+}
+
+function Get-WinPulse7ZipPath {
+    # Locate 7z.exe (needed only for password-protected archives). Optionally
+    # install 7-Zip via winget when missing. Best-effort: returns $null if not
+    # found and not installable.
+    [CmdletBinding()]
+    param([switch]$installIfMissing)
+
+    $candidates = @()
+    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles '7-Zip\7z.exe') }
+    $pf86 = ${env:ProgramFiles(x86)}
+    if ($pf86) { $candidates += (Join-Path $pf86 '7-Zip\7z.exe') }
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    $cmd = Get-Command -Name '7z.exe' -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    if ($installIfMissing) {
+        [void](Install-WinPulseWingetCandidates -ids @('7zip.7zip'))
+        foreach ($c in $candidates) {
+            if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+        }
+        $cmd = Get-Command -Name '7z.exe' -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    return $null
+}
+
+function Expand-WinPulseArchive {
+    # Extract a ZIP to a destination. Plain ZIPs use Expand-Archive; a non-empty
+    # password routes through 7-Zip (Expand-Archive cannot read encrypted ZIPs).
+    # Returns $true on success, $false on any failure (caller handles fallback).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$zipPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$destination,
+
+        [string]$password = $null
+    )
+
+    if (-not (Test-Path -LiteralPath $zipPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $destination)) {
+        New-Item -Path $destination -ItemType Directory -Force | Out-Null
+    }
+
+    if ([string]::IsNullOrEmpty($password)) {
+        try {
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $destination -Force -ErrorAction Stop
+            return $true
+        }
+        catch {
+            Write-Log -level 'WARNING' -message ('Expand-Archive failed for {0}: {1}' -f $zipPath, $_.Exception.Message)
+            return $false
+        }
+    }
+
+    $sevenZip = Get-WinPulse7ZipPath -installIfMissing
+    if (-not $sevenZip) {
+        Write-Log -level 'WARNING' -message 'Password-protected archive but 7-Zip is unavailable.'
+        return $false
+    }
+    try {
+        $sevenZipArgs = @('x', $zipPath, ('-o{0}' -f $destination), ('-p{0}' -f $password), '-y')
+        & $sevenZip @sevenZipArgs | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        Write-Log -level 'WARNING' -message ('7-Zip extract failed for {0}: {1}' -f $zipPath, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Start-WinPulseNirSoftTool {
+    # Download (if needed), extract, and launch a NirSoft tool. Credential/key
+    # tools get an authorization + AV warning. On any failure (AV removed the
+    # download, password ZIP without 7-Zip, etc.) it shows the ZIP password when
+    # known and opens the official NirSoft page for manual download.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$toolKey
+    )
+
+    $catalog = Get-WinPulseNirSoftCatalog
+    if (-not $catalog.Contains($toolKey)) {
+        Write-Host ('Unknown NirSoft tool: {0}' -f $toolKey) -ForegroundColor Red
+        return
+    }
+
+    $tool = $catalog[$toolKey]
+    $label = [string]$tool['Label']
+    $binary = [string]$tool['Binary']
+    $infoUrl = if ($tool.Contains('InfoUrl')) { [string]$tool['InfoUrl'] } else { '' }
+    $password = if ($tool.Contains('ZipPassword')) { [string]$tool['ZipPassword'] } else { $null }
+    $avFlagged = ($tool.Contains('AvFlagged') -and [bool]$tool['AvFlagged'])
+    $credential = ($tool.Contains('Credential') -and [bool]$tool['Credential'])
+
+    Clear-Host
+    Write-WinPulseHeader -title ('NirSoft - {0}' -f $label)
+    Write-Host ''
+    if ($credential) {
+        Write-Host '  Credential/key recovery tool. Use it only on machines you are authorized' -ForegroundColor Yellow
+        Write-Host '  to service; it reads keys/passwords stored on THIS PC.' -ForegroundColor Yellow
+    }
+    if ($avFlagged) {
+        Write-Host '  Antivirus/Defender often flags this as HackTool/PUA and may delete the' -ForegroundColor Yellow
+        Write-Host '  download or block it. That is a known false positive for NirSoft tools.' -ForegroundColor Yellow
+    }
+    Write-Host ''
+
+    $targetDir = Join-Path $script:WinPulsePaths.Bin (Join-Path 'NirSoft' $toolKey)
+    $exePath = Join-Path $targetDir $binary
+
+    if (Test-Path -LiteralPath $exePath) {
+        Start-Process -FilePath $exePath
+        Write-Host ('  Launched {0}.' -f $label) -ForegroundColor Green
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+    }
+
+    $urls = @()
+    if ($tool.Contains('Urls') -and $tool['Urls']) { $urls = @($tool['Urls']) }
+    elseif ($tool.Contains('Url') -and $tool['Url']) { $urls = @($tool['Url']) }
+
+    $extracted = $false
+    foreach ($url in $urls) {
+        $zipPath = Join-Path $script:WinPulsePaths.Bin ('{0}-{1}.zip' -f $toolKey, ([Guid]::NewGuid().ToString('N')))
+        try {
+            Write-Host ('  Downloading {0}...' -f $label) -ForegroundColor Gray
+            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        }
+        catch {
+            Write-Log -level 'WARNING' -message ('NirSoft download failed for {0} ({1}): {2}' -f $toolKey, $url, $_.Exception.Message)
+            Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        if (Expand-WinPulseArchive -zipPath $zipPath -destination $targetDir -password $password) {
+            $extracted = $true
+        }
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        if ($extracted) { break }
+    }
+
+    if (Test-Path -LiteralPath $exePath) {
+        Write-Host ('  Note: {0} is not signature-verified (NirSoft ships unsigned binaries).' -f $label) -ForegroundColor Yellow
+        Start-Process -FilePath $exePath
+        Write-Host ('  Launched {0}.' -f $label) -ForegroundColor Green
+        return
+    }
+
+    Write-Host ''
+    Write-Host ('  Could not prepare {0} automatically.' -f $label) -ForegroundColor Red
+    if ($avFlagged) {
+        Write-Host '  Antivirus likely removed the download, or the ZIP is password-protected.' -ForegroundColor Yellow
+    }
+    if (-not [string]::IsNullOrWhiteSpace($password)) {
+        Write-Host ('  ZIP password (per NirSoft page): {0}' -f $password) -ForegroundColor Cyan
+    }
+    if (-not [string]::IsNullOrWhiteSpace($infoUrl)) {
+        Write-Host ('  Opening the official download page: {0}' -f $infoUrl) -ForegroundColor Gray
+        $opened = $false
+        try { Start-Process -FilePath 'msedge.exe' -ArgumentList ('"{0}"' -f $infoUrl); $opened = $true } catch { $opened = $false }
+        if (-not $opened) { try { Start-Process -FilePath $infoUrl } catch { } }
+    }
+}
+
+function Show-WinPulseNirSoftMenu {
+    [CmdletBinding()]
+    param()
+
+    while ($true) {
+        Clear-Host
+        $choice = Select-WinPulseMenuItem -Title 'NirSoft Tools' -Items @(
+            @{ Label = 'ProduKey';            Key = 'P'; Hint = 'Windows/Office keys' },
+            @{ Label = 'WirelessKeyView';     Key = 'W'; Hint = 'Saved Wi-Fi keys' },
+            @{ Label = 'Mail PassView';       Key = 'M'; Hint = 'Mail client passwords' },
+            @{ Label = 'USBDeview';           Key = 'U'; Hint = 'USB device history' },
+            @{ Label = 'BrowsingHistoryView'; Key = 'B'; Hint = 'Browser history' },
+            @{ Label = 'WinUpdatesView';      Key = 'I'; Hint = 'Installed updates' },
+            @{ Label = 'InstalledAppView';    Key = 'A'; Hint = 'Installed apps' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                Key = 'X'; Color = 'DarkGray' }
+        )
+        if (-not $choice -or $choice -eq 'X') { return }
+        switch ($choice) {
+            'P' { Start-WinPulseNirSoftTool -toolKey 'produkey' }
+            'W' { Start-WinPulseNirSoftTool -toolKey 'wirelesskeyview' }
+            'M' { Start-WinPulseNirSoftTool -toolKey 'mailpv' }
+            'U' { Start-WinPulseNirSoftTool -toolKey 'usbdeview' }
+            'B' { Start-WinPulseNirSoftTool -toolKey 'browsinghistoryview' }
+            'I' { Start-WinPulseNirSoftTool -toolKey 'winupdatesview' }
+            'A' { Start-WinPulseNirSoftTool -toolKey 'installedappview' }
+            default { return }
+        }
+        Write-Host ''; Wait-WinPulseKey
+    }
+}
+
 function Resolve-WinPulseDownloadUrl {
     [CmdletBinding()]
     param(
@@ -10851,7 +11118,8 @@ function Show-WinPulseToolsMenu {
             @{ Label = 'FurMark';               Key = 'F'; Hint = 'GPU stress' },
             @{ Label = 'TechToolStore';         Key = 'T'; Hint = 'Tool suite' },
             @{ Label = 'O&O ShutUp10++';        Key = 'O'; Hint = 'Privacy' },
-            @{ Label = 'Process Explorer';      Key = 'I'; Hint = 'Sysinternals' }
+            @{ Label = 'Process Explorer';      Key = 'I'; Hint = 'Sysinternals' },
+            @{ Label = 'NirSoft tools';         Key = 'N'; Hint = 'Keys/passwords/history' }
         )
         if (-not $choice) { return }
         switch ($choice) {
@@ -10864,6 +11132,7 @@ function Show-WinPulseToolsMenu {
             'T' { Start-WinPulseTechToolStore }
             'O' { Start-WinPulseOOShutUp }
             'I' { Start-WinPulseSysinternalsSuite }
+            'N' { Show-WinPulseNirSoftMenu; continue }
             default { return }
         }
         Write-Host ''; Wait-WinPulseKey
