@@ -1753,6 +1753,111 @@ function Write-WinPulseHeader {
     Write-Host ('  {0}{1}{2}' -f ([char]0x255A), ([string][char]0x2550 * ($w - 2)), ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
 }
 
+function Write-WinPulseBoxTextLine {
+    [CmdletBinding()]
+    param(
+        [string]$text = '',
+        [string]$color = 'White',
+        [int]$width = 88
+    )
+
+    $vLine = [char]0x2551
+    $contentWidth = [math]::Max(1, $width - 4)
+    $line = if ($null -ne $text) { [string]$text } else { '' }
+    if ($line.Length -gt $contentWidth) {
+        if ($contentWidth -gt 3) {
+            $line = $line.Substring(0, $contentWidth - 3) + '...'
+        }
+        else {
+            $line = $line.Substring(0, $contentWidth)
+        }
+    }
+    $pad = $contentWidth - $line.Length
+    if ($pad -lt 0) { $pad = 0 }
+
+    Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+    Write-Host -NoNewline ($line + (' ' * $pad)) -ForegroundColor $color
+    Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+}
+
+function Show-WinPulsePagedTextBox {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$title,
+
+        [string]$breadcrumb = '',
+
+        [string[]]$lines = @()
+    )
+
+    $safeLines = @($lines | ForEach-Object { if ($null -ne $_) { [string]$_ } else { '' } })
+    if ($safeLines.Count -eq 0) { $safeLines = @('No output.') }
+
+    $interactive = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
+    if (-not $interactive) {
+        Write-WinPulseHeader -title $title
+        if (-not [string]::IsNullOrWhiteSpace($breadcrumb)) {
+            Write-Host ('  {0}' -f $breadcrumb) -ForegroundColor DarkGray
+            Write-Host ''
+        }
+        foreach ($line in $safeLines) { Write-Host ('  {0}' -f $line) -ForegroundColor White }
+        return
+    }
+
+    $w = Get-WinPulseBoxWidth
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $page = 0
+    [Console]::CursorVisible = $false
+    try {
+        while ($true) {
+            $maxContentLines = [math]::Max(1, [Console]::WindowHeight - 7)
+            if (-not [string]::IsNullOrWhiteSpace($breadcrumb)) { $maxContentLines-- }
+            if ($maxContentLines -lt 1) { $maxContentLines = 1 }
+
+            $pageCount = [math]::Max(1, [int][math]::Ceiling($safeLines.Count / [double]$maxContentLines))
+            if ($page -ge $pageCount) { $page = $pageCount - 1 }
+            if ($page -lt 0) { $page = 0 }
+            $start = $page * $maxContentLines
+            $pageLines = @($safeLines | Select-Object -Skip $start -First $maxContentLines)
+
+            Clear-Host
+            $titleText = if ($pageCount -gt 1) { '{0}  {1}/{2}' -f $title, ($page + 1), $pageCount } else { $title }
+            Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline $titleText -ForegroundColor White
+            Write-Host (' {0}{1}' -f ([string][char]0x2550 * [math]::Max(1, $w - $titleText.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+
+            if (-not [string]::IsNullOrWhiteSpace($breadcrumb)) {
+                Write-WinPulseBoxTextLine -text $breadcrumb -color DarkGray -width $w
+            }
+
+            foreach ($line in $pageLines) {
+                Write-WinPulseBoxTextLine -text $line -color White -width $w
+            }
+
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
+            $helpAction = if ($page -lt ($pageCount - 1)) { 'Next' } else { 'Back' }
+            $helpText = '  Space/Enter {0}  Esc Back' -f $helpAction
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
+
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            if ($key.VirtualKeyCode -eq 27) { return }
+            if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 32) {
+                if ($page -lt ($pageCount - 1)) {
+                    $page++
+                }
+                else {
+                    return
+                }
+            }
+        }
+    }
+    finally {
+        [Console]::CursorVisible = $true
+    }
+}
+
 function Select-WinPulseMenuItem {
     [CmdletBinding()]
     param(
@@ -12081,22 +12186,37 @@ function Show-WinPulseNetworkMenu {
     [CmdletBinding()]
     param()
 
-    $choice = Select-WinPulseMenuItem -Title 'Network' -Items @(
-        @{ Label = 'Full diagnostic';      Key = 'D'; Hint = 'All checks' },
-        @{ Label = 'Flush DNS';            Key = 'F'; Hint = 'Clear cache' },
-        @{ Label = 'Reset TCP/IP';         Key = 'T'; Hint = 'Stack reset' },
-        @{ Label = 'Reset Winsock';        Key = 'W'; Hint = 'Socket reset' },
-        @{ Label = 'Restart adapters';     Key = 'A'; Hint = 'Re-enable' },
-        @{ Label = 'Repair network';       Key = 'R'; Hint = 'Auto-fix' }
-    )
-    switch ($choice) {
-        'D' { Invoke-NetworkDiagnostic | Format-List | Out-Host }
-        'F' { Clear-NetworkDns }
-        'T' { Reset-NetworkTcpIp }
-        'W' { Reset-NetworkWinsock }
-        'A' { Restart-NetworkAdapters }
-        'R' { Repair-NetworkStack }
-        default { }
+    while ($true) {
+        Clear-Host
+        Write-Host '  Main > Network' -ForegroundColor DarkGray
+        $choice = Select-WinPulseMenuItem -Title 'Network' -Items @(
+            @{ Label = 'Full diagnostic';      Key = 'D'; Hint = 'All checks' },
+            @{ Label = 'Flush DNS';            Key = 'F'; Hint = 'Clear cache' },
+            @{ Label = 'Reset TCP/IP';         Key = 'T'; Hint = 'Stack reset' },
+            @{ Label = 'Reset Winsock';        Key = 'W'; Hint = 'Socket reset' },
+            @{ Label = 'Restart adapters';     Key = 'A'; Hint = 'Re-enable' },
+            @{ Label = 'Repair network';       Key = 'R'; Hint = 'Auto-fix' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                 Key = 'B'; Color = 'DarkGray' }
+        )
+        if (-not $choice -or $choice -eq 'B') { return }
+        switch ($choice) {
+            'D' {
+                try {
+                    $lines = @(Invoke-NetworkDiagnostic | Format-List | Out-String -Width 160 -Stream)
+                }
+                catch {
+                    $lines = @('ERROR: {0}' -f $_.Exception.Message)
+                }
+                Show-WinPulsePagedTextBox -title 'Network Diagnostic' -breadcrumb 'Main > Network' -lines $lines
+            }
+            'F' { Clear-NetworkDns; Wait-WinPulseKey }
+            'T' { Reset-NetworkTcpIp; Wait-WinPulseKey }
+            'W' { Reset-NetworkWinsock; Wait-WinPulseKey }
+            'A' { Restart-NetworkAdapters; Wait-WinPulseKey }
+            'R' { Repair-NetworkStack; Wait-WinPulseKey }
+            default { }
+        }
     }
 }
 
@@ -12104,16 +12224,47 @@ function Show-WinPulseSecurityMenu {
     [CmdletBinding()]
     param()
 
-    $choice = Select-WinPulseMenuItem -Title 'Security' -Items @(
-        @{ Label = 'Security assessment';     Key = 'A'; Hint = 'Full check' },
-        @{ Label = 'Weak service configs';    Key = 'W'; Hint = 'Permissions' },
-        @{ Label = 'BitLocker status';        Key = 'B'; Hint = 'Encryption' }
-    )
-    switch ($choice) {
-        'A' { Get-WinPulseSecurityAssessment | Format-List | Out-Host }
-        'W' { Test-WeakServiceConfiguration | Format-Table -AutoSize | Out-Host }
-        'B' { Get-BitLockerVolume | Format-Table MountPoint,ProtectionStatus,VolumeStatus -AutoSize | Out-Host }
-        default { }
+    while ($true) {
+        Clear-Host
+        Write-Host '  Main > Security' -ForegroundColor DarkGray
+        $choice = Select-WinPulseMenuItem -Title 'Security' -Items @(
+            @{ Label = 'Security assessment';     Key = 'A'; Hint = 'Full check' },
+            @{ Label = 'Weak service configs';    Key = 'W'; Hint = 'Permissions' },
+            @{ Label = 'BitLocker status';        Key = 'B'; Hint = 'Encryption' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                    Key = 'X'; Color = 'DarkGray' }
+        )
+        if (-not $choice -or $choice -eq 'X') { return }
+        switch ($choice) {
+            'A' {
+                try {
+                    $lines = @(Get-WinPulseSecurityAssessment | Format-List | Out-String -Width 160 -Stream)
+                }
+                catch {
+                    $lines = @('ERROR: {0}' -f $_.Exception.Message)
+                }
+                Show-WinPulsePagedTextBox -title 'Security Assessment' -breadcrumb 'Main > Security' -lines $lines
+            }
+            'W' {
+                try {
+                    $lines = @(Test-WeakServiceConfiguration | Format-Table -AutoSize | Out-String -Width 160 -Stream)
+                }
+                catch {
+                    $lines = @('ERROR: {0}' -f $_.Exception.Message)
+                }
+                Show-WinPulsePagedTextBox -title 'Weak Service Configs' -breadcrumb 'Main > Security' -lines $lines
+            }
+            'B' {
+                try {
+                    $lines = @(Get-BitLockerVolume | Format-Table MountPoint, ProtectionStatus, VolumeStatus -AutoSize | Out-String -Width 160 -Stream)
+                }
+                catch {
+                    $lines = @('ERROR: {0}' -f $_.Exception.Message)
+                }
+                Show-WinPulsePagedTextBox -title 'BitLocker Status' -breadcrumb 'Main > Security' -lines $lines
+            }
+            default { }
+        }
     }
 }
 
