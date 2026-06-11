@@ -418,6 +418,382 @@ function Invoke-SmokeCleanupLogicAssertions {
     }
 }
 
+function Invoke-SmokeDiagnosticsRenderAssertions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BootstrapPath
+    )
+
+    $tempRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeDiagnosticsRender-{0}' -f ([Guid]::NewGuid().ToString('N')))
+    $capturedHostLines = New-Object System.Collections.Generic.List[string]
+
+    function Clear-Host {
+    }
+
+    function Wait-WinPulseKey {
+    }
+
+    function Write-WinPulseHeader {
+        param($title)
+        [void]$capturedHostLines.Add(('HEADER: {0}' -f $title))
+    }
+
+    function Write-Host {
+        [CmdletBinding()]
+        param(
+            [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+            [object[]]$Object,
+
+            [switch]$NoNewline,
+
+            [object]$Separator = ' ',
+
+            [ConsoleColor]$ForegroundColor,
+
+            [ConsoleColor]$BackgroundColor
+        )
+
+        $parts = @()
+        foreach ($item in @($Object)) {
+            if ($null -ne $item) {
+                $parts += [string]$item
+            }
+        }
+        [void]$capturedHostLines.Add(($parts -join [string]$Separator))
+    }
+
+    function Select-WinPulseMenuItem {
+        return $null
+    }
+
+    function Select-WinPulseMultiMenuItem {
+        return $null
+    }
+
+    function Select-WinPulseFindingItem {
+        return $null
+    }
+
+    function Show-WinPulsePagedTextBox {
+        return $null
+    }
+
+    function New-SmokeDiagnosticsBaseScan {
+        [CmdletBinding()]
+        param()
+
+        return [pscustomobject][ordered]@{
+            GeneratedAt    = Get-Date
+            System         = [ordered]@{
+                Hostname       = 'SMOKE-PC'
+                Model          = 'Smoke Model'
+                Serial         = 'SMOKE123'
+                WindowsVersion = 'Microsoft Windows 11 Pro (26100)'
+                Uptime         = '1d 2h 3m'
+                DomainJoined   = $false
+                Domain         = 'Workgroup'
+                Firmware       = 'UEFI'
+                DumpInfo       = [ordered]@{
+                    MinidumpCount  = 0
+                    MinidumpNewest = $null
+                    FullDumpExists = $false
+                }
+            }
+            Hardware       = [ordered]@{
+                Ram            = [ordered]@{
+                    Total       = '16.00 GB'
+                    Free        = '8.00 GB'
+                    Used        = '8.00 GB'
+                    UsedPercent = 50
+                }
+                Disks          = @()
+                SmartHealthy   = $true
+                CpuLoadPercent = $null
+            }
+            Security       = [ordered]@{
+                Defender        = [ordered]@{
+                    RealTimeProtection = $false
+                    SignaturesUpToDate = $false
+                }
+                Antivirus       = [ordered]@{
+                    Products                    = @()
+                    ThirdPartyCount             = 0
+                    EffectiveRealtimeProtection = $false
+                }
+                BitLocker      = @()
+                FirewallEnabled = $true
+                SecureBootState = 'On'
+            }
+            Health         = [ordered]@{
+                BsodRecentCount              = 0
+                WindowsUpdateErrorCount24Hours = 0
+                WindowsUpdateRecentErrors    = @()
+                WindowsUpdateCategoryCounts  = [ordered]@{
+                    StoreApps     = 0
+                    UpdateService = 0
+                    Network       = 0
+                    Servicing     = 0
+                    AccessDenied  = 0
+                    General       = 0
+                }
+                CriticalLast24Hours          = 0
+                PendingReboot                = $false
+            }
+            Network        = [ordered]@{
+                IPv4       = '192.0.2.10'
+                Gateway    = '192.0.2.1'
+                DnsServers = @('1.1.1.1', '8.8.8.8')
+                Internet   = $true
+            }
+            HardwareDetail = [ordered]@{
+                CPU         = [ordered]@{
+                    Model       = 'Intel(R) Core(TM) i7-8650U CPU @ 1.90GHz'
+                    Cores       = 4
+                    Threads     = 8
+                    BaseFreqMHz = 1900
+                    Architecture = 'x64'
+                }
+                GPU         = @()
+                DIMMs       = @()
+                Battery     = [ordered]@{
+                    Present              = $false
+                    HealthPercent        = $null
+                    CycleCount           = $null
+                    DesignCapacityWh     = $null
+                    FullChargeCapacityWh = $null
+                    ChargePercent        = $null
+                }
+                Motherboard = [ordered]@{
+                    Manufacturer = 'Smoke'
+                    Model        = 'SmokeBoard'
+                    BIOSVersion  = '1.0.0'
+                    BIOSDate     = '2026-06-11'
+                }
+            }
+            Temperatures   = [ordered]@{
+                CPUTempCelsius = $null
+                CPUTempSource  = 'Unavailable'
+                DiskTemps      = @()
+                Note           = 'Smoke fixture'
+            }
+            TPM            = [ordered]@{
+                Present         = $true
+                Enabled         = $true
+                Version         = '2.0'
+                Manufacturer    = 'SMK'
+                Win11Compatible = $true
+            }
+            Drivers        = [ordered]@{
+                Problematic     = @()
+                ProblemDevices  = @()
+                Unsigned        = @()
+                RecentlyChanged = @()
+            }
+            Startup        = [ordered]@{
+                RunKeyItems         = @()
+                StartupFolderItems  = @()
+                LogonScheduledTasks = @()
+                FailedAutoServices  = @()
+                LastBootTime        = $null
+                BootDurationMs      = $null
+            }
+            UserAccounts   = $null
+            NetworkDetail  = [ordered]@{
+                Adapters         = @()
+                WiFi             = $null
+                ListeningPorts   = @()
+                SMBShares        = @()
+                VPNProfiles      = @()
+                GatewayReachable = $false
+            }
+            Software       = $null
+            Printers       = [ordered]@{
+                Installed      = @()
+                DefaultPrinter = 'N/A'
+                StuckJobs      = @()
+            }
+            License        = [ordered]@{
+                ActivationStatus  = 'Activated'
+                LicenseType       = 'Retail'
+                PartialProductKey = 'ABCDE'
+                ExpiryDate        = $null
+                ProductName       = 'Windows'
+            }
+            ScheduledTasks = $null
+            Virtualization = $null
+            DetailScanned  = $false
+            Errors         = @()
+        }
+    }
+
+    function Invoke-SmokeDiagnosticsRenderCase {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Name,
+
+            [Parameter(Mandatory = $true)]
+            [pscustomobject]$Scan
+        )
+
+        $renderers = @(
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsFindings'; Action = { param($s) Show-WinPulseDiagnosticsFindings -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsDrivers'; Action = { param($s) Show-WinPulseDiagnosticsDrivers -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsServices'; Action = { param($s) Show-WinPulseDiagnosticsServices -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsSystem'; Action = { param($s) Show-WinPulseDiagnosticsSystem -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsHardware'; Action = { param($s) Show-WinPulseDiagnosticsHardware -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsSecurity'; Action = { param($s) Show-WinPulseDiagnosticsSecurity -scan $s } },
+            [pscustomobject][ordered]@{ Name = 'Show-WinPulseDiagnosticsNetwork'; Action = { param($s) Show-WinPulseDiagnosticsNetwork -scan $s } }
+        )
+
+        foreach ($renderer in @($renderers)) {
+            $capturedHostLines.Clear()
+            try {
+                & $renderer.Action $Scan
+            }
+            catch {
+                throw ('Diagnostics render assertion failed for scan "{0}" in {1}: {2}' -f $Name, $renderer.Name, $_.Exception.Message)
+            }
+
+            if ($Name -eq 'DataPresent' -and $renderer.Name -eq 'Show-WinPulseDiagnosticsSecurity') {
+                $joinedOutput = @($capturedHostLines.ToArray()) -join "`n"
+                if ($joinedOutput -notmatch 'ESET Endpoint Security') {
+                    throw 'Diagnostics security render did not include the expected ESET Endpoint Security product.'
+                }
+            }
+        }
+    }
+
+    try {
+        $script:WinPulseBoxColor = 'Gray'
+        $script:WinPulseServiceNoiselist = @(
+            'DiagTrack', 'dmwappushservice', 'DoSvc',
+            'edgeupdate', 'edgeupdatem',
+            'gupdate', 'gupdatem',
+            'MapsBroker', 'SCardSvr', 'sppsvc',
+            'MozillaMaintenance', 'AdobeARMservice', 'Fax', 'WbioSrvc'
+        )
+
+        foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $BootstrapPath -Name @(
+                    'Get-WinPulseTriageFindings',
+                    'Get-WinPulseObjectValue',
+                    'Get-WinPulseDiagnosticsCpuShort',
+                    'Get-WinPulseStateFromPercent',
+                    'ConvertTo-ReadableSize',
+                    'Get-WinPulseFindingDetailTarget',
+                    'Show-WinPulseFindingDetailTarget',
+                    'Show-WinPulseDiagnosticsFindings',
+                    'Show-WinPulseDiagnosticsDrivers',
+                    'Show-WinPulseDiagnosticsServices',
+                    'Show-WinPulseDiagnosticsSystem',
+                    'Show-WinPulseDiagnosticsHardware',
+                    'Show-WinPulseDiagnosticsSecurity',
+                    'Show-WinPulseDiagnosticsNetwork'
+                ))) {
+            . ([scriptblock]::Create($functionText))
+        }
+
+        $emptyScan = New-SmokeDiagnosticsBaseScan
+
+        $dataScan = New-SmokeDiagnosticsBaseScan
+        $dataScan.Security['Antivirus']['Products'] = @(
+            [pscustomobject][ordered]@{
+                Name        = 'ESET Endpoint Security'
+                IsMicrosoft = $false
+            }
+        )
+        $dataScan.Security['Antivirus']['ThirdPartyCount'] = 1
+        $dataScan.Security['Antivirus']['EffectiveRealtimeProtection'] = $true
+        $dataScan.Security['BitLocker'] = @(
+            [pscustomobject][ordered]@{
+                MountPoint           = 'C:'
+                ProtectionStatus     = 'On'
+                EncryptionPercentage = 100
+            }
+        )
+        $dataScan.Hardware['Disks'] = @(
+            [pscustomobject][ordered]@{
+                Drive       = 'C:'
+                Size        = '256.00 GB'
+                Free        = '20.00 GB'
+                UsedPercent = 92
+            }
+        )
+        $dataScan.HardwareDetail['DIMMs'] = @(
+            [ordered]@{
+                Slot         = 'DIMM0'
+                Capacity     = '16.00 GB'
+                SpeedMHz     = 3200
+                Type         = 'DDR4'
+                Manufacturer = 'Smoke'
+            }
+        )
+        $dataScan.HardwareDetail['Battery'] = [ordered]@{
+            Present              = $true
+            HealthPercent        = 45
+            CycleCount           = 700
+            DesignCapacityWh     = 50
+            FullChargeCapacityWh = 22.5
+            ChargePercent        = 80
+        }
+        $dataScan.Temperatures['CPUTempCelsius'] = 72
+        $dataScan.Temperatures['DiskTemps'] = @(
+            [ordered]@{
+                DiskModel   = 'Smoke SSD'
+                TempCelsius = 38
+                Source      = 'Smoke'
+            }
+        )
+        $dataScan.Drivers['Problematic'] = @(
+            [ordered]@{
+                DeviceName       = 'PCI Smoke Device'
+                ErrorCode        = 10
+                ErrorDescription = 'Cannot start'
+            }
+        )
+        $dataScan.Drivers['ProblemDevices'] = @('PCI\VEN_1234&DEV_5678')
+        $dataScan.Drivers['Unsigned'] = @(
+            [ordered]@{
+                DeviceName     = 'Legacy Smoke Driver'
+                DriverProvider = 'Smoke Vendor'
+                InfName        = 'smoke.inf'
+            }
+        )
+        $dataScan.Startup['FailedAutoServices'] = @(
+            [ordered]@{
+                Name        = 'SmokeSvc'
+                DisplayName = 'Smoke Service'
+                Status      = 'Stopped'
+            }
+        )
+
+        $minimalScan = New-SmokeDiagnosticsBaseScan
+        [void]$minimalScan.System.Remove('DumpInfo')
+        [void]$minimalScan.Hardware.Remove('CpuLoadPercent')
+        [void]$minimalScan.Security.Remove('Defender')
+        [void]$minimalScan.Security.Remove('BitLocker')
+        [void]$minimalScan.Security['Antivirus'].Remove('Products')
+        [void]$minimalScan.Security['Antivirus'].Remove('ThirdPartyCount')
+        $minimalScan.HardwareDetail = $null
+        $minimalScan.Temperatures = $null
+        $minimalScan.TPM = $null
+        $minimalScan.Drivers = $null
+        $minimalScan.Startup = $null
+        $minimalScan.NetworkDetail = $null
+        $minimalScan.Printers = $null
+        $minimalScan.License = $null
+
+        Invoke-SmokeDiagnosticsRenderCase -Name 'EmptyArrays' -Scan $emptyScan
+        Invoke-SmokeDiagnosticsRenderCase -Name 'DataPresent' -Scan $dataScan
+        Invoke-SmokeDiagnosticsRenderCase -Name 'MinimalMissingOptionalSubKeys' -Scan $minimalScan
+        Microsoft.PowerShell.Utility\Write-Host 'Diagnostics render assertions: OK' -ForegroundColor Gray
+    }
+    finally {
+        Remove-SmokeDirectoryTree -Path $tempRoot
+    }
+}
+
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($BootstrapPath)) {
     $BootstrapPath = Join-Path -Path $repoRoot -ChildPath 'bootstrap.ps1'
@@ -480,6 +856,7 @@ try {
     Invoke-SmokeDownloadVerificationAssertions -BootstrapPath $BootstrapPath
     Invoke-SmokeLongPathEnumerationAssertions -BootstrapPath $BootstrapPath
     Invoke-SmokeCleanupLogicAssertions -BootstrapPath $BootstrapPath
+    Invoke-SmokeDiagnosticsRenderAssertions -BootstrapPath $BootstrapPath
 
     if ($Mode -in @('MigrationBackup', 'MigrationRestore', 'MigrationVerify')) {
         $fixtureRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-SmokeFixture-{0}-{1}' -f $Mode, $stamp)
