@@ -12745,8 +12745,12 @@ function Show-WinPulseDiagnosticsDrivers {
 
     Clear-Host
     Write-WinPulseHeader -title 'Drivers'
-    $problematic = if ($scan.Drivers -and $scan.Drivers.Problematic) { @($scan.Drivers.Problematic) } else { @() }
-    $unsigned = if ($scan.Drivers -and $scan.Drivers.Unsigned) { @($scan.Drivers.Unsigned) } else { @() }
+    # Explicit init: an if/else whose taken branch is @() yields $null under
+    # StrictMode, and $null.Count throws.
+    $problematic = @()
+    if ($scan.Drivers -and $scan.Drivers.Problematic) { $problematic = @($scan.Drivers.Problematic) }
+    $unsigned = @()
+    if ($scan.Drivers -and $scan.Drivers.Unsigned) { $unsigned = @($scan.Drivers.Unsigned) }
     $problemDevicesRaw = if ($scan.Drivers) { Get-WinPulseObjectValue -inputobject $scan.Drivers -name 'ProblemDevices' } else { @() }
     $problemDevices = @($problemDevicesRaw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 
@@ -12791,7 +12795,8 @@ function Show-WinPulseDiagnosticsServices {
 
     Clear-Host
     Write-WinPulseHeader -title 'Services'
-    $failed = if ($scan.Startup -and $scan.Startup.FailedAutoServices) { @($scan.Startup.FailedAutoServices) } else { @() }
+    $failed = @()
+    if ($scan.Startup -and $scan.Startup.FailedAutoServices) { $failed = @($scan.Startup.FailedAutoServices) }
     if ($failed.Count -eq 0) {
         Write-Host '  Failed auto-start services: OK' -ForegroundColor Green
     }
@@ -12885,7 +12890,8 @@ function Show-WinPulseDiagnosticsHardware {
         Write-Host '  RAM      : N/A' -ForegroundColor Gray
     }
 
-    $disks = if ($scan.Hardware -and $scan.Hardware.Disks) { @($scan.Hardware.Disks) } else { @() }
+    $disks = @()
+    if ($scan.Hardware -and $scan.Hardware.Disks) { $disks = @($scan.Hardware.Disks) }
     if ($disks.Count -gt 0) {
         Write-Host '  Disks:' -ForegroundColor Yellow
         foreach ($d in $disks) {
@@ -12927,7 +12933,15 @@ function Show-WinPulseDiagnosticsSecurity {
 
     Clear-Host
     Write-WinPulseHeader -title 'Security'
-    $products = if ($scan.Security -and $scan.Security.Antivirus -and $scan.Security.Antivirus.Products) { @($scan.Security.Antivirus.Products) } else { @() }
+    # Null-guard every nested field: under StrictMode, reading a property off a
+    # $null value or an object that lacks it throws. Antivirus can be $null when
+    # no AV is detected, which previously crashed this view.
+    # NOTE: $x = if (..) { @(..) } else { @() } collapses to $null under
+    # StrictMode (the empty-array branch emits nothing), and $null.Count then
+    # throws. Initialize array vars explicitly so .Count is always safe.
+    $av = if ($scan.Security -and $scan.Security.PSObject.Properties['Antivirus']) { $scan.Security.Antivirus } else { $null }
+    $products = @()
+    if ($av -and $av.PSObject.Properties['Products'] -and $av.Products) { $products = @($av.Products) }
     if ($products.Count -gt 0) {
         Write-Host '  Antivirus products:' -ForegroundColor Yellow
         foreach ($p in $products) {
@@ -12938,10 +12952,14 @@ function Show-WinPulseDiagnosticsSecurity {
         Write-Host '  Antivirus products: none detected' -ForegroundColor Red
     }
     if ($scan.Security) {
-        Write-Host ('  Real-time AV : {0}' -f $scan.Security.Antivirus.EffectiveRealtimeProtection) -ForegroundColor $(if ($scan.Security.Antivirus.EffectiveRealtimeProtection) { 'Green' } else { 'Red' })
-        Write-Host ('  Firewall     : {0}' -f $(if ($scan.Security.FirewallEnabled) { 'ON' } else { 'OFF' })) -ForegroundColor $(if ($scan.Security.FirewallEnabled) { 'Green' } else { 'Red' })
-        Write-Host ('  Secure Boot  : {0}' -f $scan.Security.SecureBootState) -ForegroundColor White
-        $volumes = if ($scan.Security.BitLocker) { @($scan.Security.BitLocker) } else { @() }
+        $rt = if ($av -and $av.PSObject.Properties['EffectiveRealtimeProtection']) { $av.EffectiveRealtimeProtection } else { $null }
+        Write-Host ('  Real-time AV : {0}' -f $(if ($null -ne $rt) { $rt } else { 'unknown' })) -ForegroundColor $(if ($rt) { 'Green' } else { 'Red' })
+        $fw = if ($scan.Security.PSObject.Properties['FirewallEnabled']) { $scan.Security.FirewallEnabled } else { $null }
+        Write-Host ('  Firewall     : {0}' -f $(if ($fw) { 'ON' } else { 'OFF' })) -ForegroundColor $(if ($fw) { 'Green' } else { 'Red' })
+        $sb = if ($scan.Security.PSObject.Properties['SecureBootState']) { $scan.Security.SecureBootState } else { 'unknown' }
+        Write-Host ('  Secure Boot  : {0}' -f $sb) -ForegroundColor White
+        $volumes = @()
+        if ($scan.Security.PSObject.Properties['BitLocker'] -and $scan.Security.BitLocker) { $volumes = @($scan.Security.BitLocker) }
         if ($volumes.Count -gt 0) {
             Write-Host '  BitLocker:' -ForegroundColor Yellow
             foreach ($v in $volumes) {
@@ -12999,12 +13017,17 @@ function Show-WinPulseDiagnosticsMenu {
         $findState = if ($critCount -gt 0) { 'Critical' } elseif ($warnCount -gt 0) { 'Warning' } else { 'OK' }
         $findHint = if ($findings.Count -gt 0) { '{0} critical | {1} warning' -f $critCount, $warnCount } else { 'No issues' }
 
-        $problematic = if ($scan.Drivers -and $scan.Drivers.Problematic) { @($scan.Drivers.Problematic) } else { @() }
-        $unsigned = if ($scan.Drivers -and $scan.Drivers.Unsigned) { @($scan.Drivers.Unsigned) } else { @() }
+        # Explicit array init: an if/else whose taken branch is @() collapses to
+        # $null under StrictMode, and $null.Count then throws.
+        $problematic = @()
+        if ($scan.Drivers -and $scan.Drivers.Problematic) { $problematic = @($scan.Drivers.Problematic) }
+        $unsigned = @()
+        if ($scan.Drivers -and $scan.Drivers.Unsigned) { $unsigned = @($scan.Drivers.Unsigned) }
         $driverState = if ($problematic.Count -gt 0) { 'Warning' } else { 'OK' }
         $driverHint = if ($problematic.Count -gt 0 -or $unsigned.Count -gt 0) { '{0} problematic | {1} unsigned' -f $problematic.Count, $unsigned.Count } else { 'OK' }
 
-        $failedServices = if ($scan.Startup -and $scan.Startup.FailedAutoServices) { @($scan.Startup.FailedAutoServices) } else { @() }
+        $failedServices = @()
+        if ($scan.Startup -and $scan.Startup.FailedAutoServices) { $failedServices = @($scan.Startup.FailedAutoServices) }
         $svcState = if ($failedServices.Count -gt 3) { 'Warning' } else { 'OK' }
         $svcHint = if ($failedServices.Count -gt 0) { '{0} failed auto-start' -f $failedServices.Count } else { 'OK' }
 
@@ -13032,9 +13055,10 @@ function Show-WinPulseDiagnosticsMenu {
         $hwHint = '{0} | {1} | {2}{3}' -f $cpuShort, $ramText, $cDiskText, $batteryText
         if ($hwHint.Length -gt 46) { $hwHint = $hwHint.Substring(0, 43) + '...' }
 
+        $menuAv = if ($scan.Security -and $scan.Security.PSObject.Properties['Antivirus']) { $scan.Security.Antivirus } else { $null }
         $avNames = @()
-        if ($scan.Security -and $scan.Security.Antivirus -and $scan.Security.Antivirus.Products) {
-            $avNames = @($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        if ($menuAv -and $menuAv.PSObject.Properties['Products'] -and $menuAv.Products) {
+            $avNames = @($menuAv.Products | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
         }
         $avLabel = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'No AV' }
         if ($avLabel.Length -gt 18) { $avLabel = $avLabel.Substring(0, 18) }
@@ -13044,7 +13068,9 @@ function Show-WinPulseDiagnosticsMenu {
             $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0
         }
         $blText = if ($blOn) { 'BL ON' } else { 'BL OFF' }
-        $secState = if ($scan.Security -and $scan.Security.Antivirus.EffectiveRealtimeProtection -and $scan.Security.FirewallEnabled) { 'OK' } else { 'Critical' }
+        $menuRt = if ($menuAv -and $menuAv.PSObject.Properties['EffectiveRealtimeProtection']) { [bool]$menuAv.EffectiveRealtimeProtection } else { $false }
+        $menuFw = ($scan.Security -and $scan.Security.PSObject.Properties['FirewallEnabled'] -and $scan.Security.FirewallEnabled)
+        $secState = if ($menuRt -and $menuFw) { 'OK' } else { 'Critical' }
         $secHint = '{0} | {1} | {2}' -f $avLabel, $fwText, $blText
 
         $netState = if ($scan.Network -and $scan.Network.Internet) { 'OK' } else { 'Warning' }
