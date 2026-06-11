@@ -12574,28 +12574,169 @@ function Get-WinPulseDiagnosticsCpuShort {
     return $cpu
 }
 
+function Get-WinPulseFindingDetailTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$finding
+    )
+
+    $message = if ($finding.PSObject.Properties['Message']) { [string]$finding.Message } else { '' }
+    if ($message -match 'driver|device') { return 'Drivers' }
+    if ($message -match 'Failed auto-start services') { return 'Services' }
+    if ($message -match 'Firewall|AV protection|Secure Boot|BitLocker') { return 'Security' }
+    if ($message -match 'Internet|Network') { return 'Network' }
+    if ($message -match 'System drive|Battery|CPU temperature|SMART') { return 'Hardware' }
+    if ($message -match 'Print jobs') { return 'Findings detail' }
+    return 'System'
+}
+
+function Select-WinPulseFindingItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$items
+    )
+
+    if ($items.Count -eq 0) { return $null }
+
+    $interactive = $true
+    try { $null = $Host.UI.RawUI.KeyAvailable } catch { $interactive = $false }
+    if (-not $interactive) {
+        Write-WinPulseHeader -title 'Findings'
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $item = $items[$i]
+            Write-Host ('  [{0}] {1}' -f ([string]$item['Severity']).ToUpperInvariant(), [string]$item['Message']) -ForegroundColor White
+        }
+        return $null
+    }
+
+    $w = Get-WinPulseBoxWidth
+    $hLine = [string][char]0x2550 * ($w - 2)
+    $vLine = [char]0x2551
+    $sel = 0
+    $viewTop = 0
+
+    [Console]::CursorVisible = $false
+    try {
+        while ($true) {
+            $maxViewport = [math]::Max(1, [Console]::WindowHeight - 4)
+            if ($sel -lt $viewTop) { $viewTop = $sel }
+            if ($sel -ge ($viewTop + $maxViewport)) { $viewTop = $sel - $maxViewport + 1 }
+
+            Clear-Host
+            $titleText = 'Findings  {0}/{1}' -f ($sel + 1), $items.Count
+            Write-Host -NoNewline ('  {0}{1} ' -f ([char]0x2554), ([string][char]0x2550 * 2)) -ForegroundColor $script:WinPulseBoxColor
+            Write-Host -NoNewline $titleText -ForegroundColor White
+            Write-Host (' {0}{1}' -f ([string][char]0x2550 * [math]::Max(1, $w - $titleText.Length - 6)), ([char]0x2557)) -ForegroundColor $script:WinPulseBoxColor
+
+            $rendered = 0
+            for ($i = $viewTop; $i -lt $items.Count; $i++) {
+                if ($rendered -ge $maxViewport) { break }
+                $item = $items[$i]
+                $isSelected = ($i -eq $sel)
+                $severity = ([string]$item['Severity']).ToUpperInvariant()
+                $badge = if ($severity -eq 'CRITICAL') { '[CRIT]' } elseif ($severity -eq 'WARNING') { '[WARN]' } else { '[INFO]' }
+                $target = [string]$item['Target']
+                $message = [string]$item['Message']
+                $left = ' {0} {1} {2}' -f $(if ($isSelected) { '>' } else { ' ' }), $badge, $message
+                $avail = $w - 4
+                $rightSpace = $avail - $left.Length
+                if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
+                $hint = if ($target) { $target } else { '' }
+                $line = if ($hint -and $rightSpace -gt ($hint.Length + 2)) {
+                    $left + (' ' * ($rightSpace - $hint.Length)) + $hint
+                }
+                else {
+                    $left + (' ' * $rightSpace)
+                }
+
+                Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                if ($isSelected) {
+                    Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor White
+                }
+                else {
+                    $color = if ($severity -eq 'CRITICAL') { 'Red' } elseif ($severity -eq 'WARNING') { 'Yellow' } else { 'White' }
+                    Write-Host -NoNewline $line -ForegroundColor $color
+                }
+                Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                $rendered++
+            }
+
+            Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
+            $helpText = '  Up/Dn Move  Enter Open Detail  Esc Back'
+            Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
+
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            if ($key.VirtualKeyCode -eq 27) { return $null }
+            if ($key.VirtualKeyCode -eq 13) { return $items[$sel] }
+            if ($key.VirtualKeyCode -eq 38) {
+                $sel = if ($sel -gt 0) { $sel - 1 } else { $items.Count - 1 }
+            }
+            elseif ($key.VirtualKeyCode -eq 40) {
+                $sel = if ($sel -lt ($items.Count - 1)) { $sel + 1 } else { 0 }
+            }
+        }
+    }
+    finally {
+        [Console]::CursorVisible = $true
+    }
+}
+
+function Show-WinPulseFindingDetailTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$scan,
+
+        [Parameter(Mandatory = $true)]
+        [string]$target
+    )
+
+    if ($target -eq 'Drivers') { Show-WinPulseDiagnosticsDrivers -scan $scan }
+    elseif ($target -eq 'Services') { Show-WinPulseDiagnosticsServices -scan $scan }
+    elseif ($target -eq 'Security') { Show-WinPulseDiagnosticsSecurity -scan $scan }
+    elseif ($target -eq 'Network') { Show-WinPulseDiagnosticsNetwork -scan $scan }
+    elseif ($target -eq 'Hardware') { Show-WinPulseDiagnosticsHardware -scan $scan }
+    elseif ($target -eq 'Findings detail') { Show-WinPulseFindingsDetail -scan $scan }
+    else { Show-WinPulseDiagnosticsSystem -scan $scan }
+}
+
 function Show-WinPulseDiagnosticsFindings {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][pscustomobject]$scan)
 
-    Clear-Host
-    Write-WinPulseHeader -title 'Findings'
     $findings = @(Get-WinPulseTriageFindings -scan $scan)
     if ($findings.Count -eq 0) {
+        Clear-Host
+        Write-WinPulseHeader -title 'Findings'
         Write-Host '  No issues detected.' -ForegroundColor Green
         Write-Host ''
         Wait-WinPulseKey
         return
     }
 
-    foreach ($f in @($findings | Where-Object { $_.Severity -eq 'Critical' })) {
-        Write-Host ('  [CRIT] {0}' -f $f.Message) -ForegroundColor Red
+    $ordered = @(
+        $findings | Sort-Object @{ Expression = {
+                if ($_.Severity -eq 'Critical') { 0 } elseif ($_.Severity -eq 'Warning') { 1 } else { 2 }
+            } }, Message
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($finding in @($ordered)) {
+        $target = Get-WinPulseFindingDetailTarget -finding $finding
+        [void]$items.Add([ordered]@{
+                Severity = [string]$finding.Severity
+                Message  = [string]$finding.Message
+                Target   = $target
+                Finding  = $finding
+            })
     }
-    foreach ($f in @($findings | Where-Object { $_.Severity -ne 'Critical' })) {
-        Write-Host ('  [WARN] {0}' -f $f.Message) -ForegroundColor Yellow
+
+    while ($true) {
+        $selected = Select-WinPulseFindingItem -items $items.ToArray()
+        if (-not $selected) { return }
+        Show-WinPulseFindingDetailTarget -scan $scan -target ([string]$selected['Target'])
     }
-    Write-Host ''
-    Wait-WinPulseKey
 }
 
 function Show-WinPulseDiagnosticsDrivers {
