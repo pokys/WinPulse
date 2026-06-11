@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.20.0-20260611'
+$script:WinPulseVersion = '0.20.1-20260611'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -12936,12 +12936,14 @@ function Show-WinPulseDiagnosticsSecurity {
     # Null-guard every nested field: under StrictMode, reading a property off a
     # $null value or an object that lacks it throws. Antivirus can be $null when
     # no AV is detected, which previously crashed this view.
-    # NOTE: $x = if (..) { @(..) } else { @() } collapses to $null under
-    # StrictMode (the empty-array branch emits nothing), and $null.Count then
-    # throws. Initialize array vars explicitly so .Count is always safe.
-    $av = if ($scan.Security -and $scan.Security.PSObject.Properties['Antivirus']) { $scan.Security.Antivirus } else { $null }
+    # $scan.Security is an [ordered] hashtable, so use .Contains() for keys
+    # (PSObject.Properties does NOT see hashtable keys). Initialize array vars
+    # explicitly: an if/else whose taken branch is @() collapses to $null under
+    # StrictMode, and $null.Count then throws (the original crash was empty
+    # BitLocker hitting that trap).
+    $av = if ($scan.Security -and $scan.Security.Contains('Antivirus')) { $scan.Security.Antivirus } else { $null }
     $products = @()
-    if ($av -and $av.PSObject.Properties['Products'] -and $av.Products) { $products = @($av.Products) }
+    if ($av -and $av.Contains('Products') -and $av.Products) { $products = @($av.Products) }
     if ($products.Count -gt 0) {
         Write-Host '  Antivirus products:' -ForegroundColor Yellow
         foreach ($p in $products) {
@@ -12952,14 +12954,14 @@ function Show-WinPulseDiagnosticsSecurity {
         Write-Host '  Antivirus products: none detected' -ForegroundColor Red
     }
     if ($scan.Security) {
-        $rt = if ($av -and $av.PSObject.Properties['EffectiveRealtimeProtection']) { $av.EffectiveRealtimeProtection } else { $null }
+        $rt = if ($av -and $av.Contains('EffectiveRealtimeProtection')) { $av.EffectiveRealtimeProtection } else { $null }
         Write-Host ('  Real-time AV : {0}' -f $(if ($null -ne $rt) { $rt } else { 'unknown' })) -ForegroundColor $(if ($rt) { 'Green' } else { 'Red' })
-        $fw = if ($scan.Security.PSObject.Properties['FirewallEnabled']) { $scan.Security.FirewallEnabled } else { $null }
+        $fw = if ($scan.Security.Contains('FirewallEnabled')) { $scan.Security.FirewallEnabled } else { $null }
         Write-Host ('  Firewall     : {0}' -f $(if ($fw) { 'ON' } else { 'OFF' })) -ForegroundColor $(if ($fw) { 'Green' } else { 'Red' })
-        $sb = if ($scan.Security.PSObject.Properties['SecureBootState']) { $scan.Security.SecureBootState } else { 'unknown' }
+        $sb = if ($scan.Security.Contains('SecureBootState')) { $scan.Security.SecureBootState } else { 'unknown' }
         Write-Host ('  Secure Boot  : {0}' -f $sb) -ForegroundColor White
         $volumes = @()
-        if ($scan.Security.PSObject.Properties['BitLocker'] -and $scan.Security.BitLocker) { $volumes = @($scan.Security.BitLocker) }
+        if ($scan.Security.Contains('BitLocker') -and $scan.Security.BitLocker) { $volumes = @($scan.Security.BitLocker) }
         if ($volumes.Count -gt 0) {
             Write-Host '  BitLocker:' -ForegroundColor Yellow
             foreach ($v in $volumes) {
@@ -13055,9 +13057,9 @@ function Show-WinPulseDiagnosticsMenu {
         $hwHint = '{0} | {1} | {2}{3}' -f $cpuShort, $ramText, $cDiskText, $batteryText
         if ($hwHint.Length -gt 46) { $hwHint = $hwHint.Substring(0, 43) + '...' }
 
-        $menuAv = if ($scan.Security -and $scan.Security.PSObject.Properties['Antivirus']) { $scan.Security.Antivirus } else { $null }
+        $menuAv = if ($scan.Security -and $scan.Security.Contains('Antivirus')) { $scan.Security.Antivirus } else { $null }
         $avNames = @()
-        if ($menuAv -and $menuAv.PSObject.Properties['Products'] -and $menuAv.Products) {
+        if ($menuAv -and $menuAv.Contains('Products') -and $menuAv.Products) {
             $avNames = @($menuAv.Products | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
         }
         $avLabel = if ($avNames.Count -gt 0) { ($avNames -join ', ') } else { 'No AV' }
@@ -13068,8 +13070,8 @@ function Show-WinPulseDiagnosticsMenu {
             $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0
         }
         $blText = if ($blOn) { 'BL ON' } else { 'BL OFF' }
-        $menuRt = if ($menuAv -and $menuAv.PSObject.Properties['EffectiveRealtimeProtection']) { [bool]$menuAv.EffectiveRealtimeProtection } else { $false }
-        $menuFw = ($scan.Security -and $scan.Security.PSObject.Properties['FirewallEnabled'] -and $scan.Security.FirewallEnabled)
+        $menuRt = if ($menuAv -and $menuAv.Contains('EffectiveRealtimeProtection')) { [bool]$menuAv.EffectiveRealtimeProtection } else { $false }
+        $menuFw = ($scan.Security -and $scan.Security.Contains('FirewallEnabled') -and $scan.Security.FirewallEnabled)
         $secState = if ($menuRt -and $menuFw) { 'OK' } else { 'Critical' }
         $secHint = '{0} | {1} | {2}' -f $avLabel, $fwText, $blText
 
