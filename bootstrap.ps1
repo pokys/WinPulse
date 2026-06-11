@@ -10926,6 +10926,60 @@ function Invoke-WinPulseCleanupSelected {
     return $results.ToArray()
 }
 
+function Write-WinPulseCleanupReport {
+    # Writes a plain-text OS cleanup report (per-target freed + the full skipped
+    # list) and returns its path, or $null on failure. Lives under the Logs
+    # folder, which the in-session cleanups do not wipe.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$results
+    )
+
+    try {
+        $logRoot = if ($script:WinPulsePaths -and $script:WinPulsePaths.Logs) { $script:WinPulsePaths.Logs } else { $env:TEMP }
+        if (-not (Test-Path -LiteralPath $logRoot)) { New-Item -Path $logRoot -ItemType Directory -Force | Out-Null }
+        $reportPath = Join-Path -Path $logRoot -ChildPath ('os-cleanup-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add('WinPulse OS Junk Cleanup Report')
+        [void]$lines.Add(('Generated : {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))
+        [void]$lines.Add(('Computer  : {0}' -f (Get-WinPulseSafeComputerName)))
+        [void]$lines.Add('')
+
+        $freedTotal = [double]0
+        $skippedTotal = 0
+        foreach ($result in @($results)) {
+            $freedTotal += [double]$result.FreedBytes
+            $skippedTotal += [int]$result.ErrorCount
+        }
+        [void]$lines.Add(('Freed total   : {0}' -f (ConvertTo-ReadableSize -bytes $freedTotal)))
+        [void]$lines.Add(('Skipped total : {0}' -f $skippedTotal))
+        [void]$lines.Add('')
+        [void]$lines.Add('Per category:')
+        foreach ($result in @($results)) {
+            [void]$lines.Add(('  {0}: freed {1} ({2} skipped)' -f $result.Label, (ConvertTo-ReadableSize -bytes ([double]$result.FreedBytes)), $result.ErrorCount))
+        }
+
+        $haveSkips = @($results | Where-Object { [int]$_.ErrorCount -gt 0 })
+        if ($haveSkips.Count -gt 0) {
+            [void]$lines.Add('')
+            [void]$lines.Add('Skipped items (locked, in use, or access denied):')
+            foreach ($result in @($results)) {
+                foreach ($entry in @($result.Errors)) {
+                    [void]$lines.Add(('  [{0}] {1}' -f $result.Label, $entry))
+                }
+            }
+        }
+
+        Set-Content -Path $reportPath -Value $lines.ToArray() -Encoding UTF8
+        return $reportPath
+    }
+    catch {
+        return $null
+    }
+}
+
 function Invoke-WinPulseOSJunkCleanupMenu {
     [CmdletBinding()]
     param()
@@ -10951,6 +11005,7 @@ function Invoke-WinPulseOSJunkCleanupMenu {
     $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'OS junk cleanup targets' -Items $menuItems.ToArray())
     if ($selectedKeys.Count -eq 0) {
         Write-Host 'Cancelled.' -ForegroundColor Yellow
+        Wait-WinPulseKey
         return
     }
 
@@ -10969,6 +11024,7 @@ function Invoke-WinPulseOSJunkCleanupMenu {
     )
     if ($confirm -ne 'Y') {
         Write-Host 'Cancelled.' -ForegroundColor Yellow
+        Wait-WinPulseKey
         return
     }
 
@@ -10982,10 +11038,18 @@ function Invoke-WinPulseOSJunkCleanupMenu {
     }
     Write-Host ''
     if ($skippedCount -gt 0) {
-        Write-Host ('OS junk cleanup complete. Freed {0}. {1} item(s) skipped (locked/in use) - see the log.' -f (ConvertTo-ReadableSize -bytes $freed), $skippedCount) -ForegroundColor Yellow
+        Write-Host ('OS junk cleanup complete. Freed {0}. {1} item(s) skipped (locked/in use).' -f (ConvertTo-ReadableSize -bytes $freed), $skippedCount) -ForegroundColor Yellow
     }
     else {
         Write-Host ('OS junk cleanup complete. Freed {0}.' -f (ConvertTo-ReadableSize -bytes $freed)) -ForegroundColor Green
+    }
+
+    $reportPath = Write-WinPulseCleanupReport -results $results
+    if ($reportPath) {
+        Show-WinPulsePostRunActions -LogPath $reportPath
+    }
+    else {
+        Wait-WinPulseKey
     }
 }
 
@@ -12209,7 +12273,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
             @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
             @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
-            @{ Label = 'Cleanup';           Key = 'C'; Hint = 'Remove files' },
+            @{ Label = 'Cleanup';           Key = 'C'; Hint = 'Temp/cache/recycle' },
             @{ Label = 'Export';            Key = 'X'; Hint = 'JSON / HTML' },
             @{ Separator = $true },
             @{ Label = 'Exit';              Key = 'E'; Color = 'DarkGray' }
@@ -12221,7 +12285,7 @@ function Show-WinPulseMainMenu {
             'I' { Show-WinPulseInstallMenu }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'T' { Show-WinPulseToolsMenu }
-            'C' { Show-WinPulseCleanupMenu }
+            'C' { Invoke-WinPulseOSJunkCleanupMenu }
             'X' { Show-WinPulseExportMenu -scan $scan }
             'E' { Invoke-WinPulseExitCleanupPrompt; return }
             default { }
