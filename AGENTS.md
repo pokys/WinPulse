@@ -58,6 +58,83 @@ In rough priority:
 Declined by the owner: exit-prompt ZIP archive of exports; a startup spinner
 (the LOADED boot lines are considered good enough).
 
+## Work Queue - Batch 6 (queued 2026-06-11)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), one commit, do NOT
+push to main, do NOT bump the version, keep `bootstrap.ps1` ASCII-only /
+StrictMode-safe / PS 5.1, bracket notation for hashtable access. Report changes
+plus full test output. Stop and ask if anything is ambiguous.
+
+### Task C40 - Smoke coverage: diagnostics render functions must not throw on degenerate scans
+
+Why: a string of StrictMode crashes shipped because the smoke harness never
+calls the interactive Diagnostics functions, only the migration modes. Two
+classes bit us repeatedly: (1) `$x = if (cond) { @(..) } else { @() }` collapses
+to `$null` under StrictMode (an empty-array branch emits nothing) and `$null.Count`
+then throws; (2) `$scan.Security` is an `[ordered]` hashtable, so guarding its
+keys with `.PSObject.Properties[...]` silently fails (it does not see hashtable
+keys) - use `.Contains('key')`. A non-elevated smoke that renders these functions
+against empty/missing data would have caught every one. Build it.
+
+This is pure non-elevated logic (no TUI rendering to eyeball, no elevation, no
+real scan). It extends the EXISTING harness in
+`tools/Invoke-WinPulseSmokeTest.ps1` - do NOT add a new test framework.
+
+Scope:
+
+- Add `Invoke-SmokeDiagnosticsRenderAssertions -BootstrapPath <path>`, modelled
+  on the existing `Invoke-SmokeCleanupLogicAssertions` /
+  `Invoke-SmokeLongPathEnumerationAssertions` blocks, and call it near the top of
+  the smoke run (alongside those) so EVERY `-Mode` exercises it.
+- Inside it: stub the host-interaction commands so the functions run headless and
+  never block - define local `function Clear-Host {}`, `function Wait-WinPulseKey {}`,
+  `function Write-WinPulseHeader { param($title) }`, and a `Write-Host` stub that
+  swallows output. Stub any menu/selection helper a render path might call
+  (`Select-WinPulseMenuItem`, `Select-WinPulseMultiMenuItem`,
+  `Select-WinPulseFindingItem`, `Show-WinPulsePagedTextBox`) to return `$null`
+  so nothing waits on a key.
+- Dot-source the functions under test and their pure dependencies via the
+  existing `Get-SmokeBootstrapFunctionText` AST helper (it already extracts named
+  functions). At minimum: `Get-WinPulseTriageFindings`,
+  `Get-WinPulseObjectValue`, `Get-WinPulseDiagnosticsCpuShort`,
+  `Get-WinPulseStateFromPercent`, `ConvertTo-ReadableSize`,
+  `Get-WinPulseFindingDetailTarget`, `Show-WinPulseFindingDetailTarget`,
+  `Show-WinPulseDiagnosticsFindings`, `Show-WinPulseDiagnosticsDrivers`,
+  `Show-WinPulseDiagnosticsServices`, `Show-WinPulseDiagnosticsSystem`,
+  `Show-WinPulseDiagnosticsHardware`, `Show-WinPulseDiagnosticsSecurity`,
+  `Show-WinPulseDiagnosticsNetwork`. Add any others these call that are not
+  already stubbed (resolve missing-command errors by extracting more functions;
+  do NOT stub a function whose real logic is under test).
+- Build a matrix of degenerate `$scan` objects (use `[ordered]@{}` for the scan
+  SECTIONS exactly as `Invoke-CoreScan` builds them - Security/Drivers/Startup/
+  Hardware/etc. are ordered hashtables, not pscustomobjects). Cover at least:
+  - all sections present but EMPTY arrays (Antivirus.Products `@()`, BitLocker
+    `@()`, Drivers.Problematic/Unsigned `@()`, Startup.FailedAutoServices `@()`,
+    Hardware.Disks `@()`) - this reproduces the shipped Security crash;
+  - sections present with realistic data (ESET product, one BitLocker volume,
+    one problematic driver, disks) - asserts correct, not just non-throwing;
+  - a "minimal" scan where optional sub-keys are absent where the collectors can
+    legitimately omit them.
+- For EACH scan shape, call every `Show-WinPulseDiagnostics*` detail function
+  (and `Show-WinPulseDiagnosticsFindings`) inside try/catch and FAIL the smoke
+  with a clear message if any throws. For the data-present shape, also capture
+  the `Write-Host` stub's collected lines and assert the AV product name appears
+  in the Security output (guards against the hashtable-key regression).
+- Clean up any temp artifacts in a `finally`.
+
+Acceptance:
+
+- Parser + ASCII clean; `git diff --check` clean.
+- ALL five non-elevated smoke modes exit 0 with the new assertions running;
+  MigrationPreflight needs elevation, skip it and say so.
+- Sanity-check the test actually bites: temporarily reintroduce the
+  `if(){...}else{@()}` empty-BitLocker pattern in `Show-WinPulseDiagnosticsSecurity`
+  locally, confirm the new assertion FAILS, then revert. Report that you did this.
+
+Out of scope: changing any diagnostics function's behavior, adding Pester, TUI
+rendering/layout, the migration modes.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
