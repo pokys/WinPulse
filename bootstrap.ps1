@@ -1919,7 +1919,10 @@ function Select-WinPulseMenuItem {
     param(
         [string]$Title = 'Menu',
         [Parameter(Mandatory = $true)]
-        [array]$Items
+        [array]$Items,
+        # Opt-in: virtual key codes that, when pressed, return 'VK<code>' instead
+        # of a menu key. Used for unlisted/secret shortcuts (e.g. CapsLock = 20).
+        [int[]]$SecretVirtualKeys = @()
     )
 
     # Items: @( @{Label='text'; Key='D'; Hint='optional'; Separator=$false; Color='White'} )
@@ -2045,6 +2048,9 @@ function Select-WinPulseMenuItem {
                 13 { return $Items[$selectableIdx[$sel]]['Key'] }
                 27 { return $null }
                 default {
+                    if ($SecretVirtualKeys -contains [int]$k.VirtualKeyCode) {
+                        return ('VK{0}' -f [int]$k.VirtualKeyCode)
+                    }
                     $ch = [string]$k.Character
                     if ($ch) {
                         $ch = $ch.ToUpperInvariant()
@@ -12490,6 +12496,32 @@ function Show-WinPulseMigrationMenu {
     }
 }
 
+function Show-WinPulseHiddenMenu {
+    # Unlisted screen reached from the main menu via a secret key (CapsLock).
+    # Not shown in any menu or help text. Placeholder action only for now.
+    [CmdletBinding()]
+    param()
+
+    while ($true) {
+        Clear-Host
+        Write-Host '  Main > (hidden)' -ForegroundColor DarkGray
+        $choice = Select-WinPulseMenuItem -Title 'Hidden' -Items @(
+            @{ Label = 'Open PowerShell (no profile)'; Key = 'P'; Hint = 'New window' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                         Key = '0'; Color = 'DarkGray' }
+        )
+        if (-not $choice -or $choice -eq '0') { return }
+        switch ($choice) {
+            'P' {
+                try { Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile' }
+                catch { Write-Host ('  Launch failed: {0}' -f $_.Exception.Message) -ForegroundColor Red }
+                Write-Host ''; Wait-WinPulseKey
+            }
+            default { return }
+        }
+    }
+}
+
 function Show-WinPulseMainMenu {
     [CmdletBinding()]
     param(
@@ -12511,7 +12543,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Export';           Key = 'X'; Hint = 'JSON / HTML' },
             @{ Separator = $true },
             @{ Label = 'Exit';             Key = 'Q'; Color = 'DarkGray' }
-        )
+        ) -SecretVirtualKeys 20
         switch ($choice) {
             'D' { $scan = Show-WinPulseDiagnosticsMenu -scan $scan }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
@@ -12523,6 +12555,7 @@ function Show-WinPulseMainMenu {
             'C' { Show-WinPulseCleanupMenu }
             'X' { Show-WinPulseExportMenu -scan $scan }
             'Q' { Invoke-WinPulseExitCleanupPrompt; return }
+            'VK20' { Show-WinPulseHiddenMenu }
             default { }
         }
     }
