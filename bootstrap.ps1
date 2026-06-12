@@ -12457,7 +12457,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Exit';             Key = 'Q'; Color = 'DarkGray' }
         )
         switch ($choice) {
-            'D' { Show-WinPulseDiagnosticsMenu -scan $scan }
+            'D' { $scan = Show-WinPulseDiagnosticsMenu -scan $scan }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
             'S' { Show-WinPulseSecurityMenu }
             'A' { Show-WinPulseInstallMenu }
@@ -13124,11 +13124,15 @@ function Show-WinPulseDiagnosticsMenu {
             @{ Label = 'Security'; Key = 'X'; Badge = (Get-WinPulseDiagnosticsBadge -State $secState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $secState);    Hint = $secHint;    Color = 'White' }
             @{ Label = 'Network';  Key = 'N'; Badge = (Get-WinPulseDiagnosticsBadge -State $netState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $netState);    Hint = $netHint;    Color = 'White' }
             @{ Separator = $true }
+            @{ Label = 'Deep test suite'; Key = 'T'; Hint = 'RAM+disk stress, takes minutes' }
+            @{ Label = 'Inspect logs';    Key = 'L'; Hint = 'Last 24h' }
+            @{ Label = 'Re-scan';         Key = 'R'; Hint = 'Refresh data' }
+            @{ Separator = $true }
             @{ Label = 'Back';     Key = '0'; Color = 'DarkGray' }
         )
 
         $choice = Select-WinPulseMenuItem -Title 'Diagnostics' -Items $items
-        if (-not $choice -or $choice -eq '0') { return }
+        if (-not $choice -or $choice -eq '0') { return $scan }
         switch ($choice) {
             'F' { Show-WinPulseDiagnosticsFindings -scan $scan }
             'D' { Show-WinPulseDiagnosticsDrivers -scan $scan }
@@ -13137,7 +13141,13 @@ function Show-WinPulseDiagnosticsMenu {
             'H' { Show-WinPulseDiagnosticsHardware -scan $scan }
             'X' { Show-WinPulseDiagnosticsSecurity -scan $scan }
             'N' { Show-WinPulseDiagnosticsNetwork -scan $scan }
-            default { return }
+            'T' {
+                $answer = Read-Host '  Deep suite runs RAM + disk stress tests (several minutes). Continue? [y/N]'
+                if ($answer -match '^[Yy]') { Invoke-WinPulseDiagnostics }
+            }
+            'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
+            'R' { $scan = Invoke-CoreScan }
+            default { return $scan }
         }
     }
 }
