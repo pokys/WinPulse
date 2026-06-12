@@ -67,7 +67,7 @@ $script:WinPulseVersion = '0.20.1-20260611'
 # Soft startup gate. SHA256 of the access code; regenerate with:
 #   $sha=[Security.Cryptography.SHA256]::Create()
 #   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
-$script:WinPulseAccessCodeHash = 'e3129f656b76c6fb238de685b85553b3851cc1d35d86cef5089f15853cc7fc82'
+$script:WinPulseAccessCodeHash = 'bd2b8a407c25757e310c791ed71eb6e6e234f57e981960bec2ee15b120d0c238'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
