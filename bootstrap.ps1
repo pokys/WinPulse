@@ -182,7 +182,11 @@ function Request-WinPulseAccessGate {
             }
 
             if ([string]::Equals($hash, $script:WinPulseAccessCodeHash, [StringComparison]::OrdinalIgnoreCase)) {
-                $env:WINPULSE_ACCESS_GRANTED = '1'
+                # Do NOT set $env:WINPULSE_ACCESS_GRANTED here: when run inline
+                # (.\bootstrap.ps1) the script shares the caller's process, so
+                # the var would stick to the terminal and skip the gate on every
+                # later run. The elevated relaunch already carries -AccessGranted;
+                # the env var stays a read-only external bypass (smoke/automation).
                 return
             }
         }
