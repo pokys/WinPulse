@@ -1925,7 +1925,7 @@ function Select-WinPulseMenuItem {
         [Parameter(Mandatory = $true)]
         [array]$Items,
         # Opt-in: virtual key codes that, when pressed, return 'VK<code>' instead
-        # of a menu key. Used for unlisted/secret shortcuts (e.g. CapsLock = 20).
+        # of a menu key. Used for unlisted/secret shortcuts (e.g. F12 = 123).
         [int[]]$SecretVirtualKeys = @()
     )
 
@@ -12377,6 +12377,30 @@ function Show-WinPulseCleanupMenu {
     }
 }
 
+function Clear-WinPulsePSHistory {
+    # Best-effort wipe of the PSReadLine console history file (and the current
+    # session's in-memory history). PSReadLine may be absent in some hosts, so
+    # every step is guarded and never throws.
+    [CmdletBinding()]
+    param()
+
+    try {
+        if (-not (Get-Command -Name Get-PSReadLineOption -ErrorAction SilentlyContinue)) {
+            return
+        }
+        $historyPath = (Get-PSReadLineOption).HistorySavePath
+        if ([string]::IsNullOrWhiteSpace($historyPath) -or -not (Test-Path -Path $historyPath)) {
+            return
+        }
+        Set-Content -Path $historyPath -Value $null -ErrorAction Stop
+        try { Clear-History -ErrorAction SilentlyContinue } catch {}
+        Write-Host 'PowerShell history cleared.' -ForegroundColor Green
+    }
+    catch {
+        Write-Host ('PowerShell history clear warning: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
 function Invoke-WinPulseExitCleanupPrompt {
     [CmdletBinding()]
     param()
@@ -12384,6 +12408,7 @@ function Invoke-WinPulseExitCleanupPrompt {
     Write-Host ''
     Write-Host 'Exit cleanup: running full WinPulse cleanup and removing C:\ProgramData\WinPulse...' -ForegroundColor Cyan
     Invoke-WinPulseFullArtifactCleanup
+    Clear-WinPulsePSHistory
     try {
         if (Test-Path -Path $script:WinPulsePaths.Root) {
             Remove-Item -Path $script:WinPulsePaths.Root -Recurse -Force -ErrorAction Stop
@@ -12501,7 +12526,7 @@ function Show-WinPulseMigrationMenu {
 }
 
 function Show-WinPulseHiddenMenu {
-    # Unlisted screen reached from the main menu via a secret key (CapsLock).
+    # Unlisted screen reached from the main menu via a secret key (F12).
     # Not shown in any menu or help text. Placeholder action only for now.
     [CmdletBinding()]
     param()
@@ -12547,7 +12572,7 @@ function Show-WinPulseMainMenu {
             @{ Label = 'Export';           Key = 'X'; Hint = 'JSON / HTML' },
             @{ Separator = $true },
             @{ Label = 'Exit';             Key = 'Q'; Color = 'DarkGray' }
-        ) -SecretVirtualKeys 20
+        ) -SecretVirtualKeys 123
         switch ($choice) {
             'D' { $scan = Show-WinPulseDiagnosticsMenu -scan $scan }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
@@ -12559,7 +12584,7 @@ function Show-WinPulseMainMenu {
             'C' { Show-WinPulseCleanupMenu }
             'X' { Show-WinPulseExportMenu -scan $scan }
             'Q' { Invoke-WinPulseExitCleanupPrompt; return }
-            'VK20' { Show-WinPulseHiddenMenu }
+            'VK123' { Show-WinPulseHiddenMenu }
             default { }
         }
     }
