@@ -8465,6 +8465,7 @@ function Show-WinPulseNirSoftMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Tools > NirSoft' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'NirSoft Tools' -Items @(
             @{ Label = 'ProduKey';            Key = 'P'; Hint = 'Windows/Office keys' },
             @{ Label = 'WirelessKeyView';     Key = 'W'; Hint = 'Saved Wi-Fi keys' },
@@ -8475,9 +8476,9 @@ function Show-WinPulseNirSoftMenu {
             @{ Label = 'InstalledAppView';    Key = 'A'; Hint = 'Installed apps' },
             @{ Label = 'BlueScreenView';      Key = 'B'; Hint = 'BSOD crash dumps' },
             @{ Separator = $true },
-            @{ Label = 'Back';                Key = 'X'; Color = 'DarkGray' }
+            @{ Label = 'Back';                Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice -or $choice -eq 'X') { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'P' { Start-WinPulseNirSoftTool -toolKey 'produkey' }
             'W' { Start-WinPulseNirSoftTool -toolKey 'wirelesskeyview' }
@@ -10434,12 +10435,16 @@ function Show-WinPulseOfficeMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Apps > Office' -ForegroundColor DarkGray
         Write-WinPulseHeader -title 'Office'
         $choice = Select-WinPulseMenuItem -Title 'Office' -Items @(
             @{ Label = 'Install Office';    Key = 'I'; Hint = 'Version/CZ' },
             @{ Label = 'Uninstall Office';  Key = 'U'; Hint = 'Silent remove' },
-            @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' }
+            @{ Label = 'Repair Office';     Key = 'R'; Hint = 'Fix install' },
+            @{ Separator = $true },
+            @{ Label = 'Back';              Key = '0'; Color = 'DarkGray' }
         )
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'I' { try { Install-WinPulseOffice } catch { Write-Host ("  Office install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
             'U' { try { Uninstall-WinPulseOffice } catch { Write-Host ("  Office uninstall failed: {0}" -f $_.Exception.Message) -ForegroundColor Red }; Wait-WinPulseKey }
@@ -11591,15 +11596,18 @@ function Show-WinPulseStressMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Tools > Stress' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Stress Tests' -Items @(
             @{ Label = 'CPU stress test';          Key = 'C'; Hint = '60 seconds' },
             @{ Label = 'Disk stress test';         Key = 'D'; Hint = '512MB' },
             @{ Label = 'RAM quick test';           Key = 'R'; Hint = '20 seconds' },
             @{ Label = 'Memory Diagnostic';        Key = 'M'; Hint = 'Reboot req.' },
             @{ Label = 'StressMyPC';               Key = 'S'; Hint = 'Portable' },
-            @{ Label = 'FurMark';                  Key = 'F'; Hint = 'GPU stress' }
+            @{ Label = 'FurMark';                  Key = 'F'; Hint = 'GPU stress' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                     Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'C' { Invoke-WinPulseCpuStressTest -durationseconds 60 }
             'D' { Invoke-WinPulseDiskStressTest -sizemb 512 }
@@ -12028,31 +12036,31 @@ function Show-WinPulseToolsMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Tools' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'External Tools' -Items @(
             @{ Label = 'Autoruns';              Key = 'A'; Hint = 'Startup items' },
             @{ Label = 'OpenHardwareMonitor';   Key = 'H'; Hint = 'Temps/voltages' },
             @{ Label = 'CrystalDiskInfo';       Key = 'C'; Hint = 'Disk SMART' },
-            @{ Label = 'StressMyPC';            Key = 'S'; Hint = 'Stress test' },
-            @{ Label = 'FurMark';               Key = 'F'; Hint = 'GPU stress' },
+            @{ Label = 'Stress tests';          Key = 'S'; Hint = 'CPU/RAM/disk/GPU' },
             @{ Label = 'TechToolStore';         Key = 'T'; Hint = 'Tool suite' },
             @{ Label = 'O&O ShutUp10++';        Key = 'O'; Hint = 'Privacy' },
             @{ Label = 'Process Explorer';      Key = 'I'; Hint = 'Sysinternals' },
-            @{ Label = 'NirSoft tools';         Key = 'N'; Hint = 'Keys/passwords/history' }
+            @{ Label = 'NirSoft tools';         Key = 'N'; Hint = 'Keys/passwords/history' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                  Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
-            'A' { Start-WinPulseAutoruns }
-            'H' { Start-WinPulseOpenHardwareMonitor }
-            'C' { Start-DeepDiskAnalysis }
-            'S' { Start-WinPulseStressMyPC }
-            'F' { Start-WinPulseFurMarkAdvanced }
-            'T' { Start-WinPulseTechToolStore }
-            'O' { Start-WinPulseOOShutUp }
-            'I' { Start-WinPulseSysinternalsSuite }
-            'N' { Show-WinPulseNirSoftMenu; continue }
+            'A' { Start-WinPulseAutoruns; Write-Host ''; Wait-WinPulseKey }
+            'H' { Start-WinPulseOpenHardwareMonitor; Write-Host ''; Wait-WinPulseKey }
+            'C' { Start-DeepDiskAnalysis; Write-Host ''; Wait-WinPulseKey }
+            'S' { Show-WinPulseStressMenu }
+            'T' { Start-WinPulseTechToolStore; Write-Host ''; Wait-WinPulseKey }
+            'O' { Start-WinPulseOOShutUp; Write-Host ''; Wait-WinPulseKey }
+            'I' { Start-WinPulseSysinternalsSuite; Write-Host ''; Wait-WinPulseKey }
+            'N' { Show-WinPulseNirSoftMenu }
             default { return }
         }
-        Write-Host ''; Wait-WinPulseKey
     }
 }
 
@@ -12065,12 +12073,16 @@ function Invoke-WinPulseRepairs {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Repairs' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Repairs (Guided)' -Items @(
             @{ Label = 'Windows Update errors';  Key = 'W'; Hint = 'Last 24h' },
             @{ Label = 'Detected repair plans';   Key = 'P'; Hint = 'Auto-detect' },
-            @{ Label = 'Safe actions';             Key = 'S'; Hint = 'DISM/SFC/CHKDSK' }
+            @{ Label = 'Safe actions';             Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
+            @{ Label = 'Network repair';           Key = 'N'; Hint = 'DNS/TCP/adapters' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                     Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return $scan }
+        if (-not $choice -or $choice -eq '0') { return $scan }
         switch ($choice) {
             'W' {
                 $latestScan = Invoke-CoreScan
@@ -12102,6 +12114,7 @@ function Invoke-WinPulseRepairs {
                 $scan = Invoke-WinPulseGuidedRepair -scan $scan -planid $selected.Id
             }
             'S' { $scan = Show-WinPulseSafeActions -scan $scan }
+            'N' { Show-WinPulseNetworkMenu }
             default { return $scan }
         }
     }
@@ -12113,6 +12126,7 @@ function Show-WinPulseInstallMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Apps' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Install / Apps' -Items @(
             @{ Label = 'Ninite catalog';          Key = 'N'; Hint = 'Direct download' },
             @{ Label = 'Chocolatey catalog';      Key = 'H'; Hint = 'Search & install' },
@@ -12125,9 +12139,11 @@ function Show-WinPulseInstallMenu {
             @{ Separator = $true },
             @{ Label = 'Dry run: Basic IT';       Key = 'D'; Hint = 'Preview only'; Color = 'DarkGray' },
             @{ Label = 'Dry run: Install';        Key = 'I'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Label = 'Dry run: Uninstall';      Key = 'X'; Hint = 'Preview only'; Color = 'DarkGray' }
+            @{ Label = 'Dry run: Uninstall';      Key = 'X'; Hint = 'Preview only'; Color = 'DarkGray' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                    Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'N' { Show-WinPulseNiniteMenu }
             'H' { Show-WinPulseChocoMenu }
@@ -12188,7 +12204,7 @@ function Show-WinPulseNetworkMenu {
 
     while ($true) {
         Clear-Host
-        Write-Host '  Main > Network' -ForegroundColor DarkGray
+        Write-Host '  Main > Repairs > Network' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Network' -Items @(
             @{ Label = 'Full diagnostic';      Key = 'D'; Hint = 'All checks' },
             @{ Label = 'Flush DNS';            Key = 'F'; Hint = 'Clear cache' },
@@ -12197,9 +12213,9 @@ function Show-WinPulseNetworkMenu {
             @{ Label = 'Restart adapters';     Key = 'A'; Hint = 'Re-enable' },
             @{ Label = 'Repair network';       Key = 'R'; Hint = 'Auto-fix' },
             @{ Separator = $true },
-            @{ Label = 'Back';                 Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Back';                 Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice -or $choice -eq 'B') { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'D' {
                 try {
@@ -12208,7 +12224,7 @@ function Show-WinPulseNetworkMenu {
                 catch {
                     $lines = @('ERROR: {0}' -f $_.Exception.Message)
                 }
-                Show-WinPulsePagedTextBox -title 'Network Diagnostic' -breadcrumb 'Main > Network' -lines $lines
+                Show-WinPulsePagedTextBox -title 'Network Diagnostic' -breadcrumb 'Main > Repairs > Network' -lines $lines
             }
             'F' { Clear-NetworkDns; Wait-WinPulseKey }
             'T' { Reset-NetworkTcpIp; Wait-WinPulseKey }
@@ -12232,9 +12248,9 @@ function Show-WinPulseSecurityMenu {
             @{ Label = 'Weak service configs';    Key = 'W'; Hint = 'Permissions' },
             @{ Label = 'BitLocker status';        Key = 'B'; Hint = 'Encryption' },
             @{ Separator = $true },
-            @{ Label = 'Back';                    Key = 'X'; Color = 'DarkGray' }
+            @{ Label = 'Back';                    Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice -or $choice -eq 'X') { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'A' {
                 try {
@@ -12274,18 +12290,22 @@ function Show-WinPulseCleanupMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Cleanup' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Cleanup' -Items @(
-            @{ Label = 'Full artifact cleanup';   Key = 'A'; Hint = 'Data/cache' },
+            @{ Label = 'OS junk cleanup';          Key = 'O'; Hint = 'Temp/cache/recycle'; Color = 'DarkYellow' },
+            @{ Separator = $true },
             @{ Label = 'Light cleanup';            Key = 'L'; Hint = 'Exports only' },
+            @{ Label = 'Full artifact cleanup';   Key = 'A'; Hint = 'Data/cache' },
             @{ Label = 'Remove WinPulse folder';   Key = 'F'; Hint = 'Complete'; Color = 'DarkYellow' },
-            @{ Label = 'OS junk cleanup';          Key = 'O'; Hint = 'Temp/cache/recycle'; Color = 'DarkYellow' }
+            @{ Separator = $true },
+            @{ Label = 'Back';                     Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'A' { Invoke-WinPulseFullArtifactCleanup; Wait-WinPulseKey }
             'L' { Invoke-WinPulseLightCleanup; Wait-WinPulseKey }
             'F' { Remove-WinPulseCompletely; Wait-WinPulseKey }
-            'O' { Invoke-WinPulseOSJunkCleanupMenu; Wait-WinPulseKey }
+            'O' { Invoke-WinPulseOSJunkCleanupMenu }
             default { return }
         }
     }
@@ -12320,12 +12340,16 @@ function Show-WinPulseExportMenu {
     $scan = Complete-WinPulseDetailScan -scan $scan
 
     while ($true) {
+        Clear-Host
+        Write-Host '  Main > Export' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Export' -Items @(
             @{ Label = 'Export Scan JSON';    Key = 'J'; Hint = '.json' },
             @{ Label = 'Export HTML Report';  Key = 'H'; Hint = '.html' },
-            @{ Label = 'Export Bundle ZIP';   Key = 'B'; Hint = 'latest folder' }
+            @{ Label = 'Export Bundle ZIP';   Key = 'B'; Hint = 'latest folder' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return }
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'J' {
                 $target = Join-Path $script:WinPulsePaths.Exports ('scan-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -12354,6 +12378,7 @@ function Show-WinPulseMigrationMenu {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Migration' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Migration' -Items @(
             @{ Label = 'Preflight (read-only report)'; Key = 'P'; Hint = 'Inspect & plan' },
             @{ Label = 'Backup (copy user data out)';  Key = 'B'; Hint = 'To a folder/drive' },
@@ -12362,8 +12387,9 @@ function Show-WinPulseMigrationMenu {
             @{ Label = 'Reinstall apps';                Key = 'A'; Hint = 'winget from backup' },
             @{ Label = 'Live Migration';                Key = 'L'; Hint = 'Pull data from a remote PC directly' },
             @{ Separator = $true },
-            @{ Label = 'Back';                         Key = 'Q'; Color = 'DarkGray' }
+            @{ Label = 'Back';                         Key = '0'; Color = 'DarkGray' }
         )
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'P' { Invoke-WinPulseMigrationPreflight | Out-Null; Wait-WinPulseKey }
             'B' {
@@ -12418,27 +12444,29 @@ function Show-WinPulseMainMenu {
     while ($true) {
         Show-WinPulseDashboard -scan $scan
         $choice = Select-WinPulseMenuItem -Title 'Main Menu' -Items @(
-            @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'System health' },
-            @{ Label = 'W11 readiness';     Key = 'A'; Hint = 'Upgrade signals' },
-            @{ Label = 'Migration';         Key = 'M'; Hint = 'Preflight/backup/restore/verify' },
-            @{ Label = 'Install / Apps';    Key = 'I'; Hint = 'Packages' },
-            @{ Label = 'Repairs (Guided)';  Key = 'R'; Hint = 'Fix issues' },
-            @{ Label = 'External Tools';    Key = 'T'; Hint = 'Portable apps' },
-            @{ Label = 'Cleanup';           Key = 'C'; Hint = 'Temp/cache/recycle' },
-            @{ Label = 'Export';            Key = 'X'; Hint = 'JSON / HTML' },
+            @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'Findings & health' },
+            @{ Label = 'Repairs (Guided)'; Key = 'R'; Hint = 'Fix issues' },
+            @{ Label = 'Security';         Key = 'S'; Hint = 'Assessment/BitLocker' },
+            @{ Label = 'Apps';             Key = 'A'; Hint = 'Install/remove/update' },
+            @{ Label = 'Migration';        Key = 'M'; Hint = 'Backup/restore/verify' },
+            @{ Label = 'W11 readiness';    Key = 'W'; Hint = 'Upgrade signals' },
+            @{ Label = 'Tools';            Key = 'T'; Hint = 'Portable + stress tests' },
+            @{ Label = 'Cleanup';          Key = 'C'; Hint = 'OS junk + WinPulse data' },
+            @{ Label = 'Export';           Key = 'X'; Hint = 'JSON / HTML' },
             @{ Separator = $true },
-            @{ Label = 'Exit';              Key = 'E'; Color = 'DarkGray' }
+            @{ Label = 'Exit';             Key = 'Q'; Color = 'DarkGray' }
         )
         switch ($choice) {
-            'D' { Invoke-WinPulseDiagnostics; Write-Host ''; Wait-WinPulseKey }
-            'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
-            'M' { Show-WinPulseMigrationMenu }
-            'I' { Show-WinPulseInstallMenu }
+            'D' { Show-WinPulseDiagnosticsMenu -scan $scan }
             'R' { $scan = Invoke-WinPulseRepairs -scan $scan }
+            'S' { Show-WinPulseSecurityMenu }
+            'A' { Show-WinPulseInstallMenu }
+            'M' { Show-WinPulseMigrationMenu }
+            'W' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
             'T' { Show-WinPulseToolsMenu }
-            'C' { Invoke-WinPulseOSJunkCleanupMenu }
+            'C' { Show-WinPulseCleanupMenu }
             'X' { Show-WinPulseExportMenu -scan $scan }
-            'E' { Invoke-WinPulseExitCleanupPrompt; return }
+            'Q' { Invoke-WinPulseExitCleanupPrompt; return }
             default { }
         }
     }
@@ -13013,6 +13041,8 @@ function Show-WinPulseDiagnosticsMenu {
     param([Parameter(Mandatory = $true)][pscustomobject]$scan)
 
     while ($true) {
+        Clear-Host
+        Write-Host '  Main > Diagnostics' -ForegroundColor DarkGray
         $findings = @(Get-WinPulseTriageFindings -scan $scan)
         $critCount = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
         $warnCount = @($findings | Where-Object { $_.Severity -ne 'Critical' }).Count
@@ -13094,10 +13124,11 @@ function Show-WinPulseDiagnosticsMenu {
             @{ Label = 'Security'; Key = 'X'; Badge = (Get-WinPulseDiagnosticsBadge -State $secState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $secState);    Hint = $secHint;    Color = 'White' }
             @{ Label = 'Network';  Key = 'N'; Badge = (Get-WinPulseDiagnosticsBadge -State $netState);    BadgeColor = (Get-WinPulseDiagnosticsColor -State $netState);    Hint = $netHint;    Color = 'White' }
             @{ Separator = $true }
-            @{ Label = 'Back';     Key = 'B'; Color = 'DarkGray' }
+            @{ Label = 'Back';     Key = '0'; Color = 'DarkGray' }
         )
 
         $choice = Select-WinPulseMenuItem -Title 'Diagnostics' -Items $items
+        if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'F' { Show-WinPulseDiagnosticsFindings -scan $scan }
             'D' { Show-WinPulseDiagnosticsDrivers -scan $scan }
@@ -13111,40 +13142,6 @@ function Show-WinPulseDiagnosticsMenu {
     }
 }
 
-function Show-WinPulseTriageMenu {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$scan
-    )
-
-    while ($true) {
-        Show-WinPulseDashboard -scan $scan
-        $choice = Select-WinPulseMenuItem -Title 'Quick Triage' -Items @(
-            @{ Label = 'Findings & Details'; Key = 'F'; Hint = 'Full list + HW info' },
-            @{ Label = 'W11 readiness';      Key = 'A'; Hint = 'Upgrade signals' },
-            @{ Label = 'Migration';          Key = 'P'; Hint = 'Preflight/backup/restore/verify' },
-            @{ Label = 'Full menu';          Key = 'M'; Hint = 'All options' },
-            @{ Label = 'Re-scan';            Key = 'R'; Hint = 'Refresh data' },
-            @{ Label = 'Inspect logs';       Key = 'L'; Hint = 'Last 24h' },
-            @{ Label = 'Safe actions';       Key = 'S'; Hint = 'DISM/SFC/CHKDSK' },
-            @{ Separator = $true },
-            @{ Label = 'Exit';               Key = 'E'; Color = 'DarkGray' }
-        )
-        switch ($choice) {
-            'R' { $scan = Invoke-CoreScan }
-            'F' { Show-WinPulseDiagnosticsMenu -scan $scan }
-            'A' { Show-WinPulseWindows11Readiness; Wait-WinPulseKey }
-            'P' { Show-WinPulseMigrationMenu }
-            'L' { Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey }
-            'S' { $scan = Show-WinPulseSafeActions -scan $scan }
-            'M' { Show-WinPulseMainMenu -scan $scan; return }
-            'E' { Invoke-WinPulseExitCleanupPrompt; return }
-            default { }
-        }
-    }
-}
-
 function Show-WinPulseSafeActions {
     [CmdletBinding()]
     param(
@@ -13154,13 +13151,16 @@ function Show-WinPulseSafeActions {
 
     while ($true) {
         Clear-Host
+        Write-Host '  Main > Repairs > Safe actions' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Safe Actions' -Items @(
             @{ Label = 'Run DISM + SFC';          Key = 'S'; Hint = 'Repair files' },
             @{ Label = 'Run CHKDSK C: /scan';     Key = 'C'; Hint = 'Disk check' },
             @{ Label = 'Restart WU services';      Key = 'W'; Hint = 'Update svc' },
-            @{ Label = 'Re-scan now';              Key = 'R'; Hint = 'Refresh' }
+            @{ Label = 'Re-scan now';              Key = 'R'; Hint = 'Refresh' },
+            @{ Separator = $true },
+            @{ Label = 'Back';                     Key = '0'; Color = 'DarkGray' }
         )
-        if (-not $choice) { return $scan }
+        if (-not $choice -or $choice -eq '0') { return $scan }
         switch ($choice) {
             'S' { Repair-SystemFiles; $scan = Invoke-CoreScan; Wait-WinPulseKey }
             'C' { Start-Process -FilePath 'chkdsk.exe' -ArgumentList 'C:', '/scan' -Wait -NoNewWindow; $scan = Invoke-CoreScan; Wait-WinPulseKey }
@@ -13221,7 +13221,7 @@ function Invoke-WinPulseMode {
             Write-Host ''
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
-            Show-WinPulseTriageMenu -scan $scan
+            Show-WinPulseMainMenu -scan $scan
         }
         'Repair' {
             try { $Host.UI.RawUI.BackgroundColor = 'Black' } catch {}
