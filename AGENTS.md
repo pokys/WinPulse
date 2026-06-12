@@ -135,6 +135,242 @@ Acceptance:
 Out of scope: changing any diagnostics function's behavior, adding Pester, TUI
 rendering/layout, the migration modes.
 
+## Work Queue - Batch 7 (queued 2026-06-12)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), do NOT push to
+main, do NOT bump the version, keep `bootstrap.ps1` ASCII-only /
+StrictMode-safe / PS 5.1, bracket notation for hashtable access. Tasks are
+SEQUENTIAL: C41 then C42 then C43, ONE commit per task (C42 builds on C41's
+menu shape). If C40 is not yet done, do it first. Report changes plus full
+test output. Stop and ask if anything is ambiguous.
+
+Owner-approved UX redesign context (applies to C41+C42): WinPulse currently
+has TWO top-level menus (`Show-WinPulseTriageMenu` is the default entry,
+`Show-WinPulseMainMenu` hides behind its "Full menu" item) that overlap, and
+five menus are defined but unreachable from any menu
+(`Show-WinPulseNetworkMenu`, `Show-WinPulseSecurityMenu`,
+`Show-WinPulseStressMenu`, `Show-WinPulseCleanupMenu`,
+`Show-WinPulseTweaksMenu`). The owner approved collapsing to ONE main menu and
+wiring the orphans back in (except Tweaks, which stays an unwired placeholder).
+
+### Task C41 - Single main menu, wire orphaned menus, Back/breadcrumb consistency
+
+Scope:
+
+1. Delete `Show-WinPulseTriageMenu` entirely. In `Invoke-WinPulseMode`, the
+   `'Triage'` branch calls `Show-WinPulseTriageMenu -scan $scan` - change it to
+   `Show-WinPulseMainMenu -scan $scan`. Nothing else references the triage
+   menu. Its unique items are NOT lost: "Findings & Details" was the
+   Diagnostics hub (now main-menu `D`), "Safe actions" lives in Repairs, and
+   "Re-scan" / "Inspect logs" move into the Diagnostics hub in C42 (they are
+   intentionally unreachable for the one commit between C41 and C42 - do not
+   re-add them elsewhere).
+
+2. Rebuild the `Show-WinPulseMainMenu` item list as (keys changed where noted):
+
+   ```powershell
+   $choice = Select-WinPulseMenuItem -Title 'Main Menu' -Items @(
+       @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'Findings & health' },
+       @{ Label = 'Repairs (Guided)'; Key = 'R'; Hint = 'Fix issues' },
+       @{ Label = 'Security';         Key = 'S'; Hint = 'Assessment/BitLocker' },
+       @{ Label = 'Apps';             Key = 'A'; Hint = 'Install/remove/update' },
+       @{ Label = 'Migration';        Key = 'M'; Hint = 'Backup/restore/verify' },
+       @{ Label = 'W11 readiness';    Key = 'W'; Hint = 'Upgrade signals' },
+       @{ Label = 'Tools';            Key = 'T'; Hint = 'Portable + stress tests' },
+       @{ Label = 'Cleanup';          Key = 'C'; Hint = 'OS junk + WinPulse data' },
+       @{ Label = 'Export';           Key = 'X'; Hint = 'JSON / HTML' },
+       @{ Separator = $true },
+       @{ Label = 'Exit';             Key = 'Q'; Color = 'DarkGray' }
+   )
+   ```
+
+   Dispatch: `'D'` -> `Show-WinPulseDiagnosticsMenu -scan $scan` (NOT the old
+   `Invoke-WinPulseDiagnostics` batch run - that gets re-homed in C42; it is
+   intentionally unreachable for one commit). `'R'` ->
+   `$scan = Invoke-WinPulseRepairs -scan $scan`. `'S'` ->
+   `Show-WinPulseSecurityMenu`. `'A'` -> `Show-WinPulseInstallMenu`. `'M'` ->
+   `Show-WinPulseMigrationMenu`. `'W'` -> `Show-WinPulseWindows11Readiness;
+   Wait-WinPulseKey`. `'T'` -> `Show-WinPulseToolsMenu`. `'C'` ->
+   `Show-WinPulseCleanupMenu` (the hub, NOT `Invoke-WinPulseOSJunkCleanupMenu`
+   directly). `'X'` -> `Show-WinPulseExportMenu -scan $scan`. `'Q'` ->
+   `Invoke-WinPulseExitCleanupPrompt; return` (exit behavior itself is
+   unchanged - the owner explicitly declined changing it). Esc / `default`
+   keeps looping (must NOT exit).
+
+3. `Invoke-WinPulseRepairs`: add one item
+   `@{ Label = 'Network repair'; Key = 'N'; Hint = 'DNS/TCP/adapters' }` ->
+   `Show-WinPulseNetworkMenu` (it loops internally and returns; `$scan` is not
+   involved). Keep the function returning `$scan` on every exit path.
+
+4. `Show-WinPulseToolsMenu`: remove the `StressMyPC` and `FurMark` entries
+   (they live in the stress submenu) and add
+   `@{ Label = 'Stress tests'; Key = 'S'; Hint = 'CPU/RAM/disk/GPU' }` ->
+   `Show-WinPulseStressMenu`. Flow fix while you are there: the trailing
+   `Write-Host ''; Wait-WinPulseKey` after the switch currently also fires
+   after returning from the NirSoft submenu, because `continue` inside a
+   `switch` does NOT re-enter the `while` loop (documented footgun). Move the
+   `Write-Host ''; Wait-WinPulseKey` pair INTO each tool-launcher branch and
+   give the two submenu branches (`S` stress, `N` NirSoft) no trailing wait.
+
+5. `Show-WinPulseCleanupMenu` (currently orphaned, becomes the `C` target):
+   reorder so `OS junk cleanup` (key `O`) is FIRST, then a separator, then the
+   WinPulse-artifact items (`Light cleanup`, `Full artifact cleanup`,
+   `Remove WinPulse folder`). Drop the `Wait-WinPulseKey` after
+   `Invoke-WinPulseOSJunkCleanupMenu` (it has its own loop and exit flow).
+
+6. Back/breadcrumb convention, applied to EVERY submenu (this is the bulk of
+   the diff - keep it mechanical):
+   - First line after `Clear-Host`:
+     `Write-Host '  Main > <Path>' -ForegroundColor DarkGray` with these exact
+     paths: `Main > Diagnostics`, `Main > Repairs`,
+     `Main > Repairs > Network`, `Main > Security`, `Main > Apps`,
+     `Main > Apps > Office`, `Main > Migration`, `Main > Tools`,
+     `Main > Tools > NirSoft`, `Main > Tools > Stress`, `Main > Cleanup`,
+     `Main > Export`, `Main > Repairs > Safe actions` (Safe Actions is reached
+     from Repairs). Update the two existing breadcrumbs (`Main > Network`,
+     `Main > Security`) to match. `Show-WinPulseExportMenu` has no
+     `Clear-Host` today - add one plus the breadcrumb at the top of its loop.
+   - Last two items of every submenu: `@{ Separator = $true }` and
+     `@{ Label = 'Back'; Key = '0'; Color = 'DarkGray' }`. Esc (null choice)
+     must also return. Replace the existing nonstandard Back keys (NirSoft
+     `X`, Migration `Q`, Network `B`, Security `X`) and add the Back item to
+     menus that lack it (Tools, Apps, Office, Cleanup, Export, Stress, Safe
+     Actions, Repairs). Digit keys are already supported
+     (`Select-WinPulseMenuItem` repair-plan menus use them).
+   - Do NOT touch the `Show-WinPulsePagedTextBox` breadcrumb parameters except
+     where the path strings above changed (Network/Security ones).
+
+Acceptance: parser + ASCII clean; `git diff --check` clean; all five
+non-elevated smoke modes exit 0 (the smoke harness never opens the interactive
+menus, so this guards regressions only); confirm by grep that
+`Show-WinPulseTriageMenu` is gone and that every `Show-WinPulse*Menu` except
+`Show-WinPulseTweaksMenu` now has at least one caller. The owner will verify
+the TUI visually before any merge - do not attempt to screenshot it yourself.
+
+Out of scope: exit-cleanup behavior, Tweaks menu, diagnostics hub content
+(C42), any change to what the individual actions DO.
+
+### Task C42 - Diagnostics hub: absorb deep suite, logs, re-scan; return the scan
+
+Why: after C41 the old batch "Diagnostics" run (`Invoke-WinPulseDiagnostics`,
+a 6-step suite including a 10s RAM test and a 512MB disk stress test) and the
+triage menu's "Re-scan" / "Inspect logs" items have no home. They belong inside
+the Diagnostics hub (`Show-WinPulseDiagnosticsMenu`).
+
+Scope:
+
+1. In `Show-WinPulseDiagnosticsMenu`, append to the `$items` array after the
+   seven section rows:
+
+   ```powershell
+   @{ Separator = $true }
+   @{ Label = 'Deep test suite'; Key = 'T'; Hint = 'RAM+disk stress, takes minutes' }
+   @{ Label = 'Inspect logs';    Key = 'L'; Hint = 'Last 24h' }
+   @{ Label = 'Re-scan';         Key = 'R'; Hint = 'Refresh data' }
+   @{ Separator = $true }
+   @{ Label = 'Back';            Key = '0'; Color = 'DarkGray' }
+   ```
+
+   Switch branches (NO `continue` inside the switch - footgun):
+   - `'T'`: plain `if` confirm, then run:
+     ```powershell
+     $answer = Read-Host '  Deep suite runs RAM + disk stress tests (several minutes). Continue? [y/N]'
+     if ($answer -match '^[Yy]') { Invoke-WinPulseDiagnostics }
+     ```
+   - `'L'`: `Clear-Host; Show-WinPulseEventLogInspection -hourback 24 -maxitems 12; Write-Host ''; Wait-WinPulseKey`
+     (verbatim from the deleted triage menu).
+   - `'R'`: `$scan = Invoke-CoreScan` (the hub's badges recompute on the next
+     loop iteration, which is the point).
+
+2. The hub must now RETURN the (possibly refreshed) scan: change every exit
+   path (`default` branch and the `'0'`/Esc path) to `return $scan`, and change
+   the C41 main-menu call site to
+   `$scan = Show-WinPulseDiagnosticsMenu -scan $scan`. StrictMode caution: the
+   `Show-WinPulseDiagnostics*` detail calls are Write-Host based and emit
+   nothing, but double-check nothing in the loop leaks objects into the output
+   stream, otherwise the caller's `$scan` becomes an array.
+
+Acceptance: parser + ASCII clean; `git diff --check` clean; five smoke modes
+exit 0 (C40's `Invoke-SmokeDiagnosticsRenderAssertions` exercises the render
+functions and must stay green); grep-confirm `Invoke-WinPulseDiagnostics` has
+exactly one caller (the hub) and `Show-WinPulseDiagnosticsMenu` is assigned at
+its call site.
+
+Out of scope: the content/order of the deep suite itself, the seven detail
+screens, dashboard.
+
+### Task C43 - Startup access gate (soft technician code)
+
+Why: WinPulse is fetched from a public repo and runs destructive-capable
+actions. The owner wants a startup access code so a casual user who finds the
+one-liner cannot stumble through it. This is EXPLICITLY a soft gate: the hash
+lives in a public script and anyone can edit it out. Do not oversell it and do
+not add anything beyond what is specced (no lockouts, no telemetry, no
+obfuscation - the last one is a project non-goal).
+
+Scope:
+
+1. Param block: append `[switch]$AccessGranted` after `$_LiveProfilesRoot`.
+   Do NOT add it to `Invoke-WinPulseMode`.
+
+2. Near `$script:WinPulseVersion`, add:
+
+   ```powershell
+   # Soft startup gate. SHA256 of the access code; regenerate with:
+   #   $sha=[Security.Cryptography.SHA256]::Create()
+   #   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
+   $script:WinPulseAccessCodeHash = 'e3129f656b76c6fb238de685b85553b3851cc1d35d86cef5089f15853cc7fc82'
+   ```
+
+   (That is the hash of the initial code `WinPulse2026`; the owner will swap
+   it before release.)
+
+3. New function `Request-WinPulseAccessGate` (place it right after
+   `Start-WinPulseElevation`):
+   - Return immediately if `$AccessGranted` is set or
+     `$env:WINPULSE_ACCESS_GRANTED -eq '1'`.
+   - Otherwise up to 3 attempts: prompt
+     `Read-Host -Prompt '  Access code' -AsSecureString` inside try/catch (a
+     non-interactive host throws here - treat a throw OR an empty string as a
+     failed attempt, never loop forever). Convert via
+     `[Runtime.InteropServices.Marshal]::SecureStringToBSTR` /
+     `PtrToStringBSTR` and free with `ZeroFreeBSTR` in a `finally`. Hash the
+     UTF8 bytes with SHA256, hex-encode, compare to
+     `$script:WinPulseAccessCodeHash` with `OrdinalIgnoreCase`.
+   - On success: `$env:WINPULSE_ACCESS_GRANTED = '1'` (child and elevated
+     processes inherit it) and return.
+   - After 3 failures: `Write-Host 'Access denied.' -ForegroundColor Red`,
+     `exit 1`.
+
+4. Call site: in the top-level execution block, immediately BEFORE the
+   `$elevationPassthrough = @()` line, call `Request-WinPulseAccessGate`.
+   After the passthrough array is fully built, append
+   `$elevationPassthrough += '-AccessGranted'` unconditionally (reaching that
+   line means the gate passed or was bypassed), so the elevated relaunch via
+   `-File` never re-prompts. The `irm | iex` path cannot carry parameters, but
+   it relaunches through a temp file with passthrough args, and the env var
+   covers same-process-tree cases anyway.
+
+5. Smoke harness (`tools/Invoke-WinPulseSmokeTest.ps1`): set
+   `$env:WINPULSE_ACCESS_GRANTED = '1'` right after the PowerShell executable
+   is resolved (the `$powershell = (Get-Command ...)` line), with a short
+   comment, and `Remove-Item Env:WINPULSE_ACCESS_GRANTED -ErrorAction
+   SilentlyContinue` at the end of the run. Child processes inherit it, so all
+   modes stay non-interactive.
+
+Acceptance: parser + ASCII clean; `git diff --check` clean; all five
+non-elevated smoke modes exit 0 WITHOUT any prompt appearing; negative test:
+`powershell -NoProfile -NonInteractive -File .\bootstrap.ps1` with the env var
+absent must print `Access denied.` and exit 1 within seconds (Read-Host throws
+in NonInteractive mode, which counts as failed attempts - report the observed
+output); positive test: same command with `WINPULSE_ACCESS_GRANTED=1` must get
+past the gate (it will then start the interactive scan - kill it after the
+`LOADED` lines appear and say so).
+
+Out of scope: changing the elevation flow, persisting anything, rate limiting,
+storing the plaintext code anywhere in the repo besides this spec.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
