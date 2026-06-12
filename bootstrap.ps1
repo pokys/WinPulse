@@ -35,7 +35,8 @@ param(
     [string]$LiveRestoreRoot = $null,
     [string]$LiveAsUser = $null,
     [switch]$LiveExecute,
-    [string]$_LiveProfilesRoot = $null
+    [string]$_LiveProfilesRoot = $null,
+    [switch]$AccessGranted
 )
 
 $validWinPulseModes = @('Triage', 'Repair', 'W11Readiness', 'MigrationPreflight', 'MigrationBackup', 'MigrationRestore', 'MigrationVerify', 'MigrationApps', 'MigrationLive', 'ExportBundle')
@@ -63,6 +64,10 @@ $ErrorActionPreference = 'Stop'
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
 $script:WinPulseVersion = '0.20.1-20260611'
+# Soft startup gate. SHA256 of the access code; regenerate with:
+#   $sha=[Security.Cryptography.SHA256]::Create()
+#   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
+$script:WinPulseAccessCodeHash = 'e3129f656b76c6fb238de685b85553b3851cc1d35d86cef5089f15853cc7fc82'
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -142,6 +147,57 @@ function Start-WinPulseElevation {
 
     Start-Process -FilePath $shellPath -Verb RunAs -ArgumentList ($args -join ' ')
     exit
+}
+
+function Request-WinPulseAccessGate {
+    [CmdletBinding()]
+    param()
+
+    if ($AccessGranted -or $env:WINPULSE_ACCESS_GRANTED -eq '1') {
+        return
+    }
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $bstr = [IntPtr]::Zero
+        $plainText = $null
+        try {
+            $secure = Read-Host -Prompt '  Access code' -AsSecureString
+            if (-not $secure -or $secure.Length -eq 0) {
+                continue
+            }
+
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            $plainText = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            if ([string]::IsNullOrEmpty($plainText)) {
+                continue
+            }
+
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($plainText)
+                $hash = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+            }
+            finally {
+                if ($sha) { $sha.Dispose() }
+            }
+
+            if ([string]::Equals($hash, $script:WinPulseAccessCodeHash, [StringComparison]::OrdinalIgnoreCase)) {
+                $env:WINPULSE_ACCESS_GRANTED = '1'
+                return
+            }
+        }
+        catch {
+        }
+        finally {
+            if ($bstr -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            }
+            $plainText = $null
+        }
+    }
+
+    Write-Host 'Access denied.' -ForegroundColor Red
+    exit 1
 }
 
 $script:WinPulsePaths = [ordered]@{
@@ -13332,6 +13388,7 @@ function Test-WinPulsePathUnderRoot {
     }
 }
 
+Request-WinPulseAccessGate
 $elevationPassthrough = @()
 if ($PSBoundParameters.ContainsKey('BackupUsers')) {
     foreach ($value in @($BackupUsers)) { $elevationPassthrough += @('-BackupUsers', (ConvertTo-WinPulseCommandArgument -value $value)) }
@@ -13381,6 +13438,7 @@ if ($PSBoundParameters.ContainsKey('LiveRestoreRoot')) { $elevationPassthrough +
 if ($PSBoundParameters.ContainsKey('LiveAsUser')) { $elevationPassthrough += @('-LiveAsUser', (ConvertTo-WinPulseCommandArgument -value $LiveAsUser)) }
 if ($LiveExecute) { $elevationPassthrough += '-LiveExecute' }
 if ($PSBoundParameters.ContainsKey('_LiveProfilesRoot')) { $elevationPassthrough += @('-_LiveProfilesRoot', (ConvertTo-WinPulseCommandArgument -value $_LiveProfilesRoot)) }
+$elevationPassthrough += '-AccessGranted'
 
 $backupNonInteractiveForElevation = (
     $Mode -eq 'MigrationBackup' -and
