@@ -8740,11 +8740,13 @@ function Ensure-ToolInstalled {
     $hasVerification = ($requireSignature -or -not [string]::IsNullOrWhiteSpace($sha256))
     $targetDir = Join-Path $script:WinPulsePaths.Bin $name
     $binaryCandidates = @()
-    if ($tool.PSObject.Properties['BinaryCandidates'] -and $tool.BinaryCandidates) {
-        $binaryCandidates = @($tool.BinaryCandidates)
+    # $tool is an [ordered] hashtable; its keys are NOT PSObject properties, so
+    # guard with .Contains()/bracket access (PSObject.Properties[...] sees nothing).
+    if ($tool.Contains('BinaryCandidates') -and $tool['BinaryCandidates']) {
+        $binaryCandidates = @($tool['BinaryCandidates'])
     }
-    elseif ($tool.PSObject.Properties['Binary'] -and $tool.Binary) {
-        $binaryCandidates = @($tool.Binary)
+    elseif ($tool.Contains('Binary') -and $tool['Binary']) {
+        $binaryCandidates = @($tool['Binary'])
     }
 
     foreach ($candidate in $binaryCandidates) {
@@ -8767,11 +8769,11 @@ function Ensure-ToolInstalled {
     }
 
     $downloadSources = @()
-    if ($tool.PSObject.Properties['Urls'] -and $tool.Urls) {
-        $downloadSources = @($tool.Urls)
+    if ($tool.Contains('Urls') -and $tool['Urls']) {
+        $downloadSources = @($tool['Urls'])
     }
-    elseif ($tool.PSObject.Properties['Url'] -and $tool.Url) {
-        $downloadSources = @($tool.Url)
+    elseif ($tool.Contains('Url') -and $tool['Url']) {
+        $downloadSources = @($tool['Url'])
     }
 
     $downloadSucceeded = $false
