@@ -3535,8 +3535,9 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     $sb.ToString() | Set-Content -Path $target -Encoding UTF8
     Write-Host ("HTML report exported: {0}" -f $target) -ForegroundColor Green
 
-    try { Start-Process $target }
-    catch { Write-Host 'Could not open report in browser. File saved.' -ForegroundColor Yellow }
+    # Open in a private window (no browser history on a client station).
+    try { Start-WinPulsePrivateUrl -Url $target | Out-Null }
+    catch { Write-Host 'Could not open report. File saved.' -ForegroundColor Yellow }
 
     return $target
 }
