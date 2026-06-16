@@ -2202,10 +2202,14 @@ function Select-WinPulseMultiMenuItem {
 
                 if ($item['Separator']) {
                     if ($item['Label']) {
-                        $catLabel = '  ' + $item['Label']
-                        $catPad = $w - 2 - $catLabel.Length
-                        if ($catPad -lt 0) { $catPad = 0 }
-                        Write-Host -NoNewline ('  {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
+                        # Match the normal-row border layout (left '  {0} ',
+                        # content width w-4, right ' {0}') so the right border
+                        # lines up; the old form was one column too wide.
+                        $catAvail = $w - 4
+                        $catLabel = ' ' + [string]$item['Label']
+                        if ($catLabel.Length -gt $catAvail) { $catLabel = $catLabel.Substring(0, $catAvail) }
+                        $catPad = $catAvail - $catLabel.Length
+                        Write-Host -NoNewline ('  {0} ' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                         Write-Host -NoNewline ($catLabel + (' ' * $catPad)) -ForegroundColor $script:WinPulseBoxColor
                         Write-Host (' {0}' -f $vLine) -ForegroundColor $script:WinPulseBoxColor
                     } else {
