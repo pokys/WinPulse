@@ -69,7 +69,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.21.3-20260616'
+$script:WinPulseVersion = '0.21.4-20260616'
 # Soft startup gate. SHA256 of the access code; regenerate with:
 #   $sha=[Security.Cryptography.SHA256]::Create()
 #   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
