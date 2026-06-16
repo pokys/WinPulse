@@ -12186,6 +12186,69 @@ function Invoke-WinPulseRepairs {
     }
 }
 
+function Show-WinPulseWinGetMissing {
+    # Winget ships inside the Store "App Installer" package. Silent install is
+    # not reliable (Store/MSIX dependency), so offer to open the source instead
+    # of just printing an error.
+    [CmdletBinding()]
+    param()
+
+    Clear-Host
+    Write-Host '  Main > Apps' -ForegroundColor DarkGray
+    Write-Host '  Winget is not available - it ships with "App Installer".' -ForegroundColor Red
+    $choice = Select-WinPulseMenuItem -Title 'Get App Installer (winget)' -Items @(
+        @{ Label = 'Open Microsoft Store page';     Key = 'S'; Hint = 'App Installer' },
+        @{ Label = 'Open winget releases (GitHub)'; Key = 'G'; Hint = 'Manual MSIX' },
+        @{ Separator = $true },
+        @{ Label = 'Back';                          Key = '0'; Color = 'DarkGray' }
+    )
+    switch ($choice) {
+        'S' {
+            try { Start-Process 'ms-windows-store://pdp/?productid=9NBLGGH4NNS1' }
+            catch { Write-Host ('  Could not open Store: {0}' -f $_.Exception.Message) -ForegroundColor Yellow; Wait-WinPulseKey }
+        }
+        'G' {
+            try { Start-Process 'https://github.com/microsoft/winget-cli/releases/latest' }
+            catch { Write-Host ('  Could not open browser: {0}' -f $_.Exception.Message) -ForegroundColor Yellow; Wait-WinPulseKey }
+        }
+        default { }
+    }
+}
+
+function Show-WinPulseDryRunMenu {
+    # Preview-only installs/uninstalls, grouped under one Apps entry.
+    [CmdletBinding()]
+    param()
+
+    while ($true) {
+        Clear-Host
+        Write-Host '  Main > Apps > Dry run' -ForegroundColor DarkGray
+        $choice = Select-WinPulseMenuItem -Title 'Dry run (preview only)' -Items @(
+            @{ Label = 'Basic IT Set';     Key = 'B'; Hint = 'Preview' },
+            @{ Label = 'Custom install';   Key = 'I'; Hint = 'Preview' },
+            @{ Label = 'Custom uninstall'; Key = 'U'; Hint = 'Preview' },
+            @{ Separator = $true },
+            @{ Label = 'Back';             Key = '0'; Color = 'DarkGray' }
+        )
+        if (-not $choice -or $choice -eq '0') { return }
+        switch ($choice) {
+            'B' {
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
+                Install-BasicITSet -dryrun; Wait-WinPulseKey
+            }
+            'I' {
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
+                Invoke-WinPulseCustomInstall -dryrun; Wait-WinPulseKey
+            }
+            'U' {
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
+                Invoke-WinPulseCustomUninstall -dryrun; Wait-WinPulseKey
+            }
+            default { return }
+        }
+    }
+}
+
 function Show-WinPulseInstallMenu {
     [CmdletBinding()]
     param()
@@ -12193,7 +12256,7 @@ function Show-WinPulseInstallMenu {
     while ($true) {
         Clear-Host
         Write-Host '  Main > Apps' -ForegroundColor DarkGray
-        $choice = Select-WinPulseMenuItem -Title 'Install / Apps' -Items @(
+        $choice = Select-WinPulseMenuItem -Title 'Apps' -Items @(
             @{ Label = 'Ninite catalog';          Key = 'N'; Hint = 'Direct download' },
             @{ Label = 'Chocolatey catalog';      Key = 'H'; Hint = 'Search & install' },
             @{ Label = 'Preview Basic IT Set';    Key = 'P'; Hint = 'Show list' },
@@ -12203,9 +12266,7 @@ function Show-WinPulseInstallMenu {
             @{ Label = 'Update all apps';         Key = 'A'; Hint = 'winget upgrade' },
             @{ Label = 'Office menu';             Key = 'O'; Hint = 'Install/repair' },
             @{ Separator = $true },
-            @{ Label = 'Dry run: Basic IT';       Key = 'D'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Label = 'Dry run: Install';        Key = 'I'; Hint = 'Preview only'; Color = 'DarkGray' },
-            @{ Label = 'Dry run: Uninstall';      Key = 'X'; Hint = 'Preview only'; Color = 'DarkGray' },
+            @{ Label = 'Dry run >';               Key = 'D'; Hint = 'Preview installs'; Color = 'DarkGray' },
             @{ Separator = $true },
             @{ Label = 'Back';                    Key = '0'; Color = 'DarkGray' }
         )
@@ -12214,39 +12275,28 @@ function Show-WinPulseInstallMenu {
             'N' { Show-WinPulseNiniteMenu }
             'H' { Show-WinPulseChocoMenu }
             'P' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
                 $preview = @(Get-WinPulsePackageCatalog | Where-Object { $_.InBasicSet })
                 Write-WinPulseHeader -title 'Basic IT Set Preview'; Show-WinPulsePackageTable -packages $preview; Wait-WinPulseKey
             }
             'B' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
                 Install-BasicITSet
             }
             'C' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
                 Invoke-WinPulseCustomInstall
             }
             'U' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
                 Invoke-WinPulseCustomUninstall
             }
             'A' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
+                if (-not (Test-WinGetAvailable)) { Show-WinPulseWinGetMissing; break }
                 Update-AllApplications
             }
             'O' { Show-WinPulseOfficeMenu }
-            'D' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
-                Install-BasicITSet -dryrun; Wait-WinPulseKey
-            }
-            'I' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
-                Invoke-WinPulseCustomInstall -dryrun; Wait-WinPulseKey
-            }
-            'X' {
-                if (-not (Test-WinGetAvailable)) { Write-Host '  Winget not available.' -ForegroundColor Red; Wait-WinPulseKey; break }
-                Invoke-WinPulseCustomUninstall -dryrun; Wait-WinPulseKey
-            }
+            'D' { Show-WinPulseDryRunMenu }
             default { return }
         }
     }
