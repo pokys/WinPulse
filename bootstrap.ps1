@@ -3251,12 +3251,12 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         }
         [void]$sb.Append('</div>')
 
-        if ($scan.HardwareDetail.GPU.Count -gt 0) {
+        if (@($scan.HardwareDetail.GPU).Count -gt 0) {
             [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">GPU</h3>')
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.HardwareDetail.GPU -Columns @('Name','DriverVersion','VRAM','Resolution')))
         }
 
-        if ($scan.HardwareDetail.DIMMs.Count -gt 0) {
+        if (@($scan.HardwareDetail.DIMMs).Count -gt 0) {
             [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Memory Modules</h3>')
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.HardwareDetail.DIMMs -Columns @('Slot','Capacity','SpeedMHz','Type','Manufacturer')))
         }
@@ -3287,7 +3287,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     [void]$sb.Append(('<span class="k">RAM</span><span class="v">{0} used ({1}%) | {2} free | {3} total</span>' -f $ram.Used, $ram.UsedPercent, $ram.Free, $ram.Total))
     [void]$sb.Append(('<span class="k">SMART</span><span class="v {0}">{1}</span>' -f $(if ($scan.Hardware.SmartHealthy) { 'state-ok' } else { 'state-crit' }), $(if ($scan.Hardware.SmartHealthy) { 'Healthy' } else { 'FAILURE PREDICTED' })))
     [void]$sb.Append('</div>')
-    if ($scan.Hardware.Disks.Count -gt 0) {
+    if (@($scan.Hardware.Disks).Count -gt 0) {
         $diskData = @($scan.Hardware.Disks | ForEach-Object { [ordered]@{ Drive = $_.Drive; Size = $_.Size; Free = $_.Free; 'Used%' = $_.UsedPercent } })
         [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $diskData))
     }
@@ -3301,7 +3301,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append(('<span class="k">CPU Temperature</span><span class="v {0}">{1}</span>' -f $cpuTClass, $e::HtmlEncode($cpuT)))
         [void]$sb.Append(('<span class="k">Source</span><span class="v">{0}</span>' -f $e::HtmlEncode($scan.Temperatures.CPUTempSource)))
         [void]$sb.Append('</div>')
-        if ($scan.Temperatures.DiskTemps.Count -gt 0) {
+        if (@($scan.Temperatures.DiskTemps).Count -gt 0) {
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Temperatures.DiskTemps))
         }
         [void]$sb.Append(('<p class="empty">{0}</p>' -f $e::HtmlEncode($scan.Temperatures.Note)))
@@ -3323,12 +3323,12 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
 
     # -- Security -------------------------------------------------------------
     [void]$sb.Append('<section><h2>Security</h2><div class="kv">')
-    $avLabel = if ($scan.Security.Antivirus.Products.Count -gt 0) { ($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { $_ } | Sort-Object -Unique) -join ', ' } else { 'None detected' }
+    $avLabel = if (@($scan.Security.Antivirus.Products).Count -gt 0) { ($scan.Security.Antivirus.Products | ForEach-Object { $_.Name } | Where-Object { $_ } | Sort-Object -Unique) -join ', ' } else { 'None detected' }
     [void]$sb.Append(('<span class="k">Antivirus</span><span class="v">{0}</span>' -f $e::HtmlEncode($avLabel)))
     [void]$sb.Append(('<span class="k">Real-time Protection</span><span class="v {0}">{1}</span>' -f $(if ($scan.Security.Antivirus.EffectiveRealtimeProtection) { 'state-ok' } else { 'state-crit' }), $scan.Security.Antivirus.EffectiveRealtimeProtection))
     [void]$sb.Append(('<span class="k">Firewall</span><span class="v {0}">{1}</span>' -f $(if ($scan.Security.FirewallEnabled) { 'state-ok' } else { 'state-crit' }), $(if ($scan.Security.FirewallEnabled) { 'Enabled' } else { 'DISABLED' })))
     $blOn = $false
-    if ($scan.Security.BitLocker -and $scan.Security.BitLocker.Count -gt 0) { $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0 }
+    if ($scan.Security.BitLocker -and @($scan.Security.BitLocker).Count -gt 0) { $blOn = @($scan.Security.BitLocker | Where-Object { ([string]$_.ProtectionStatus) -match 'On|1' }).Count -gt 0 }
     [void]$sb.Append(('<span class="k">BitLocker</span><span class="v">{0}</span>' -f $(if ($blOn) { 'On' } else { 'Off' })))
     [void]$sb.Append('</div></section>')
 
@@ -3353,7 +3353,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     [void]$sb.Append(('<span class="k">WU Errors (24h)</span><span class="v {0}">{1}</span>' -f $(if ($h.WindowsUpdateErrorCount24Hours -gt 0) { 'state-warn' } else { 'state-ok' }), $h.WindowsUpdateErrorCount24Hours))
     [void]$sb.Append(('<span class="k">Pending Reboot</span><span class="v {0}">{1}</span>' -f $(if ($h.PendingReboot) { 'state-warn' } else { 'state-ok' }), $h.PendingReboot))
     [void]$sb.Append('</div>')
-    if ($h.WindowsUpdateRecentErrors -and $h.WindowsUpdateRecentErrors.Count -gt 0) {
+    if ($h.WindowsUpdateRecentErrors -and @($h.WindowsUpdateRecentErrors).Count -gt 0) {
         $wuData = @($h.WindowsUpdateRecentErrors | ForEach-Object { [ordered]@{ Time = $_.Time.ToString('MM-dd HH:mm'); Code = $_.Code; Category = $_.Category; Message = if ($_.Message.Length -gt 80) { $_.Message.Substring(0,80) + '...' } else { $_.Message } } })
         [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $wuData))
     }
@@ -3367,7 +3367,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     [void]$sb.Append(('<span class="k">Internet</span><span class="v {0}">{1}</span>' -f $(if ($scan.Network.Internet) { 'state-ok' } else { 'state-crit' }), $scan.Network.Internet))
     [void]$sb.Append('</div>')
     if ($scan.NetworkDetail) {
-        if ($scan.NetworkDetail.Adapters.Count -gt 0) {
+        if (@($scan.NetworkDetail.Adapters).Count -gt 0) {
             [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">Adapters</h3>')
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.Adapters))
         }
@@ -3379,16 +3379,16 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
             [void]$sb.Append(('<span class="k">Channel / Band</span><span class="v">{0} / {1}</span>' -f $w.Channel, $w.Band))
             [void]$sb.Append('</div>')
         }
-        if ($scan.NetworkDetail.ListeningPorts.Count -gt 0) {
-            [void]$sb.Append('<details><summary>Listening Ports ({0})</summary>' -f $scan.NetworkDetail.ListeningPorts.Count)
+        if (@($scan.NetworkDetail.ListeningPorts).Count -gt 0) {
+            [void]$sb.Append('<details><summary>Listening Ports ({0})</summary>' -f @($scan.NetworkDetail.ListeningPorts).Count)
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.ListeningPorts))
             [void]$sb.Append('</details>')
         }
-        if ($scan.NetworkDetail.SMBShares.Count -gt 0) {
+        if (@($scan.NetworkDetail.SMBShares).Count -gt 0) {
             [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">SMB Shares</h3>')
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.SMBShares))
         }
-        if ($scan.NetworkDetail.VPNProfiles.Count -gt 0) {
+        if (@($scan.NetworkDetail.VPNProfiles).Count -gt 0) {
             [void]$sb.Append('<h3 style="color:var(--muted);font-size:0.95em;margin:8px 0 4px">VPN Profiles</h3>')
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.NetworkDetail.VPNProfiles))
         }
@@ -3398,20 +3398,20 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     # -- Drivers --------------------------------------------------------------
     if ($scan.Drivers) {
         [void]$sb.Append('<section><h2>Driver Analysis</h2>')
-        if ($scan.Drivers.Problematic.Count -gt 0) {
-            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Problematic Drivers ({0})</h3>' -f $scan.Drivers.Problematic.Count))
+        if (@($scan.Drivers.Problematic).Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Problematic Drivers ({0})</h3>' -f @($scan.Drivers.Problematic).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.Problematic))
         }
         else {
             [void]$sb.Append('<p class="state-ok">No problematic drivers detected.</p>')
         }
-        if ($scan.Drivers.Unsigned.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Unsigned Drivers ({0})</summary>' -f $scan.Drivers.Unsigned.Count))
+        if (@($scan.Drivers.Unsigned).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Unsigned Drivers ({0})</summary>' -f @($scan.Drivers.Unsigned).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.Unsigned))
             [void]$sb.Append('</details>')
         }
-        if ($scan.Drivers.RecentlyChanged.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Recently Changed Drivers ({0})</summary>' -f $scan.Drivers.RecentlyChanged.Count))
+        if (@($scan.Drivers.RecentlyChanged).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Recently Changed Drivers ({0})</summary>' -f @($scan.Drivers.RecentlyChanged).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Drivers.RecentlyChanged))
             [void]$sb.Append('</details>')
         }
@@ -3424,18 +3424,18 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         [void]$sb.Append(('<span class="k">Last Boot</span><span class="v">{0}</span>' -f $(if ($scan.Startup.LastBootTime) { $scan.Startup.LastBootTime.ToString('yyyy-MM-dd HH:mm:ss') } else { 'N/A' })))
         [void]$sb.Append(('<span class="k">Boot Duration</span><span class="v">{0}</span>' -f $(if ($scan.Startup.BootDurationMs) { '{0:N0} ms ({1:N1} s)' -f $scan.Startup.BootDurationMs, ($scan.Startup.BootDurationMs / 1000) } else { 'N/A' })))
         [void]$sb.Append('</div>')
-        if ($scan.Startup.RunKeyItems.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Registry Run Keys ({0})</summary>' -f $scan.Startup.RunKeyItems.Count))
+        if (@($scan.Startup.RunKeyItems).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Registry Run Keys ({0})</summary>' -f @($scan.Startup.RunKeyItems).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.RunKeyItems))
             [void]$sb.Append('</details>')
         }
-        if ($scan.Startup.StartupFolderItems.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Startup Folder Items ({0})</summary>' -f $scan.Startup.StartupFolderItems.Count))
+        if (@($scan.Startup.StartupFolderItems).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Startup Folder Items ({0})</summary>' -f @($scan.Startup.StartupFolderItems).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.StartupFolderItems))
             [void]$sb.Append('</details>')
         }
-        if ($scan.Startup.FailedAutoServices.Count -gt 0) {
-            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Auto-Start Services ({0})</h3>' -f $scan.Startup.FailedAutoServices.Count))
+        if (@($scan.Startup.FailedAutoServices).Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Auto-Start Services ({0})</h3>' -f @($scan.Startup.FailedAutoServices).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Startup.FailedAutoServices))
         }
         [void]$sb.Append('</section>')
@@ -3445,7 +3445,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     if ($scan.UserAccounts) {
         [void]$sb.Append('<section><h2>User Accounts</h2>')
         [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">User profiles on disk: {0}</p>' -f $scan.UserAccounts.ProfileCount))
-        if ($scan.UserAccounts.Users.Count -gt 0) {
+        if (@($scan.UserAccounts.Users).Count -gt 0) {
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.UserAccounts.Users))
         }
         [void]$sb.Append('</section>')
@@ -3455,14 +3455,14 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     if ($scan.Printers) {
         [void]$sb.Append('<section><h2>Printers</h2>')
         [void]$sb.Append(('<p style="color:var(--muted);font-size:0.9em">Default: {0}</p>' -f $e::HtmlEncode($scan.Printers.DefaultPrinter)))
-        if ($scan.Printers.Installed.Count -gt 0) {
+        if (@($scan.Printers.Installed).Count -gt 0) {
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Printers.Installed))
         }
         else {
             [void]$sb.Append('<p class="empty">No printers installed.</p>')
         }
-        if ($scan.Printers.StuckJobs.Count -gt 0) {
-            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Stuck Print Jobs ({0})</h3>' -f $scan.Printers.StuckJobs.Count))
+        if (@($scan.Printers.StuckJobs).Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Stuck Print Jobs ({0})</h3>' -f @($scan.Printers.StuckJobs).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Printers.StuckJobs))
         }
         [void]$sb.Append('</section>')
@@ -3471,7 +3471,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     # -- Software Inventory ---------------------------------------------------
     if ($scan.Software) {
         [void]$sb.Append(('<section><h2>Installed Software ({0})</h2>' -f $scan.Software.Count))
-        if ($scan.Software.Items.Count -gt 0) {
+        if (@($scan.Software.Items).Count -gt 0) {
             [void]$sb.Append(('<details><summary>Show all {0} programs</summary>' -f $scan.Software.Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.Software.Items))
             [void]$sb.Append('</details>')
@@ -3482,21 +3482,21 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     # -- Scheduled Tasks ------------------------------------------------------
     if ($scan.ScheduledTasks) {
         [void]$sb.Append('<section><h2>Scheduled Tasks</h2>')
-        if ($scan.ScheduledTasks.Failed.Count -gt 0) {
-            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Tasks ({0})</h3>' -f $scan.ScheduledTasks.Failed.Count))
+        if (@($scan.ScheduledTasks.Failed).Count -gt 0) {
+            [void]$sb.Append(('<h3 style="color:var(--warn);font-size:0.95em;margin:8px 0 4px">Failed Tasks ({0})</h3>' -f @($scan.ScheduledTasks.Failed).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.Failed))
         }
-        if ($scan.ScheduledTasks.NonMicrosoft.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Non-Microsoft Tasks ({0})</summary>' -f $scan.ScheduledTasks.NonMicrosoft.Count))
+        if (@($scan.ScheduledTasks.NonMicrosoft).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Non-Microsoft Tasks ({0})</summary>' -f @($scan.ScheduledTasks.NonMicrosoft).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.NonMicrosoft))
             [void]$sb.Append('</details>')
         }
-        if ($scan.ScheduledTasks.RunAsSystem.Count -gt 0) {
-            [void]$sb.Append(('<details><summary>Tasks Running as SYSTEM ({0})</summary>' -f $scan.ScheduledTasks.RunAsSystem.Count))
+        if (@($scan.ScheduledTasks.RunAsSystem).Count -gt 0) {
+            [void]$sb.Append(('<details><summary>Tasks Running as SYSTEM ({0})</summary>' -f @($scan.ScheduledTasks.RunAsSystem).Count))
             [void]$sb.Append((ConvertTo-WinPulseHtmlTable -Data $scan.ScheduledTasks.RunAsSystem))
             [void]$sb.Append('</details>')
         }
-        if ($scan.ScheduledTasks.Failed.Count -eq 0 -and $scan.ScheduledTasks.NonMicrosoft.Count -eq 0) {
+        if (@($scan.ScheduledTasks.Failed).Count -eq 0 -and @($scan.ScheduledTasks.NonMicrosoft).Count -eq 0) {
             [void]$sb.Append('<p class="state-ok">No non-Microsoft or failed tasks detected.</p>')
         }
         [void]$sb.Append('</section>')
@@ -3508,7 +3508,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
         $v = $scan.Virtualization
         [void]$sb.Append(('<span class="k">Virtual Machine</span><span class="v">{0}</span>' -f $(if ($v.IsVM) { 'Yes ({0})' -f $v.VMPlatform } else { 'No (Physical)' })))
         [void]$sb.Append(('<span class="k">Hyper-V</span><span class="v">{0}</span>' -f $(if ($v.HyperVEnabled -eq $true) { 'Enabled' } elseif ($v.HyperVEnabled -eq $false) { 'Disabled' } else { 'N/A' })))
-        if ($v.WSLDistributions.Count -gt 0) {
+        if (@($v.WSLDistributions).Count -gt 0) {
             [void]$sb.Append(('<span class="k">WSL Distributions</span><span class="v">{0}</span>' -f ($v.WSLDistributions -join ', ')))
         }
         else {
@@ -3518,7 +3518,7 @@ footer{text-align:center;color:var(--muted);font-size:0.8em;padding:20px 0;borde
     }
 
     # -- Scan Warnings --------------------------------------------------------
-    if ($scan.Errors.Count -gt 0) {
+    if (@($scan.Errors).Count -gt 0) {
         [void]$sb.Append('<section><h2>Scan Warnings</h2><ul class="findings-list">')
         foreach ($err in $scan.Errors) {
             [void]$sb.Append(('<li class="bg-warn state-warn">{0}</li>' -f $e::HtmlEncode($err)))
