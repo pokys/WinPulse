@@ -16,6 +16,7 @@ BeforeAll {
         Tools   = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulsePester\tools'
         Logs    = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulsePester\logs'
     }
+    $script:WinPulseServiceNoiselist = @()
 
     $script:OriginalCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
     $script:OriginalUICulture = [System.Threading.Thread]::CurrentThread.CurrentUICulture
@@ -62,7 +63,11 @@ BeforeAll {
         'Get-WinPulseToolCatalog',
         'Get-WinPulseWingetExportPackageIds',
         'New-WinPulseWingetInstallCommandText',
-        'Get-WinPulseRobocopyFailedEntries'
+        'Get-WinPulseRobocopyFailedEntries',
+        'Get-WinPulseRestoreTargetUserName',
+        'New-WinPulseRestorePlanObject',
+        'Get-WinPulseBackupExclusions',
+        'Get-WinPulseTriageFindings'
     )
 
     foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $script:BootstrapPath -Name $functionNames)) {
@@ -298,5 +303,263 @@ Access is denied.
         finally {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe 'Get-WinPulseRestoreTargetUserName' {
+    It 'returns null for null or whitespace input' {
+        Get-WinPulseRestoreTargetUserName -userName $null | Should -BeNullOrEmpty
+        Get-WinPulseRestoreTargetUserName -userName '' | Should -BeNullOrEmpty
+        Get-WinPulseRestoreTargetUserName -userName '   ' | Should -BeNullOrEmpty
+    }
+
+    It 'returns trimmed normal profile folder names' {
+        Get-WinPulseRestoreTargetUserName -userName 'alice' | Should -Be 'alice'
+        Get-WinPulseRestoreTargetUserName -userName '  tech.user  ' | Should -Be 'tech.user'
+    }
+
+    It 'rejects reserved or invalid profile folder names' {
+        { Get-WinPulseRestoreTargetUserName -userName '.' } | Should -Throw
+        { Get-WinPulseRestoreTargetUserName -userName '..' } | Should -Throw
+        { Get-WinPulseRestoreTargetUserName -userName 'a\b' } | Should -Throw
+        { Get-WinPulseRestoreTargetUserName -userName 'a:b' } | Should -Throw
+    }
+}
+
+Describe 'New-WinPulseRestorePlanObject' {
+    It 'recomputes restore totals from existing items only' {
+        $items = @(
+            [pscustomobject][ordered]@{ Exists = $true;  Bytes = 1024; TargetExists = $true }
+            [pscustomobject][ordered]@{ Exists = $true;  Bytes = 2048; TargetExists = $false }
+            [pscustomobject][ordered]@{ Exists = $false; Bytes = 4096; TargetExists = $true }
+        )
+
+        $plan = New-WinPulseRestorePlanObject -items $items -restoreRoot 'D:\RestoreRoot' -targetUserName '  restored.user  '
+
+        $plan.RestoreRoot | Should -Be 'D:\RestoreRoot'
+        $plan.RestoreAsUser | Should -Be 'restored.user'
+        $plan.Items.Count | Should -Be 3
+        $plan.ItemCount | Should -Be 3
+        $plan.ExistingCount | Should -Be 2
+        $plan.OverwriteCount | Should -Be 1
+        $plan.TotalBytes | Should -Be 3072
+        $plan.TotalSize | Should -Be '3.00 KB'
+    }
+
+    It 'returns zero totals for an empty item array' {
+        $plan = New-WinPulseRestorePlanObject -items @() -restoreRoot 'D:\RestoreRoot' -targetUserName $null
+
+        $plan.RestoreRoot | Should -Be 'D:\RestoreRoot'
+        $plan.RestoreAsUser | Should -BeNullOrEmpty
+        $plan.Items.Count | Should -Be 0
+        $plan.ItemCount | Should -Be 0
+        $plan.ExistingCount | Should -Be 0
+        $plan.OverwriteCount | Should -Be 0
+        $plan.TotalBytes | Should -Be 0
+        $plan.TotalSize | Should -Be '0 B'
+    }
+}
+
+Describe 'Get-WinPulseBackupExclusions' {
+    It 'keeps private keys and hives excluded by default while allowing certificate backup' {
+        $exclusions = Get-WinPulseBackupExclusions
+
+        $exclusions.PSObject.Properties['Files'] | Should -Not -BeNullOrEmpty
+        $exclusions.PSObject.Properties['Dirs'] | Should -Not -BeNullOrEmpty
+        $exclusions.PSObject.Properties['Note'] | Should -Not -BeNullOrEmpty
+
+        $files = @($exclusions.Files)
+        $dirs = @($exclusions.Dirs)
+        $combined = @($files + $dirs)
+
+        $files | Should -Contain '*.ppk'
+        $files | Should -Contain 'id_rsa'
+        $files | Should -Contain 'NTUSER.DAT'
+        $dirs | Should -Contain '.ssh'
+        $dirs | Should -Contain '.gnupg'
+
+        foreach ($certPattern in @('*.pfx', '*.p12', '*.pem', '*.cer', '*.crt')) {
+            $combined | Should -Not -Contain $certPattern
+        }
+    }
+
+    It 'keeps hives excluded but removes private key patterns when private keys are opted in' {
+        $exclusions = Get-WinPulseBackupExclusions -includePrivateKeys
+
+        $exclusions.PSObject.Properties['Files'] | Should -Not -BeNullOrEmpty
+        $exclusions.PSObject.Properties['Dirs'] | Should -Not -BeNullOrEmpty
+        $exclusions.PSObject.Properties['Note'] | Should -Not -BeNullOrEmpty
+
+        $files = @($exclusions.Files)
+        $dirs = @($exclusions.Dirs)
+        $combined = @($files + $dirs)
+
+        $files | Should -Contain 'NTUSER.DAT'
+        $files | Should -Not -Contain '*.ppk'
+        $files | Should -Not -Contain 'id_rsa'
+        $dirs | Should -Not -Contain '.ssh'
+        $dirs | Should -Not -Contain '.gnupg'
+
+        foreach ($certPattern in @('*.pfx', '*.p12', '*.pem', '*.cer', '*.crt')) {
+            $combined | Should -Not -Contain $certPattern
+        }
+    }
+}
+
+Describe 'Get-WinPulseTriageFindings' {
+    BeforeAll {
+        function New-WinPulseTriageScanFixture {
+            [CmdletBinding()]
+            param()
+
+            return [pscustomobject][ordered]@{
+                Health = [ordered]@{
+                    PendingReboot       = $false
+                    CriticalLast24Hours = 0
+                    BsodRecentCount     = 0
+                }
+                System = [ordered]@{
+                    Firmware = 'UEFI'
+                    DumpInfo = [ordered]@{
+                        MinidumpCount = 0
+                        FullDumpExists = $false
+                    }
+                }
+                Security = [ordered]@{
+                    SecureBootState = 'On'
+                    FirewallEnabled = $true
+                    Antivirus = [ordered]@{
+                        EffectiveRealtimeProtection = $true
+                    }
+                }
+                Network = [ordered]@{
+                    Internet = $true
+                }
+                Hardware = [ordered]@{
+                    Disks = @()
+                }
+                TPM = [ordered]@{
+                    Present = $true
+                    Win11Compatible = $true
+                    Version = '2.0'
+                }
+                Drivers = [ordered]@{
+                    Problematic = @()
+                    ProblemDevices = @()
+                }
+                Startup = [ordered]@{
+                    FailedAutoServices = @()
+                }
+                License = [ordered]@{
+                    ActivationStatus = 'Activated'
+                }
+                HardwareDetail = [ordered]@{
+                    Battery = [ordered]@{
+                        Present = $false
+                        HealthPercent = $null
+                    }
+                }
+                Temperatures = [ordered]@{
+                    CPUTempCelsius = $null
+                }
+                Printers = [ordered]@{
+                    StuckJobs = @()
+                }
+            }
+        }
+
+        function Assert-WinPulseFinding {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory = $true)]
+                [array]$Findings,
+
+                [Parameter(Mandatory = $true)]
+                [string]$Severity,
+
+                [Parameter(Mandatory = $true)]
+                [string]$MessagePattern
+            )
+
+            @($Findings | Where-Object {
+                $_.Severity -eq $Severity -and $_.Message -like $MessagePattern
+            }).Count | Should -BeGreaterThan 0
+        }
+    }
+
+    It 'returns no findings for a healthy core scan shape' {
+        $scan = New-WinPulseTriageScanFixture
+
+        $findings = @(Get-WinPulseTriageFindings -scan $scan)
+
+        $findings.Count | Should -Be 0
+    }
+
+    It 'reports expected severity and message matches for known problem signals' {
+        $scan = New-WinPulseTriageScanFixture
+        $scan.Security['FirewallEnabled'] = $false
+        $scan.Security['Antivirus']['EffectiveRealtimeProtection'] = $false
+        $scan.Health['PendingReboot'] = $true
+        $scan.Hardware['Disks'] = @(
+            [pscustomobject][ordered]@{ Drive = 'C:'; UsedPercent = 95 }
+        )
+        $scan.Drivers['Problematic'] = @(
+            [pscustomobject][ordered]@{ Name = 'Driver1' }
+            [pscustomobject][ordered]@{ Name = 'Driver2' }
+            [pscustomobject][ordered]@{ Name = 'Driver3' }
+            [pscustomobject][ordered]@{ Name = 'Driver4' }
+        )
+
+        $findings = @(Get-WinPulseTriageFindings -scan $scan)
+
+        Assert-WinPulseFinding -Findings $findings -Severity 'Critical' -MessagePattern '*Firewall*'
+        Assert-WinPulseFinding -Findings $findings -Severity 'Critical' -MessagePattern '*real-time*'
+        Assert-WinPulseFinding -Findings $findings -Severity 'Warning' -MessagePattern '*reboot*'
+        Assert-WinPulseFinding -Findings $findings -Severity 'Warning' -MessagePattern '*System drive C:*'
+        Assert-WinPulseFinding -Findings $findings -Severity 'Critical' -MessagePattern '*Problematic device drivers: 4*'
+    }
+
+    It 'does not throw on empty list sections and absent optional sub-objects' {
+        $scan = [pscustomobject][ordered]@{
+            Health = [ordered]@{
+                PendingReboot       = $false
+                CriticalLast24Hours = 0
+                BsodRecentCount     = 0
+            }
+            System = [ordered]@{
+                Firmware = 'UEFI'
+            }
+            Security = [ordered]@{
+                SecureBootState = 'On'
+                FirewallEnabled = $true
+                Antivirus = [ordered]@{
+                    EffectiveRealtimeProtection = $true
+                }
+            }
+            Network = [ordered]@{
+                Internet = $true
+            }
+            Hardware = [ordered]@{
+                Disks = @()
+            }
+            TPM = $null
+            Drivers = [ordered]@{
+                Problematic = @()
+                ProblemDevices = @()
+            }
+            Startup = [ordered]@{
+                FailedAutoServices = @()
+            }
+            License = $null
+            HardwareDetail = $null
+            Temperatures = $null
+            Printers = [ordered]@{
+                StuckJobs = @()
+            }
+        }
+
+        $findings = @()
+        { $findings = @(Get-WinPulseTriageFindings -scan $scan) } | Should -Not -Throw
+        $findings.Count | Should -BeGreaterOrEqual 0
     }
 }
