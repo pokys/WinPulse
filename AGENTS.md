@@ -371,6 +371,99 @@ past the gate (it will then start the interactive scan - kill it after the
 Out of scope: changing the elevation flow, persisting anything, rate limiting,
 storing the plaintext code anywhere in the repo besides this spec.
 
+## Work Queue - Batch 8 (queued 2026-06-16)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), ONE commit, do NOT
+push to main, do NOT bump the version. Report changes plus full test output.
+Stop and ask if anything is ambiguous.
+
+### Task C45 - Pester unit tests for pure parsers/builders
+
+Why: the recurring bug class in WinPulse is logic errors in pure functions that
+the smoke harness does not cover. Two recent shipped bugs prove it: (a) the tool
+catalog read keys with `$tool.PSObject.Properties['Urls']` on an `[ordered]`
+hashtable (always empty -> every tool download failed), and (b) the HTML report
+hit `.Count` on a single-object scan section under StrictMode. Both are pure
+logic a unit test would have caught. Add real unit tests for the pure functions.
+
+This INTRODUCES Pester deliberately (the smoke harness in
+`tools/Invoke-WinPulseSmokeTest.ps1` intentionally avoids it; leave that file
+alone). The new tests are a SEPARATE, dev-only project under a new `tests/`
+folder. They must NOT change `bootstrap.ps1` behavior at all.
+
+Hard constraint - loading functions without running the script: `bootstrap.ps1`
+is a single file whose top level runs the access gate, elevation, and menu, so
+you CANNOT dot-source it. Reuse the exact approach the smoke harness already
+uses: `Get-SmokeBootstrapFunctionText -BootstrapPath <path> -Name @(...)` in
+`tools/Invoke-WinPulseSmokeTest.ps1` (around line 132) extracts named function
+source via the AST. Either dot-source that helper from the test bootstrap or
+copy the same ~15-line AST extractor into a `tests/` helper. Extract only the
+functions under test (plus any pure dependency they call) and `Invoke-Expression`
+the extracted text into the test scope. Define `$script:WinPulsePaths` as a
+stub hashtable if any extracted function references it.
+
+Scope - first batch, genuinely pure / fixture-pure functions only (line numbers
+approximate, find by name):
+
+- `ConvertTo-ReadableSize` (~L223): `0 -> '0 B'`, `1536 -> '1.50 KB'`,
+  boundaries at 1KB/1MB/1GB/1TB, large TB value. Culture-invariant dot decimal.
+- `Get-WinPulseStateFromPercent` (~L261): default thresholds (warning 70,
+  critical 90) -> OK/Warning/Critical at representative percents; `-inverse`
+  flips the comparison (low values are Critical).
+- `Get-WinPulseObjectValue` (~L3595): the dual dictionary/pscustomobject reader.
+  Assert it returns the value for an existing key on BOTH an `[ordered]@{}` and a
+  `[pscustomobject]`, and `$null` for a missing key on both. This is the helper
+  that prevents the catalog-class bug - test it hard.
+- `Get-WinPulseToolCatalog` (~L8288): CATALOG-SHAPE REGRESSION TEST. For every
+  entry `$tool = (Get-WinPulseToolCatalog)[$key]`, assert
+  `$tool.Contains('Urls') -or $tool.Contains('Url')` AND the value is non-empty,
+  and `$tool.Contains('BinaryCandidates') -or $tool.Contains('Binary')`. Also
+  assert that reading via `.Contains()`/bracket yields a non-empty source list
+  while `$tool.PSObject.Properties['Urls']` is empty (encodes WHY bracket access
+  is required, so a regression to PSObject.Properties is caught).
+- `Get-WinPulseWingetExportPackageIds` (~L6880): write temp winget-export JSON
+  fixtures under `[IO.Path]::GetTempPath()` (clean up in a finally). Cover:
+  a normal export with several packages -> sorted, de-duplicated ids; duplicate
+  ids collapsed; missing `Sources`/`Packages` -> empty array; empty/whitespace
+  file -> empty array; malformed JSON -> does not crash the test harness (the
+  function uses `-ErrorAction Stop` on ConvertFrom-Json, so wrap the malformed
+  case in try/catch and assert it throws rather than returning garbage).
+- `New-WinPulseWingetInstallCommandText` (~L6943) and
+  `Get-WinPulseRobocopyFailedEntries` (~L5515): inspect each signature first,
+  then add focused tests - command-text builder against a couple of ids; the
+  robocopy parser against sample lines containing `ERROR` entries vs clean
+  output (assert it extracts the failed paths and returns empty on clean input).
+
+Deliverables:
+
+- `tests/WinPulse.Pure.Tests.ps1` - Pester 5.x test file (Describe/Context/It,
+  `Should -Be` / `-BeNullOrEmpty` / `-Throw`). Group by function.
+- `tests/Invoke-WinPulseTests.ps1` - a tiny runner: resolve repo root, verify
+  Pester >= 5 is available (if not, print the exact
+  `Install-Module -Name Pester -MinimumVersion 5.0 -Force -SkipPublisherCheck`
+  line and exit 1 - do NOT silently fall back to Pester 3.4, whose syntax
+  differs), then `Invoke-Pester` the tests with a non-zero exit on failure.
+- A short `tests/README.md` (how to run, Pester requirement).
+
+Acceptance:
+
+- `tests/Invoke-WinPulseTests.ps1` runs green on a machine with Pester 5.x.
+- Report the full Pester summary output.
+- "Does it bite" check (like C40): temporarily revert `Get-WinPulseObjectValue`
+  or the catalog read to the broken `PSObject.Properties` form OR break
+  `ConvertTo-ReadableSize`, confirm a test FAILS, then revert. Report that you
+  did this.
+- `bootstrap.ps1` is unchanged (the tests only READ it). `git diff` touches only
+  the new `tests/` files.
+
+Out of scope (note as a follow-up Batch, do NOT attempt now): functions that
+touch the filesystem or real machine state - the plan builders
+(`New-WinPulseBackupPlan`, `New-WinPulseRestorePlanObject`),
+`Get-WinPulseTriageFindings` (needs a full scan fixture), and anything calling
+`robocopy`/`winget`/CIM. Those need heavier fixtures and come later once the
+harness pattern is proven. Do NOT modify `bootstrap.ps1` or the smoke harness.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
