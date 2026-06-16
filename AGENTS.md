@@ -464,6 +464,88 @@ touch the filesystem or real machine state - the plan builders
 `robocopy`/`winget`/CIM. Those need heavier fixtures and come later once the
 harness pattern is proven. Do NOT modify `bootstrap.ps1` or the smoke harness.
 
+## Work Queue - Batch 9 (queued 2026-06-16)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), ONE commit, do NOT
+push to main, do NOT bump the version. Report changes plus full test output.
+Stop and ask if anything is ambiguous. PREREQUISITE: C45 (Batch 8) must be in
+already - this builds on the `tests/` Pester harness it created.
+
+### Task C46 - Pester unit tests, wave 2 (plan totals, exclusions, triage)
+
+Why: C45 covered the leaf pure helpers; this wave covers the next layer that is
+still pure-or-fixture-testable and carries real safety/logic weight. Extend the
+EXISTING `tests/WinPulse.Pure.Tests.ps1` (same harness, same AST extractor, same
+runner) - add Describe blocks, do not create a second test file. Add each
+function under test plus its pure dependencies to the `$functionNames` extraction
+list in the `BeforeAll`. `bootstrap.ps1` stays UNCHANGED (tests only read it).
+
+Functions and what to assert (find by name; line numbers approximate):
+
+- `Get-WinPulseRestoreTargetUserName` (~L7440): pure name validation.
+  `$null`/whitespace -> `$null`; a normal name -> trimmed; a name with
+  surrounding spaces -> trimmed; `.`, `..`, and a name containing an invalid
+  filename char (e.g. `a\b` or `a:b`) -> THROWS. (ASCII the test strings.)
+- `New-WinPulseRestorePlanObject` (~L7471): pure totals builder (deps:
+  `Get-WinPulseRestoreTargetUserName`, `ConvertTo-ReadableSize` - add both to the
+  extraction list). Build a hand-made `$items` array of
+  `[pscustomobject]`s with `Exists`, `Bytes`, `TargetExists` fields and assert
+  the returned plan: `ItemCount` = total items; `ExistingCount` = count where
+  `Exists`; `OverwriteCount` = count where `Exists -AND TargetExists`;
+  `TotalBytes` = sum of `Bytes` over `Exists` items only (a non-existing item
+  with Bytes must NOT be summed); `TotalSize` = `ConvertTo-ReadableSize` of that;
+  `RestoreRoot` echoes the input; `RestoreAsUser` echoes the validated name.
+  Also cover the empty-array case -> all counts 0, TotalBytes 0, '0 B'.
+- `Get-WinPulseBackupExclusions` (~L5150): SAFETY-BOUNDARY regression test - this
+  is the highest-value one. Default (no switch): the `Files` list MUST contain the
+  SSH/PuTTY key patterns (`*.ppk`, `id_rsa`) and the registry hive patterns
+  (`NTUSER.DAT`), and the `Dirs` list MUST contain `.ssh`/`.gnupg`. Certificate
+  patterns (`*.pfx`, `*.p12`, `*.pem`, `*.cer`, `*.crt`) MUST NOT appear anywhere
+  in Files/Dirs (they are deliberately INCLUDED in backups - a regression that
+  excludes them would silently drop certs). With `-includePrivateKeys`: hives
+  (`NTUSER.DAT`) still excluded, but the SSH/PuTTY key patterns are NO LONGER in
+  the Files list. Assert both shapes have the documented structure (Files/Dirs/
+  Note properties).
+- `Get-WinPulseTriageFindings` (~L2933): pure given a `$scan` (deps: extract
+  `Get-WinPulseObjectValue`). FIXTURE NOTE: build `$scan` the way `Invoke-CoreScan`
+  does - a `[pscustomobject]` whose SECTIONS (`Health`, `System`, `Security`,
+  `Network`, `Hardware`, `Drivers`, `TPM`, etc.) are `[ordered]@{}` hashtables,
+  and list sub-keys (e.g. `Drivers.Problematic`, `Hardware.Disks`) are real
+  ARRAYS `@(...)` (a single bare object would hit the StrictMode `.Count` trap -
+  that is realistic, the collectors build arrays). Cover at least:
+  - a HEALTHY scan (firewall on, realtime AV on, internet ok, no pending reboot,
+    empty driver/disk arrays, TPM 2.0 present+compatible) -> ZERO findings.
+  - a scan that trips specific rules and assert the matching finding by Severity
+    + a Message substring: Firewall OFF -> a `Critical` finding mentioning
+    'Firewall'; `Security.Antivirus.EffectiveRealtimeProtection = $false` ->
+    `Critical` 'real-time'; `Health.PendingReboot = $true` -> `Warning`
+    'reboot'; a C: disk at `UsedPercent = 95` -> `Warning` about the system
+    drive; `Drivers.Problematic` with 4 entries -> a `Critical` finding (the
+    `> 3` threshold) mentioning the count.
+  - DEGENERATE shape: sections present but list keys EMPTY arrays, and optional
+    sub-objects (`System.DumpInfo`, `TPM`) absent -> must NOT throw and returns a
+    sane (possibly empty) finding set. This guards the StrictMode null/Count traps.
+  Return value is an array of objects with `Severity` and `Message`; wrap calls
+  in `@(...)` before `.Count`.
+
+Deliverables: the new Describe blocks appended to
+`tests/WinPulse.Pure.Tests.ps1`, with the extraction list extended. Update
+`tests/README.md` only if the function list there is enumerated.
+
+Acceptance:
+
+- `tests/Invoke-WinPulseTests.ps1` runs green; report the full Pester summary.
+- "Does it bite" check: temporarily break ONE assertion's target (e.g. flip a
+  threshold in the test's expectation OR temporarily remove `*.pfx` from the
+  cert-exclusion negative check by asserting it IS excluded), confirm a test
+  FAILS, then revert. Report it.
+- `git diff` touches only `tests/` files; `bootstrap.ps1` unchanged.
+
+Out of scope (still deferred): `New-WinPulseBackupPlan` and the restore plan
+build that call `Get-WinPulsePathSize`/`Get-WinPulseBackupAppTargets` (need real
+temp-profile fixtures - a later batch); robocopy/winget/CIM-invoking functions.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
