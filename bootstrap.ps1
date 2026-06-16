@@ -12649,11 +12649,13 @@ function Show-WinPulseHiddenMenu {
         if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'P' {
-                # Open a no-trace shell: point PSReadLine history at a throwaway
-                # temp file (so the client's existing history is NOT loaded and
-                # arrow-up is empty), stop it persisting, and clear the buffer.
-                # Nothing typed touches the client's real history file.
-                $noTrace = '$p = [IO.Path]::GetTempFileName(); Import-Module PSReadLine -ErrorAction SilentlyContinue; Set-PSReadLineOption -HistorySavePath $p -HistorySaveStyle SaveNothing; try { [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory() } catch {}; Clear-History'
+                # Open a no-trace shell. PSReadLine options set during -Command
+                # get reset when the interactive engine starts, so apply them
+                # from the FIRST prompt call (which runs in the live session):
+                # redirect history to a throwaway temp file, stop persisting, and
+                # clear the buffer. Result: the client's real history file is
+                # neither read (arrow-up empty) nor written (nothing persists).
+                $noTrace = 'function global:prompt { if ($global:WPnt) { try { $p=[IO.Path]::GetTempFileName(); Set-PSReadLineOption -HistorySavePath $p -HistorySaveStyle SaveNothing; [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory() } catch {}; Clear-History -ErrorAction SilentlyContinue; $global:WPnt=$false }; ''PS '' + $pwd.Path + ''> '' }; $global:WPnt=$true'
                 $argLine = '-NoProfile -NoExit -Command "{0}"' -f $noTrace
                 try { Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine }
                 catch { Write-Host ('  Launch failed: {0}' -f $_.Exception.Message) -ForegroundColor Red }
