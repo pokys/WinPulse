@@ -12642,14 +12642,20 @@ function Show-WinPulseHiddenMenu {
         Clear-Host
         Write-Host '  Main > (hidden)' -ForegroundColor DarkGray
         $choice = Select-WinPulseMenuItem -Title 'Hidden' -Items @(
-            @{ Label = 'Open PowerShell (no profile)'; Key = 'P'; Hint = 'New window' },
+            @{ Label = 'Open PowerShell (no history)'; Key = 'P'; Hint = 'Leaves no trace' },
             @{ Separator = $true },
             @{ Label = 'Back';                         Key = '0'; Color = 'DarkGray' }
         )
         if (-not $choice -or $choice -eq '0') { return }
         switch ($choice) {
             'P' {
-                try { Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile' }
+                # Open a no-trace shell: point PSReadLine history at a throwaway
+                # temp file (so the client's existing history is NOT loaded and
+                # arrow-up is empty), stop it persisting, and clear the buffer.
+                # Nothing typed touches the client's real history file.
+                $noTrace = '$p = [IO.Path]::GetTempFileName(); Import-Module PSReadLine -ErrorAction SilentlyContinue; Set-PSReadLineOption -HistorySavePath $p -HistorySaveStyle SaveNothing; try { [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory() } catch {}; Clear-History'
+                $argLine = '-NoProfile -NoExit -Command "{0}"' -f $noTrace
+                try { Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine }
                 catch { Write-Host ('  Launch failed: {0}' -f $_.Exception.Message) -ForegroundColor Red }
                 Write-Host ''; Wait-WinPulseKey
             }
