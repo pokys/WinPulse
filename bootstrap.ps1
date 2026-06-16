@@ -59,6 +59,12 @@ if ($modeOverride) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell 5.1 negotiates TLS 1.0 by default; many vendor download
+# hosts (oo-software.com, softwareok.com, ...) now require TLS 1.2+, so a plain
+# Invoke-WebRequest fails before any data transfers. Force TLS 1.2 once here so
+# every download path benefits. 3072 = Tls12 (kept numeric for old .NET).
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+
 # WinPulse UI is English. Render numbers culture-invariant (dot decimal) so the
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
@@ -8518,11 +8524,37 @@ function Start-WinPulseNirSoftTool {
         Write-Host '  Antivirus may have removed the download (known NirSoft false positive).' -ForegroundColor Yellow
     }
     if (-not [string]::IsNullOrWhiteSpace($infoUrl)) {
-        Write-Host ('  Opening the official download page: {0}' -f $infoUrl) -ForegroundColor Gray
-        $opened = $false
-        try { Start-Process -FilePath 'msedge.exe' -ArgumentList ('"{0}"' -f $infoUrl); $opened = $true } catch { $opened = $false }
-        if (-not $opened) { try { Start-Process -FilePath $infoUrl } catch { } }
+        Write-Host ('  Opening the official download page (private window): {0}' -f $infoUrl) -ForegroundColor Gray
+        Start-WinPulsePrivateUrl -Url $infoUrl | Out-Null
     }
+}
+
+function Start-WinPulsePrivateUrl {
+    # Open a URL WITHOUT leaving browser history on a client station: prefer an
+    # Edge InPrivate window, then Chrome Incognito. If neither launches, print
+    # the URL instead of opening a normal (history-leaving) browser. Returns
+    # $true if a private window was launched.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    foreach ($browser in @(
+        @{ Exe = 'msedge.exe'; Flag = '--inprivate' },
+        @{ Exe = 'chrome.exe'; Flag = '--incognito' }
+    )) {
+        try {
+            Start-Process -FilePath $browser.Exe -ArgumentList $browser.Flag, ('"{0}"' -f $Url) -ErrorAction Stop
+            return $true
+        }
+        catch {
+        }
+    }
+
+    Write-Host ('  No private-mode browser found. Open this URL manually in a private window:' ) -ForegroundColor Yellow
+    Write-Host ('    {0}' -f $Url) -ForegroundColor White
+    return $false
 }
 
 function Show-WinPulseNirSoftMenu {
@@ -9083,8 +9115,8 @@ function Start-WinPulseTechToolStore {
         return
     }
 
-    Write-Host 'Opening official TechToolStore page for manual download...' -ForegroundColor Cyan
-    Start-Process 'https://www.carifred.com/tech_tool_store/'
+    Write-Host 'Opening official TechToolStore page (private window) for manual download...' -ForegroundColor Cyan
+    Start-WinPulsePrivateUrl -Url 'https://www.carifred.com/tech_tool_store/' | Out-Null
 }
 
 function Start-WinPulseNirLauncher {
@@ -9107,8 +9139,8 @@ function Start-WinPulseNirLauncher {
         return
     }
 
-    Write-Host 'NirLauncher launch failed (portable + winget fallback). Opening official page...' -ForegroundColor Yellow
-    Start-Process 'https://www.nirsoft.net/launcher/'
+    Write-Host 'NirLauncher launch failed (portable + winget fallback). Opening official page (private window)...' -ForegroundColor Yellow
+    Start-WinPulsePrivateUrl -Url 'https://www.nirsoft.net/launcher/' | Out-Null
 }
 
 function Start-WinPulseOOShutUp {
@@ -11299,14 +11331,33 @@ function Invoke-WinPulseCpuStressTest {
 
     $until = (Get-Date).AddSeconds($durationseconds)
     $jobs = @()
+
+    # Capture Ctrl+C as input so cancelling the test does not terminate the whole
+    # script. Restored in finally. Esc also cancels.
+    $prevCtrlC = $false
+    $ctrlCInput = $false
+    try { $prevCtrlC = [Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput = $true; $ctrlCInput = $true } catch { $ctrlCInput = $false }
+
     try {
         for ($i = 0; $i -lt $workers; $i++) {
             $jobs += Start-Job -ScriptBlock $scriptBlock -ArgumentList $until
         }
 
-        Write-Host ('Started {0} workers. Press Ctrl+C only if required.' -f $workers) -ForegroundColor Cyan
+        Write-Host ('Started {0} workers. Press Ctrl+C or Esc to stop early.' -f $workers) -ForegroundColor Cyan
+        $cancelled = $false
         while ((Get-Date) -lt $until) {
             Start-Sleep -Seconds 2
+
+            if ($ctrlCInput) {
+                while ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ((($key.Modifiers -band [ConsoleModifiers]::Control) -and $key.Key -eq [ConsoleKey]::C) -or $key.Key -eq [ConsoleKey]::Escape) {
+                        $cancelled = $true
+                    }
+                }
+            }
+            if ($cancelled) { Write-Host 'Stress test cancelled.' -ForegroundColor Yellow; break }
+
             $cpu = $null
             try {
                 $perf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop
@@ -11325,11 +11376,15 @@ function Invoke-WinPulseCpuStressTest {
             }
         }
 
-        $jobs | Wait-Job | Out-Null
-        Write-Host 'CPU stress test complete.' -ForegroundColor Green
+        if (-not $cancelled) {
+            $jobs | Wait-Job | Out-Null
+            Write-Host 'CPU stress test complete.' -ForegroundColor Green
+        }
     }
     finally {
+        $jobs | Stop-Job -ErrorAction SilentlyContinue
         $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        if ($ctrlCInput) { try { [Console]::TreatControlCAsInput = $prevCtrlC } catch {} }
     }
 }
 
@@ -12208,7 +12263,7 @@ function Show-WinPulseWinGetMissing {
             catch { Write-Host ('  Could not open Store: {0}' -f $_.Exception.Message) -ForegroundColor Yellow; Wait-WinPulseKey }
         }
         'G' {
-            try { Start-Process 'https://github.com/microsoft/winget-cli/releases/latest' }
+            try { Start-WinPulsePrivateUrl -Url 'https://github.com/microsoft/winget-cli/releases/latest' | Out-Null }
             catch { Write-Host ('  Could not open browser: {0}' -f $_.Exception.Message) -ForegroundColor Yellow; Wait-WinPulseKey }
         }
         default { }
