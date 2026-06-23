@@ -779,6 +779,112 @@ Out of scope: changing the verify override logic itself, restore-side counts
 sampling, dry-run sizing, anything in the copy engine beyond reading robocopy's
 own summary.
 
+## Work Queue - Batch 12 (queued 2026-06-23)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), ONE commit, do NOT
+push to main, do NOT bump the version, keep `bootstrap.ps1` ASCII-only /
+StrictMode-safe / PS 5.1, bracket notation for hashtable access. Report changes
+plus full test output. Stop and ask if anything is ambiguous.
+
+### Task C50 - Make the startup update check asynchronous (zero added startup time)
+
+Why: C47 added a startup "Update available" check, but it runs SYNCHRONOUSLY on
+the critical path - `Show-WinPulseUpdateNotice` is called right after the banner
+and BEFORE `Invoke-CoreScan`, and it does a blocking `Invoke-WebRequest
+-TimeoutSec 3`. Online that is a few hundred ms of serial latency; offline / behind
+a proxy / with slow DNS it is a flat ~3s tax before the scan even starts, on an
+already slow startup. Move the network call OFF the critical path so it overlaps
+the scan (which already takes seconds) and adds effectively zero wall-clock time.
+
+Current shape (read before changing):
+- `Get-WinPulseLatestPublishedVersion` - does the ranged `Invoke-WebRequest`
+  (`Range: bytes=0-8191`, `-TimeoutSec 3`, TLS 1.2 via `-bor 3072`) and regexes
+  out the version string; returns `$null` on any failure.
+- `Compare-WinPulseVersion -current -latest` - pure, total comparator.
+- `Show-WinPulseUpdateNotice -current` - the synchronous wrapper that honors
+  `$env:WINPULSE_SKIP_UPDATE_CHECK`, calls the two above, and `Write-Host`s the
+  yellow line. This is what is wired into the `Triage` and `Repair` branches of
+  `Invoke-WinPulseMode` (right after the `WinPulse {version}` banner line).
+- `Show-WinPulseMainMenu` - the main menu loop (clears the screen each iteration).
+
+Design constraints:
+- The web call must run in a background RUNSPACE, not `Start-Job` (a new process
+  is heavyweight and defeats the point). Use `[powershell]::Create()` +
+  `BeginInvoke()`. The runspace scriptblock must be SELF-CONTAINED (it cannot see
+  the script's functions): inline the TLS-1.2 set, the ranged `Invoke-WebRequest`,
+  and the version regex directly, all wrapped so it can never throw; it returns the
+  latest version string or `$null`. Keep this inline logic byte-for-byte equivalent
+  to `Get-WinPulseLatestPublishedVersion` (same URL, range, timeout, regex) so the
+  two do not drift - add a comment on each pointing at the other.
+- It must be impossible for this to crash or hang startup. Every path wrapped in
+  try/catch; the PowerShell instance and its runspace ALWAYS disposed in a
+  `finally`; no unbounded waits.
+- A flash-then-erase is NOT acceptable: because the menu `Clear-Host`s, you cannot
+  just `Write-Host` the notice after the scan and call the menu. The notice must be
+  shown PERSISTENTLY. Stash the result in a script-scope field (e.g.
+  `$script:WinPulseUpdateAvailable = '<latest>'` or `$null`) and have
+  `Show-WinPulseMainMenu` render a single yellow line inside its header (under the
+  `Main Menu` breadcrumb) on every loop iteration when it is set. The Repair path
+  reuses the same script-scope field if its flow shows the menu; if Repair does not
+  render a persistent header, a one-line print after its scan plus the existing
+  flow is acceptable - keep Repair changes minimal and say what you did.
+
+Scope:
+1. `Start-WinPulseUpdateCheckAsync -current <ver>`: returns immediately with
+   `$null` when `$env:WINPULSE_SKIP_UPDATE_CHECK` is set (so smoke/offline never
+   spin a runspace). Otherwise create the runspace, `BeginInvoke()` the
+   self-contained scriptblock, and return a small handle object
+   `[pscustomobject]@{ PowerShell = $ps; Async = $async }` (or `$null` if creation
+   threw).
+2. `Complete-WinPulseUpdateNotice -handle <h> -current <ver>`: if `$handle` is
+   `$null`, return. Otherwise bounded-wait for completion up to a small cap (e.g.
+   `$handle.Async.AsyncWaitHandle.WaitOne(250)`) - by the time the scan finishes it
+   is almost always already done, so this is normally instant; the cap protects the
+   rare slow case so we never re-introduce a multi-second block. If completed,
+   `EndInvoke()` to get the latest string, then
+   `if (Compare-WinPulseVersion -current $current -latest $latest) {
+   $script:WinPulseUpdateAvailable = $latest }`. ALWAYS dispose the PowerShell
+   instance (and close/dispose the runspace) in a `finally`; if not completed
+   within the cap, give up silently (still dispose). Never throw.
+3. Wire-up in `Invoke-WinPulseMode`:
+   - `Triage`: replace the synchronous `Show-WinPulseUpdateNotice` call. Before
+     `Invoke-CoreScan`: `$updateHandle = Start-WinPulseUpdateCheckAsync -current
+     $script:WinPulseVersion`. After `$scan = Invoke-CoreScan` and before
+     `Show-WinPulseMainMenu`: `Complete-WinPulseUpdateNotice -handle $updateHandle
+     -current $script:WinPulseVersion`.
+   - `Repair`: same pattern around its `Invoke-CoreScan`.
+4. `Show-WinPulseMainMenu`: after the `Main Menu` breadcrumb line, if
+   `$script:WinPulseUpdateAvailable` is a non-empty string, `Write-Host` one yellow
+   line: `  Update available: {0} (you have {1}) - re-run the one-liner to update.`
+   with `$script:WinPulseUpdateAvailable` and `$script:WinPulseVersion`. Keep the
+   exact wording from C47.
+5. Initialize `$script:WinPulseUpdateAvailable = $null` near the other script-scope
+   state. Remove `Show-WinPulseUpdateNotice` if it has no remaining callers (grep
+   to confirm) OR keep it only if something still uses it - do not leave a dead
+   function.
+
+Acceptance:
+- Parser + ASCII clean; `git diff --check` clean.
+- All five non-elevated smoke modes exit 0 with NO network call and NO runspace
+  spun (the env var short-circuits `Start-WinPulseUpdateCheckAsync` before it
+  creates anything); confirm and report.
+- `tests/Invoke-WinPulseTests.ps1` green (the pure `Compare-WinPulseVersion` tests
+  still cover the comparison; do NOT unit-test the runspace/network). Report the
+  summary.
+- Manual timing check: with `WINPULSE_SKIP_UPDATE_CHECK` UNSET and the network
+  reachable, confirm the runspace path does not block - i.e. startup proceeds into
+  the scan without waiting on the web call (describe what you observed; you do not
+  need exact millisecond numbers). Then simulate offline (bogus host in the inline
+  block, temporarily) and confirm startup is NOT delayed by ~3s and shows no notice
+  / no error. Revert the bogus host. Report both.
+- The owner verifies the persistent menu notice visually before any merge - do not
+  screenshot it yourself.
+
+Out of scope: changing the URL/source of the version (still raw `main`), release
+tags, the comparator logic, the access gate, anything outside the update-notice
+path. Do not make the check run on the non-interactive modes.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
