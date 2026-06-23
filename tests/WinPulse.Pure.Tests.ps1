@@ -68,7 +68,12 @@ BeforeAll {
         'Get-WinPulseRestoreTargetUserName',
         'New-WinPulseRestorePlanObject',
         'Get-WinPulseBackupExclusions',
-        'Get-WinPulseTriageFindings'
+        'Get-WinPulseTriageFindings',
+        'Get-WinPulseExtendedPath',
+        'ConvertFrom-WinPulseExtendedPath',
+        'Get-WinPulseFilteredFiles',
+        'Measure-WinPulseFolderFiltered',
+        'Get-WinPulseCopyVerification'
     )
 
     foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $script:BootstrapPath -Name $functionNames)) {
@@ -590,5 +595,52 @@ Describe 'Get-WinPulseTriageFindings' {
         $findings = @()
         { $findings = @(Get-WinPulseTriageFindings -scan $scan) } | Should -Not -Throw
         $findings.Count | Should -BeGreaterOrEqual 0
+    }
+}
+
+Describe 'Get-WinPulseCopyVerification' {
+    It 'uses known source counts without enumerating the source path' {
+        $root = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-copyverify-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $destination = Join-Path -Path $root -ChildPath 'Destination'
+        $missingSource = Join-Path -Path $root -ChildPath 'MissingSource'
+        try {
+            New-Item -Path $destination -ItemType Directory -Force | Out-Null
+            [IO.File]::WriteAllBytes((Join-Path -Path $destination -ChildPath 'copied.bin'), [byte[]](1, 2, 3, 4))
+
+            $result = Get-WinPulseCopyVerification -source $missingSource -destination $destination -knownSourceFiles 1 -knownSourceBytes 4 -hashSampleSize 0
+
+            $result.SourceFiles | Should -Be 1
+            $result.SourceBytes | Should -Be 4
+            $result.DestFiles | Should -Be 1
+            $result.DestBytes | Should -Be 4
+            $result.Status | Should -Be 'Verified'
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'measures a real source fixture when known counts are absent' {
+        $root = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-copyverify-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $source = Join-Path -Path $root -ChildPath 'Source'
+        $destination = Join-Path -Path $root -ChildPath 'Destination'
+        try {
+            New-Item -Path $source -ItemType Directory -Force | Out-Null
+            New-Item -Path $destination -ItemType Directory -Force | Out-Null
+            [IO.File]::WriteAllBytes((Join-Path -Path $source -ChildPath 'keep.bin'), [byte[]](10, 11, 12))
+            [IO.File]::WriteAllBytes((Join-Path -Path $source -ChildPath 'skip.tmp'), [byte[]](20, 21, 22, 23))
+            [IO.File]::WriteAllBytes((Join-Path -Path $destination -ChildPath 'keep.bin'), [byte[]](10, 11, 12))
+
+            $result = Get-WinPulseCopyVerification -source $source -destination $destination -excludeFiles @('*.tmp') -hashSampleSize 0
+
+            $result.SourceFiles | Should -Be 1
+            $result.SourceBytes | Should -Be 3
+            $result.DestFiles | Should -Be 1
+            $result.DestBytes | Should -Be 3
+            $result.Status | Should -Be 'Verified'
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

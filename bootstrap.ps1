@@ -5834,10 +5834,22 @@ function Get-WinPulseCopyVerification {
 
         [string[]]$excludeDirs = @(),
 
-        [int]$hashSampleSize = 0
+        [int]$hashSampleSize = 0,
+
+        [Nullable[int]]$knownSourceFiles = $null,
+
+        [Nullable[double]]$knownSourceBytes = $null
     )
 
-    $src = Measure-WinPulseFolderFiltered -path $source -excludeFiles $excludeFiles -excludeDirs $excludeDirs
+    if ($null -ne $knownSourceFiles -and $null -ne $knownSourceBytes) {
+        $src = [pscustomobject][ordered]@{
+            Files = [int]$knownSourceFiles
+            Bytes = [double]$knownSourceBytes
+        }
+    }
+    else {
+        $src = Measure-WinPulseFolderFiltered -path $source -excludeFiles $excludeFiles -excludeDirs $excludeDirs
+    }
     $dst = Measure-WinPulseFolderFiltered -path $destination
 
     $status = 'Verified'
@@ -6618,6 +6630,10 @@ function Invoke-WinPulseMigrationBackup {
         $itemLine = if ($dryRun) { '  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder } else { '  {0} {1}\{2} ({3})...' -f $verb, $item.UserName, $item.Folder, $item.Size }
         Write-Host $itemLine -ForegroundColor Gray
         $itemExcludeFiles = @($exclusions.Files) + @($item.ExtraExcludeFiles)
+        $knownSourceMeasure = $null
+        if (-not $dryRun -and $item.Source.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
+            $knownSourceMeasure = Measure-WinPulseFolderFiltered -path $item.Source -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs
+        }
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -multiThread 8 -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
@@ -6631,7 +6647,12 @@ function Invoke-WinPulseMigrationBackup {
 
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
-            $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
+            if ($null -ne $knownSourceMeasure) {
+                $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize -knownSourceFiles $knownSourceMeasure.Files -knownSourceBytes $knownSourceMeasure.Bytes
+            }
+            else {
+                $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
+            }
             if ($verify.Status -eq 'Mismatch' -and -not $rc.Partial) {
                 Write-Host ('    verification mismatch: {0}' -f $verify.Note) -ForegroundColor Yellow
                 Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message ('{0}\{1} verification mismatch: {2}' -f $item.UserName, $item.Folder, $verify.Note)
