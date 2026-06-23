@@ -69,7 +69,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # dashboard and reports are consistent regardless of the machine locale.
 try { [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture } catch { }
 
-$script:WinPulseVersion = '0.22.0-20260623'
+$script:WinPulseVersion = '0.21.0-20260623'
 # Soft startup gate. SHA256 of the access code; regenerate with:
 #   $sha=[Security.Cryptography.SHA256]::Create()
 #   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
@@ -271,33 +271,6 @@ function Compare-WinPulseVersion {
     return ($latestDate -gt $currentDate)
 }
 
-function Get-WinPulseLatestPublishedVersion {
-    [CmdletBinding()]
-    param()
-
-    # Keep the network/version logic byte-equivalent with Start-WinPulseUpdateCheckAsync.
-    try {
-        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
-
-        $publishedUrl = 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
-        $headers = @{ Range = 'bytes=0-8191' }
-        $response = Invoke-WebRequest -Uri $publishedUrl -UseBasicParsing -TimeoutSec 3 -Headers $headers -ErrorAction Stop
-        $content = [string]$response.Content
-        if ([string]::IsNullOrWhiteSpace($content)) {
-            return $null
-        }
-
-        $match = [regex]::Match($content, '\$script:WinPulseVersion\s*=\s*''([^'']+)''')
-        if ($match.Success) {
-            return $match.Groups[1].Value
-        }
-    }
-    catch {
-    }
-
-    return $null
-}
-
 function Start-WinPulseUpdateCheckAsync {
     [CmdletBinding()]
     param(
@@ -315,15 +288,32 @@ function Start-WinPulseUpdateCheckAsync {
         $runspace.Open()
         $ps = [powershell]::Create()
         $ps.Runspace = $runspace
-        # Keep this scriptblock's network/version logic byte-equivalent with Get-WinPulseLatestPublishedVersion.
+        # Self-contained: fetch only the first 8 KB of the published script and read
+        # its version line. The Range MUST go through HttpWebRequest.AddRange -
+        # Windows PowerShell 5.1 throws if a 'Range' header is set via the headers
+        # dictionary on Invoke-WebRequest (Range is a restricted header).
         [void]$ps.AddScript({
             try {
                 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
 
                 $publishedUrl = 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
-                $headers = @{ Range = 'bytes=0-8191' }
-                $response = Invoke-WebRequest -Uri $publishedUrl -UseBasicParsing -TimeoutSec 3 -Headers $headers -ErrorAction Stop
-                $content = [string]$response.Content
+                $request = [Net.HttpWebRequest]::Create($publishedUrl)
+                $request.Timeout = 3000
+                $request.ReadWriteTimeout = 3000
+                $request.AddRange(0, 8191)
+
+                $content = $null
+                $response = $request.GetResponse()
+                $reader = $null
+                try {
+                    $reader = New-Object IO.StreamReader($response.GetResponseStream())
+                    $content = $reader.ReadToEnd()
+                }
+                finally {
+                    if ($reader) { $reader.Dispose() }
+                    $response.Close()
+                }
+
                 if ([string]::IsNullOrWhiteSpace($content)) {
                     return $null
                 }
@@ -381,12 +371,10 @@ function Complete-WinPulseUpdateNotice {
             $results = $handle.PowerShell.EndInvoke($handle.Async)
             foreach ($result in $results) {
                 if ($null -eq $result) { continue }
-                $value = $result
-                if ($result -is [System.Management.Automation.PSObject]) {
-                    $value = $result.BaseObject
-                }
-
-                $text = [string]$value
+                # Cast the value directly. Do NOT route through .BaseObject: a plain
+                # string from EndInvoke reports -is [PSObject] True yet its
+                # .BaseObject is $null, which silently blanks the version.
+                $text = [string]$result
                 if (-not [string]::IsNullOrWhiteSpace($text)) {
                     $latest = $text
                     break
