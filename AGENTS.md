@@ -546,6 +546,145 @@ Out of scope (still deferred): `New-WinPulseBackupPlan` and the restore plan
 build that call `Get-WinPulsePathSize`/`Get-WinPulseBackupAppTargets` (need real
 temp-profile fixtures - a later batch); robocopy/winget/CIM-invoking functions.
 
+## Work Queue - Batch 10 (queued 2026-06-23)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), do NOT push to main,
+do NOT bump the version, keep `bootstrap.ps1` ASCII-only / StrictMode-safe /
+PS 5.1, bracket notation for hashtable access. Tasks are INDEPENDENT, ONE commit
+per task. Report changes plus full test output. Stop and ask if anything is
+ambiguous.
+
+### Task C47 - Startup "newer version available" check (best-effort, non-blocking)
+
+Why: WinPulse runs are HEAD of `main` via `irm | iex`, but a technician who saved
+a local copy (or an elevated relaunch from a temp file) never learns it is stale.
+Add a cheap startup check that compares the running version against the version
+in the published `main` script and prints a one-line notice. This is a courtesy
+signal only - it must NEVER block, prompt, auto-update, or change the exit code.
+
+Context: `$script:WinPulseVersion` (~L72) is `'MAJOR.MINOR.PATCH-YYYYMMDD'`. The
+published raw URL is already hardcoded at the elevation call site (~L13685):
+`https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1`. The
+startup banner prints `WinPulse {version}` in the `Triage`/`Repair` branches of
+`Invoke-WinPulseMode` (~L13468/L13478) right before `Invoke-CoreScan`.
+
+Scope:
+
+1. New function `Get-WinPulseLatestPublishedVersion` (place it near the other
+   network/util helpers): downloads ONLY enough of the published script to read
+   its `$script:WinPulseVersion` line and returns that string, or `$null` on any
+   failure. Hard requirements:
+   - Wrap everything in try/catch; return `$null` on ANY error (offline, DNS,
+     TLS, 404, parse miss). It must be impossible for this to throw.
+   - Set `[Net.ServicePointManager]::SecurityProtocol` to include TLS 1.2 the
+     same way the existing tool-download path does (grep for the existing
+     `SecurityProtocol` usage and match it - do NOT introduce a second pattern).
+   - Use a short timeout (e.g. `Invoke-WebRequest -UseBasicParsing -TimeoutSec 3`)
+     so a slow/blocked network cannot stall startup. Read the body and regex out
+     `\$script:WinPulseVersion\s*=\s*'([^']+)'`; return the capture or `$null`.
+   - Do NOT use `Invoke-Expression` and do NOT dot-source the downloaded text
+     (project non-goal + safety boundary). Parse the version string textually
+     ONLY.
+2. New pure helper `Compare-WinPulseVersion -current <string> -latest <string>`
+   returning `$true` when `latest` is strictly newer. Compare the numeric
+   `MAJOR.MINOR.PATCH` first (split on `.`, cast to `[int]`, guard non-numeric ->
+   treat as not-newer), then fall back to the `-YYYYMMDD` date suffix only when
+   the numeric parts tie. Must be total: any malformed input returns `$false`.
+   This is the unit-test target (see below).
+3. Wire a single best-effort call into the interactive startup path only (the
+   `Triage` and `Repair` branches, right after the `WinPulse {version}` banner
+   line, BEFORE `Invoke-CoreScan`). If `Compare-WinPulseVersion` says newer:
+   `Write-Host ('  Update available: {0} (you have {1}) - re-run the one-liner to update.' -f $latest, $current) -ForegroundColor Yellow`
+   then a blank line. Skip the check entirely for the non-interactive modes
+   (Migration*/W11Readiness/ExportBundle) so scripted/smoke runs make no network
+   call. Honor a `WINPULSE_SKIP_UPDATE_CHECK` env var (set -> skip) so the smoke
+   harness and offline techs can suppress it; set that env var in
+   `tools/Invoke-WinPulseSmokeTest.ps1` next to the existing
+   `WINPULSE_ACCESS_GRANTED` line (and remove it in the same cleanup block).
+4. Add Pester coverage for `Compare-WinPulseVersion` in the EXISTING
+   `tests/WinPulse.Pure.Tests.ps1` (same AST-extraction harness; add the function
+   name to the extraction list): newer patch, newer minor, newer major, newer
+   date suffix with equal numeric, EQUAL versions -> `$false`, OLDER -> `$false`,
+   malformed/empty inputs -> `$false`. Do NOT unit-test the network function.
+
+Acceptance:
+- Parser + ASCII clean; `git diff --check` clean.
+- All five non-elevated smoke modes exit 0 with NO network call and NO update
+  line (the env var suppresses it); confirm and report.
+- `tests/Invoke-WinPulseTests.ps1` green; report the Pester summary.
+- "Does it bite" check: temporarily make `Compare-WinPulseVersion` return `$true`
+  for equal versions, confirm a test FAILS, then revert. Report it.
+- Manually confirm the offline path is silent: temporarily point the function at
+  a bogus host (or unplug), confirm `Get-WinPulseLatestPublishedVersion` returns
+  `$null` and startup proceeds with no notice and no error. Report what you saw.
+
+Out of scope: release tags / GitHub API (a later task may switch the source to a
+tags endpoint - keep `Get-WinPulseLatestPublishedVersion` the single seam so that
+swap is local), any auto-update or download, changing the exit code, prompting.
+
+### Task C48 - Live/remote migration: reuse planned source counts in verification
+
+Why: `Get-WinPulseCopyVerification` (~L5733) re-enumerates the SOURCE a second
+time (`Measure-WinPulseFolderFiltered -path $source`) after the copy. For a
+local source that is cheap, but for a remote SMB source
+(`\\HOST\C$\Users\...`, the Live migration path) it walks the whole tree over the
+wire a second time. The source file/byte counts were already produced once during
+the copy. Thread them through so the remote source is enumerated once.
+
+IMPORTANT semantics gotcha - read before coding: the verification's source
+measurement applies the COPY EXCLUSIONS (`-excludeFiles`/`-excludeDirs` via
+`Get-WinPulseFilteredFiles`). The backup PLAN's per-item `Bytes` come from
+`Get-WinPulsePathSize` / `Measure-WinPulseBackupPlanItem`, which use DIFFERENT
+exclusion semantics. So you must NOT naively feed the plan's `Bytes` into
+verification - that would change what "Verified" means and could mask a real
+mismatch. The correct precomputed counts are the FILTERED source measurement
+(`Measure-WinPulseFolderFiltered` with the same exclusions), captured once at copy
+time. Confirm this by reading both call sites (backup ~L6551, restore ~L7820) and
+the Live flow before changing anything.
+
+Scope:
+
+1. Add two optional params to `Get-WinPulseCopyVerification`:
+   `[Nullable[int]]$knownSourceFiles = $null` and
+   `[Nullable[double]]$knownSourceBytes = $null` (or a single
+   `[object]$knownSource` carrying both - your call, but keep it explicit and
+   StrictMode-safe). When BOTH are supplied (non-null), skip the
+   `Measure-WinPulseFolderFiltered -path $source` call and use the provided
+   numbers as `$src.Files`/`$src.Bytes`. When either is absent, behave EXACTLY as
+   today (measure the source). The hash-sampling branch still enumerates the
+   source on its own and is unaffected - leave it alone; it is opt-in and only
+   used when `-hashSampleSize > 0`.
+2. At the Live/remote copy site, capture the filtered source measurement that the
+   copy already needs (or compute it once with `Measure-WinPulseFolderFiltered`
+   using the SAME exclusions the copy used) and pass it into
+   `Get-WinPulseCopyVerification` via the new params ONLY for remote/UNC sources.
+   Detect "remote" by the source being a UNC path (starts with `\\`) - do not add
+   a new flag if a path test suffices; if the Live flow already tracks a
+   `SourceHost`/remote marker, reuse that instead. For LOCAL sources, change
+   nothing about the call (keep re-measuring; it is cheap and avoids any risk).
+3. Do NOT change the returned object shape or any field name - reports and
+   manifests consume `SourceFiles`/`SourceBytes`/`Status`/`Note` and the two
+   report exporters must stay compatible. The only behavioral change is WHERE the
+   source numbers come from for remote sources.
+
+Acceptance:
+- Parser + ASCII clean; `git diff --check` clean.
+- All five non-elevated smoke modes exit 0 (the smoke harness drives a real
+  local backup+restore on a temp fixture - those must still verify Verified with
+  the unchanged local path). Report the output.
+- Add/extend Pester coverage in `tests/WinPulse.Pure.Tests.ps1` for the new
+  override: with `knownSourceFiles`/`knownSourceBytes` supplied, the function
+  returns those as `SourceFiles`/`SourceBytes` WITHOUT touching the source path
+  (point `-source` at a non-existent path to prove it was not enumerated), and
+  with them absent it still measures a real temp fixture. Keep `-hashSampleSize 0`
+  in these tests. Report the Pester summary.
+- "Does it bite" check: temporarily ignore the override (always re-measure),
+  confirm the new "did not enumerate source" test FAILS, then revert. Report it.
+
+Out of scope: implementing remote VSS / locked-file handling, changing the copy
+engine, the dry-run sizing path, hash sampling behavior, report layout.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
