@@ -827,6 +827,8 @@ if (-not (Test-SmokeIsAdmin) -and $Mode -notin @('MigrationBackup', 'MigrationRe
 $powershell = (Get-Command -Name powershell.exe -ErrorAction Stop).Source
 # Bypass the soft startup gate so smoke child processes stay non-interactive.
 $env:WINPULSE_ACCESS_GRANTED = '1'
+# Suppress the startup update check so smoke runs never touch the network.
+$env:WINPULSE_SKIP_UPDATE_CHECK = '1'
 $start = Get-Date
 $fixtureRoot = $null
 $backupRoot = $null
@@ -1448,6 +1450,7 @@ if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {
 }
 
 Remove-Item Env:WINPULSE_ACCESS_GRANTED -ErrorAction SilentlyContinue
+Remove-Item Env:WINPULSE_SKIP_UPDATE_CHECK -ErrorAction SilentlyContinue
 $end = Get-Date
 
 $stdout = @($stdoutParts) -join "`r`n"

@@ -58,6 +58,7 @@ BeforeAll {
 
     $functionNames = @(
         'ConvertTo-ReadableSize',
+        'Compare-WinPulseVersion',
         'Get-WinPulseStateFromPercent',
         'Get-WinPulseObjectValue',
         'Get-WinPulseToolCatalog',
@@ -93,6 +94,34 @@ Describe 'ConvertTo-ReadableSize' {
         ConvertTo-ReadableSize -bytes 1GB | Should -Be '1.00 GB'
         ConvertTo-ReadableSize -bytes 1TB | Should -Be '1.00 TB'
         ConvertTo-ReadableSize -bytes (2.5TB) | Should -Be '2.50 TB'
+    }
+}
+
+Describe 'Compare-WinPulseVersion' {
+    It 'detects newer numeric versions before the date suffix' {
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.5-20260616' | Should -BeTrue
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.22.0-20260616' | Should -BeTrue
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '1.0.0-20260616' | Should -BeTrue
+    }
+
+    It 'detects a newer date suffix only when numeric parts match' {
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.4-20260617' | Should -BeTrue
+    }
+
+    It 'does not treat equal or older versions as newer' {
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.4-20260616' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.3-20260617' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.4-20260615' | Should -BeFalse
+        Compare-WinPulseVersion -current '1.0.0-20260616' -latest '0.99.99-20260617' | Should -BeFalse
+    }
+
+    It 'returns false for malformed or empty inputs' {
+        Compare-WinPulseVersion -current '' -latest '0.21.4-20260616' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '' | Should -BeFalse
+        Compare-WinPulseVersion -current $null -latest '0.21.4-20260616' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.x-20260616' -latest '0.21.5-20260616' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest '0.21.5' | Should -BeFalse
+        Compare-WinPulseVersion -current '0.21.4-20260616' -latest 'latest' | Should -BeFalse
     }
 }
 

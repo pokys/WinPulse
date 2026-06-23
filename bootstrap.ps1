@@ -234,6 +234,89 @@ function ConvertTo-ReadableSize {
     return ('{0:N2} TB' -f ($bytes / 1TB))
 }
 
+function Compare-WinPulseVersion {
+    [CmdletBinding()]
+    param(
+        [string]$current,
+        [string]$latest
+    )
+
+    if ([string]::IsNullOrWhiteSpace($current) -or [string]::IsNullOrWhiteSpace($latest)) {
+        return $false
+    }
+
+    $pattern = '^(\d+)\.(\d+)\.(\d+)-(\d{8})$'
+    $currentMatch = [regex]::Match($current.Trim(), $pattern)
+    $latestMatch = [regex]::Match($latest.Trim(), $pattern)
+    if (-not $currentMatch.Success -or -not $latestMatch.Success) {
+        return $false
+    }
+
+    for ($i = 1; $i -le 3; $i++) {
+        $currentPart = 0
+        $latestPart = 0
+        if (-not [int]::TryParse($currentMatch.Groups[$i].Value, [ref]$currentPart)) { return $false }
+        if (-not [int]::TryParse($latestMatch.Groups[$i].Value, [ref]$latestPart)) { return $false }
+
+        if ($latestPart -gt $currentPart) { return $true }
+        if ($latestPart -lt $currentPart) { return $false }
+    }
+
+    $currentDate = 0
+    $latestDate = 0
+    if (-not [int]::TryParse($currentMatch.Groups[4].Value, [ref]$currentDate)) { return $false }
+    if (-not [int]::TryParse($latestMatch.Groups[4].Value, [ref]$latestDate)) { return $false }
+
+    return ($latestDate -gt $currentDate)
+}
+
+function Get-WinPulseLatestPublishedVersion {
+    [CmdletBinding()]
+    param()
+
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+
+        $publishedUrl = 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
+        $headers = @{ Range = 'bytes=0-8191' }
+        $response = Invoke-WebRequest -Uri $publishedUrl -UseBasicParsing -TimeoutSec 3 -Headers $headers -ErrorAction Stop
+        $content = [string]$response.Content
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            return $null
+        }
+
+        $match = [regex]::Match($content, '\$script:WinPulseVersion\s*=\s*''([^'']+)''')
+        if ($match.Success) {
+            return $match.Groups[1].Value
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
+function Show-WinPulseUpdateNotice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$current
+    )
+
+    if ($env:WINPULSE_SKIP_UPDATE_CHECK) {
+        return
+    }
+
+    try {
+        $latest = Get-WinPulseLatestPublishedVersion
+        if (Compare-WinPulseVersion -current $current -latest $latest) {
+            Write-Host ('  Update available: {0} (you have {1}) - re-run the one-liner to update.' -f $latest, $current) -ForegroundColor Yellow
+        }
+    }
+    catch {
+    }
+}
+
 function Get-WinPulseTimestamp {
     [CmdletBinding()]
     param()
@@ -13466,6 +13549,7 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ''
             Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
+            Show-WinPulseUpdateNotice -current $script:WinPulseVersion
             Write-Host ''
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
             $scan = Invoke-CoreScan
@@ -13476,6 +13560,7 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ''
             Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
+            Show-WinPulseUpdateNotice -current $script:WinPulseVersion
             Write-Host ''
             Write-Host '  Loading system information...' -ForegroundColor Gray
 
