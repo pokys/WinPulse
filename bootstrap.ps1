@@ -74,6 +74,7 @@ $script:WinPulseVersion = '0.22.0-20260623'
 #   $sha=[Security.Cryptography.SHA256]::Create()
 #   ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('NewCode'))|%{$_.ToString('x2')})-join''
 $script:WinPulseAccessCodeHash = 'bd2b8a407c25757e310c791ed71eb6e6e234f57e981960bec2ee15b120d0c238'
+$script:WinPulseUpdateAvailable = $null
 $script:WinPulseBoxColor = 'Gray'
 $script:WinPulseServiceNoiselist = @(
     'DiagTrack', 'dmwappushservice', 'DoSvc',
@@ -274,6 +275,7 @@ function Get-WinPulseLatestPublishedVersion {
     [CmdletBinding()]
     param()
 
+    # Keep the network/version logic byte-equivalent with Start-WinPulseUpdateCheckAsync.
     try {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
 
@@ -296,24 +298,124 @@ function Get-WinPulseLatestPublishedVersion {
     return $null
 }
 
-function Show-WinPulseUpdateNotice {
+function Start-WinPulseUpdateCheckAsync {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
         [string]$current
     )
 
     if ($env:WINPULSE_SKIP_UPDATE_CHECK) {
+        return $null
+    }
+
+    $runspace = $null
+    $ps = $null
+    try {
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runspace
+        # Keep this scriptblock's network/version logic byte-equivalent with Get-WinPulseLatestPublishedVersion.
+        [void]$ps.AddScript({
+            try {
+                try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+
+                $publishedUrl = 'https://raw.githubusercontent.com/pokys/WinPulse/main/bootstrap.ps1'
+                $headers = @{ Range = 'bytes=0-8191' }
+                $response = Invoke-WebRequest -Uri $publishedUrl -UseBasicParsing -TimeoutSec 3 -Headers $headers -ErrorAction Stop
+                $content = [string]$response.Content
+                if ([string]::IsNullOrWhiteSpace($content)) {
+                    return $null
+                }
+
+                $match = [regex]::Match($content, '\$script:WinPulseVersion\s*=\s*''([^'']+)''')
+                if ($match.Success) {
+                    return $match.Groups[1].Value
+                }
+            }
+            catch {
+            }
+
+            return $null
+        }.ToString())
+        $async = $ps.BeginInvoke()
+
+        return [pscustomobject]@{
+            PowerShell = $ps
+            Async      = $async
+            Runspace   = $runspace
+        }
+    }
+    catch {
+        if ($ps) {
+            try { $ps.Dispose() } catch {}
+        }
+        if ($runspace) {
+            try { $runspace.Close() } catch {}
+            try { $runspace.Dispose() } catch {}
+        }
+    }
+
+    return $null
+}
+
+function Complete-WinPulseUpdateNotice {
+    [CmdletBinding()]
+    param(
+        $handle,
+        [string]$current
+    )
+
+    if ($null -eq $handle) {
         return
     }
 
     try {
-        $latest = Get-WinPulseLatestPublishedVersion
-        if (Compare-WinPulseVersion -current $current -latest $latest) {
-            Write-Host ('  Update available: {0} (you have {1}) - re-run the one-liner to update.' -f $latest, $current) -ForegroundColor Yellow
+        $completed = $false
+        if ($handle.Async -and $handle.Async.AsyncWaitHandle) {
+            $completed = $handle.Async.AsyncWaitHandle.WaitOne(250)
+        }
+
+        if ($completed) {
+            $latest = $null
+            $results = $handle.PowerShell.EndInvoke($handle.Async)
+            foreach ($result in $results) {
+                if ($null -eq $result) { continue }
+                $value = $result
+                if ($result -is [System.Management.Automation.PSObject]) {
+                    $value = $result.BaseObject
+                }
+
+                $text = [string]$value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    $latest = $text
+                    break
+                }
+            }
+
+            if (Compare-WinPulseVersion -current $current -latest $latest) {
+                $script:WinPulseUpdateAvailable = $latest
+            }
         }
     }
     catch {
+    }
+    finally {
+        $ps = $null
+        $runspace = $null
+        try { $ps = $handle.PowerShell } catch {}
+        try { $runspace = $handle.Runspace } catch {}
+        if (-not $runspace -and $ps) {
+            try { $runspace = $ps.Runspace } catch {}
+        }
+
+        if ($ps) {
+            try { $ps.Dispose() } catch {}
+        }
+        if ($runspace) {
+            try { $runspace.Close() } catch {}
+            try { $runspace.Dispose() } catch {}
+        }
     }
 }
 
@@ -12909,6 +13011,10 @@ function Show-WinPulseMainMenu {
 
     while ($true) {
         Show-WinPulseDashboard -scan $scan
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:WinPulseUpdateAvailable)) {
+            Write-Host ('  Update available: {0} (you have {1}) - re-run the one-liner to update.' -f $script:WinPulseUpdateAvailable, $script:WinPulseVersion) -ForegroundColor Yellow
+            Write-Host ''
+        }
         $choice = Select-WinPulseMenuItem -Title 'Main Menu' -Items @(
             @{ Label = 'Diagnostics';      Key = 'D'; Hint = 'Findings & health' },
             @{ Label = 'Repairs (Guided)'; Key = 'R'; Hint = 'Fix issues' },
@@ -13695,10 +13801,15 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ''
             Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
-            Show-WinPulseUpdateNotice -current $script:WinPulseVersion
             Write-Host ''
+            $updateHandle = Start-WinPulseUpdateCheckAsync -current $script:WinPulseVersion
             Write-Log -level 'INFO' -message ('WinPulse {0} starting core scan.' -f $script:WinPulseVersion)
-            $scan = Invoke-CoreScan
+            try {
+                $scan = Invoke-CoreScan
+            }
+            finally {
+                Complete-WinPulseUpdateNotice -handle $updateHandle -current $script:WinPulseVersion
+            }
             Show-WinPulseMainMenu -scan $scan
         }
         'Repair' {
@@ -13706,12 +13817,17 @@ function Invoke-WinPulseMode {
             Clear-Host
             Write-Host ''
             Write-Host ('  WinPulse {0}' -f $script:WinPulseVersion) -ForegroundColor White
-            Show-WinPulseUpdateNotice -current $script:WinPulseVersion
             Write-Host ''
             Write-Host '  Loading system information...' -ForegroundColor Gray
 
+            $updateHandle = Start-WinPulseUpdateCheckAsync -current $script:WinPulseVersion
             Write-Log -level 'INFO' -message ('WinPulse {0} starting repair-mode scan.' -f $script:WinPulseVersion)
-            $scan = Invoke-CoreScan
+            try {
+                $scan = Invoke-CoreScan
+            }
+            finally {
+                Complete-WinPulseUpdateNotice -handle $updateHandle -current $script:WinPulseVersion
+            }
             Invoke-WinPulseRepairs -scan $scan | Out-Null
         }
         'W11Readiness' {
