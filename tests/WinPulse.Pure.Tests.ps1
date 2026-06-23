@@ -64,6 +64,7 @@ BeforeAll {
         'Get-WinPulseToolCatalog',
         'Get-WinPulseWingetExportPackageIds',
         'New-WinPulseWingetInstallCommandText',
+        'Get-WinPulseRobocopySummaryCounts',
         'Get-WinPulseRobocopyFailedEntries',
         'Get-WinPulseRestoreTargetUserName',
         'New-WinPulseRestorePlanObject',
@@ -336,6 +337,77 @@ Access is denied.
         }
         finally {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Get-WinPulseRobocopySummaryCounts' {
+    It 'parses copied file and byte totals from a standard summary' {
+        $path = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-robocopy-summary-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+        try {
+            @'
+-------------------------------------------------------------------------------
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :         3         2         1         0         0         0
+   Files :        12        10         2         0         0         0
+   Bytes :      1234      1024       210         0         0         0
+   Times :   0:00:00   0:00:00                       0:00:00   0:00:00
+'@ | Set-Content -LiteralPath $path -Encoding ASCII
+
+            $counts = Get-WinPulseRobocopySummaryCounts -logPath $path
+
+            $counts.Files | Should -Be 10
+            $counts.Bytes | Should -Be 1024
+        }
+        finally {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'parses copied byte totals with human units' {
+        $pathM = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-robocopy-summary-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+        $pathK = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-robocopy-summary-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+        try {
+            @'
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+   Files :         8         7         1         0         0         0
+   Bytes :     2.0 m     1.5 m     512 k         0         0         0
+'@ | Set-Content -LiteralPath $pathM -Encoding ASCII
+            @'
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+   Files :         8         7         1         0         0         0
+   Bytes :       1 m     812 k     212 k         0         0         0
+'@ | Set-Content -LiteralPath $pathK -Encoding ASCII
+
+            $countsM = Get-WinPulseRobocopySummaryCounts -logPath $pathM
+            $countsK = Get-WinPulseRobocopySummaryCounts -logPath $pathK
+
+            $countsM.Files | Should -Be 7
+            $countsM.Bytes | Should -Be (1.5MB)
+            $countsK.Files | Should -Be 7
+            $countsK.Bytes | Should -Be (812KB)
+        }
+        finally {
+            Remove-Item -LiteralPath $pathM -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $pathK -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'returns null for missing, empty, or malformed summaries' {
+        $emptyPath = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-robocopy-summary-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+        $garbagePath = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-robocopy-summary-{0}.log' -f ([guid]::NewGuid().ToString('N')))
+        try {
+            '' | Set-Content -LiteralPath $emptyPath -Encoding ASCII
+            'not a robocopy summary' | Set-Content -LiteralPath $garbagePath -Encoding ASCII
+
+            { Get-WinPulseRobocopySummaryCounts -logPath (Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse-missing-robocopy.log') } | Should -Not -Throw
+            Get-WinPulseRobocopySummaryCounts -logPath (Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulse-missing-robocopy.log') | Should -BeNullOrEmpty
+            Get-WinPulseRobocopySummaryCounts -logPath $emptyPath | Should -BeNullOrEmpty
+            Get-WinPulseRobocopySummaryCounts -logPath $garbagePath | Should -BeNullOrEmpty
+        }
+        finally {
+            Remove-Item -LiteralPath $emptyPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $garbagePath -Force -ErrorAction SilentlyContinue
         }
     }
 }

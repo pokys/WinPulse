@@ -5476,6 +5476,115 @@ function New-WinPulseBackupPlan {
     }
 }
 
+function Get-WinPulseRobocopySummaryCounts {
+    # Robocopy is invoked with the same /XF and /XD exclusions that verification
+    # uses, so its Copied totals are the filtered source set for successful runs.
+    [CmdletBinding()]
+    param(
+        [string]$logPath
+    )
+
+    function ConvertFrom-WinPulseRobocopySummaryNumber {
+        param(
+            [string]$numberText,
+            [string]$unitText
+        )
+
+        if ([string]::IsNullOrWhiteSpace($numberText)) { return $null }
+
+        $unit = if ([string]::IsNullOrWhiteSpace($unitText)) { '' } else { $unitText.Trim().ToLowerInvariant() }
+        $normalized = $numberText.Trim()
+        if ($unit -and $normalized.Contains(',') -and -not $normalized.Contains('.')) {
+            $normalized = $normalized -replace ',', '.'
+        }
+        else {
+            $normalized = $normalized -replace ',', ''
+        }
+
+        $value = [double]0
+        if (-not [double]::TryParse($normalized, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
+            return $null
+        }
+
+        $multiplier = [double]1
+        switch ($unit) {
+            ''  { $multiplier = 1; break }
+            'b' { $multiplier = 1; break }
+            'k' { $multiplier = 1KB; break }
+            'm' { $multiplier = 1MB; break }
+            'g' { $multiplier = 1GB; break }
+            't' { $multiplier = 1TB; break }
+            default { return $null }
+        }
+
+        return ([double]$value * [double]$multiplier)
+    }
+
+    function Get-WinPulseRobocopyCopiedColumnValue {
+        param(
+            [string]$line
+        )
+
+        if ([string]::IsNullOrWhiteSpace($line)) { return $null }
+        $colonIndex = $line.IndexOf(':')
+        if ($colonIndex -lt 0 -or ($colonIndex + 1) -ge $line.Length) { return $null }
+
+        $tail = $line.Substring($colonIndex + 1)
+        $matches = [regex]::Matches($tail, '(?i)(?<!\S)(?<num>\d+(?:[\.,]\d+)?)(?:\s*(?<unit>[bkmgt]?))(?=\s|$)')
+        if ($matches.Count -lt 2) { return $null }
+
+        $copied = $matches[1]
+        return ConvertFrom-WinPulseRobocopySummaryNumber -numberText $copied.Groups['num'].Value -unitText $copied.Groups['unit'].Value
+    }
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($logPath) -or -not (Test-Path -LiteralPath $logPath)) {
+            return $null
+        }
+
+        $lines = @(Get-Content -LiteralPath $logPath -ErrorAction Stop)
+        if ($lines.Count -eq 0) { return $null }
+
+        $inSummary = $false
+        $filesCopied = $null
+        $bytesCopied = $null
+        foreach ($rawLine in @($lines)) {
+            $line = [string]$rawLine
+            if ($line -match '\bTotal\b\s+\bCopied\b\s+\bSkipped\b\s+\bMismatch\b\s+\bFAILED\b\s+\bExtras\b') {
+                $inSummary = $true
+                continue
+            }
+            if (-not $inSummary) { continue }
+
+            if ($line -match '^\s*Files\s*:') {
+                $filesValue = Get-WinPulseRobocopyCopiedColumnValue -line $line
+                if ($null -eq $filesValue -or $filesValue -lt 0 -or $filesValue -ne [math]::Floor($filesValue) -or $filesValue -gt [int]::MaxValue) {
+                    return $null
+                }
+                $filesCopied = [int]$filesValue
+            }
+            elseif ($line -match '^\s*Bytes\s*:') {
+                $bytesValue = Get-WinPulseRobocopyCopiedColumnValue -line $line
+                if ($null -eq $bytesValue -or $bytesValue -lt 0) {
+                    return $null
+                }
+                $bytesCopied = [double]$bytesValue
+            }
+
+            if ($null -ne $filesCopied -and $null -ne $bytesCopied) {
+                return [pscustomobject][ordered]@{
+                    Files = $filesCopied
+                    Bytes = $bytesCopied
+                }
+            }
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
 function Invoke-WinPulseRobocopy {
     # Thin robocopy wrapper. -DryRun adds /L so nothing is copied. The call
     # operator is used so source/destination paths with spaces are quoted
@@ -5504,7 +5613,7 @@ function Invoke-WinPulseRobocopy {
 
     $robocopy = Get-Command -Name robocopy.exe -ErrorAction SilentlyContinue
     if (-not $robocopy) {
-        return [pscustomobject][ordered]@{ ExitCode = -1; Success = $false; DryRun = [bool]$DryRun; LogPath = $logPath; Note = 'robocopy.exe not found.' }
+        return [pscustomobject][ordered]@{ ExitCode = -1; Success = $false; DryRun = [bool]$DryRun; LogPath = $logPath; Note = 'robocopy.exe not found.'; CopiedFiles = $null; CopiedBytes = $null }
     }
 
     # File data/attributes/timestamps are always copied. Directory metadata is
@@ -5585,13 +5694,25 @@ function Invoke-WinPulseRobocopy {
         $note = 'Some files could not be copied (access-denied, reparse stubs, or in-use). The rest copied.'
     }
 
+    $copiedFiles = $null
+    $copiedBytes = $null
+    if (-not $DryRun) {
+        $summaryCounts = Get-WinPulseRobocopySummaryCounts -logPath $logPath
+        if ($null -ne $summaryCounts) {
+            $copiedFiles = [int]$summaryCounts.Files
+            $copiedBytes = [double]$summaryCounts.Bytes
+        }
+    }
+
     return [pscustomobject][ordered]@{
-        ExitCode = $code
-        Success  = $success
-        Partial  = $partial
-        DryRun   = [bool]$DryRun
-        LogPath  = $logPath
-        Note     = $note
+        ExitCode    = $code
+        Success     = $success
+        Partial     = $partial
+        DryRun      = [bool]$DryRun
+        LogPath     = $logPath
+        Note        = $note
+        CopiedFiles = $copiedFiles
+        CopiedBytes = $copiedBytes
     }
 }
 
@@ -6630,10 +6751,6 @@ function Invoke-WinPulseMigrationBackup {
         $itemLine = if ($dryRun) { '  {0} {1}\{2}...' -f $verb, $item.UserName, $item.Folder } else { '  {0} {1}\{2} ({3})...' -f $verb, $item.UserName, $item.Folder, $item.Size }
         Write-Host $itemLine -ForegroundColor Gray
         $itemExcludeFiles = @($exclusions.Files) + @($item.ExtraExcludeFiles)
-        $knownSourceMeasure = $null
-        if (-not $dryRun -and $item.Source.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
-            $knownSourceMeasure = Measure-WinPulseFolderFiltered -path $item.Source -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs
-        }
         $rc = Invoke-WinPulseRobocopy -source $item.Source -destination $item.Destination -logPath $itemLog -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -multiThread 8 -DryRun:$dryRun
         $level = if ($rc.Success) { 'INFO' } elseif ($rc.Partial) { 'WARNING' } else { 'ERROR' }
         Write-WinPulseMigrationLog -path $logPath -level $level -message ('{0}\{1} robocopy exit {2}' -f $item.UserName, $item.Folder, $rc.ExitCode)
@@ -6647,8 +6764,16 @@ function Invoke-WinPulseMigrationBackup {
 
         $verify = $null
         if (-not $dryRun -and ($rc.Success -or $rc.Partial)) {
-            if ($null -ne $knownSourceMeasure) {
-                $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize -knownSourceFiles $knownSourceMeasure.Files -knownSourceBytes $knownSourceMeasure.Bytes
+            $useRobocopyCounts = (
+                $item.Source.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase) -and
+                [bool]$rc.Success -and
+                $null -ne $rc.CopiedFiles -and
+                $null -ne $rc.CopiedBytes
+            )
+            if ($useRobocopyCounts) {
+                # Partial robocopy totals are lower than the full source set;
+                # use parsed counts only for success, otherwise verify measures.
+                $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize -knownSourceFiles $rc.CopiedFiles -knownSourceBytes $rc.CopiedBytes
             }
             else {
                 $verify = Get-WinPulseCopyVerification -source $item.Source -destination $item.Destination -excludeFiles $itemExcludeFiles -excludeDirs $exclusions.Dirs -hashSampleSize $hashSampleSize
