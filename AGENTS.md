@@ -685,6 +685,100 @@ Acceptance:
 Out of scope: implementing remote VSS / locked-file handling, changing the copy
 engine, the dry-run sizing path, hash sampling behavior, report layout.
 
+## Work Queue - Batch 11 (queued 2026-06-23)
+
+Standard rules: sync first (`git checkout dev/migration-preflight-foundation`
+then `git merge main --ff-only`; stop if not fast-forward), ONE commit, do NOT
+push to main, do NOT bump the version, keep `bootstrap.ps1` ASCII-only /
+StrictMode-safe / PS 5.1, bracket notation for hashtable access. Report changes
+plus full test output. Stop and ask if anything is ambiguous. PREREQUISITE: C48
+(Batch 10) must be in already - this finishes the optimization it set up.
+
+### Task C49 - Make remote verification a real wire saving via robocopy summary counts
+
+Why: C48 added the `-knownSourceFiles`/`-knownSourceBytes` seam to
+`Get-WinPulseCopyVerification` and wired the backup caller to pass precomputed
+filtered source counts for UNC sources. But it obtains those counts with a NEW
+`Measure-WinPulseFolderFiltered` walk BEFORE `robocopy` and reuses it in verify -
+so the number of times the remote source is enumerated over the wire is UNCHANGED
+(pre-measure walk + robocopy walk == old robocopy walk + verify walk). The seam is
+correct; the count SOURCE is not. robocopy already enumerates and copies the
+source once and prints a summary table with total Files and Bytes copied. Parse
+THAT and feed it through the existing seam, eliminating the separate measure walk.
+
+Read first (do not change behavior until you understand both):
+- `Invoke-WinPulseRobocopy` (grep for the function) returns
+  `[ordered]@{ ExitCode; Success; Partial; DryRun; LogPath; Note }` and does NOT
+  currently parse copied-file/byte totals. It writes a `$logPath`.
+- `Invoke-WinPulseMigrationBackup`: the C48 block that sets `$knownSourceMeasure`
+  via `Measure-WinPulseFolderFiltered` before the robocopy call (UNC-only), then
+  passes it into `Get-WinPulseCopyVerification`.
+- `Get-WinPulseCopyVerification`: the `-knownSourceFiles`/`-knownSourceBytes`
+  override branch (leave its signature and the override logic AS IS).
+
+Scope:
+
+1. Add a robocopy summary parser. Prefer a small PURE helper
+   `Get-WinPulseRobocopySummaryCounts -logPath <path>` (or `-logText <string>`)
+   that reads the robocopy log/output and returns
+   `[pscustomobject][ordered]@{ Files = <int>; Bytes = <double> }` for the COPIED
+   totals, or `$null` if the summary cannot be parsed. robocopy's summary block is
+   the `Total / Copied / Skipped / Mismatch / FAILED / Extras` table; the "Copied"
+   column of the "Files :" and "Bytes :" rows is what verification's expected
+   source set corresponds to (it copies exactly the filtered set). Note the
+   "Bytes" row uses human units (e.g. `1.5 m`, `812 k`, `0`) and may be a bare
+   number; parse defensively and return `$null` on anything you cannot read
+   cleanly. Make it total: malformed/missing input -> `$null`, never throws.
+   EXCLUSION ALIGNMENT: robocopy is already invoked with the SAME `/XF`/`/XD`
+   exclusions verification uses, so its Copied totals match the filtered source
+   set by construction. Call this out in a short comment so the equivalence is not
+   re-broken later.
+2. Have `Invoke-WinPulseRobocopy` parse its own summary on a real (non-dry-run)
+   run and ADD two fields to its returned object: `CopiedFiles` and `CopiedBytes`
+   (`$null` when dry-run or unparseable). Do NOT remove or rename existing fields
+   (reports/manifests depend on the shape). If you parse from the log file, read
+   it after robocopy exits; if you already capture stdout lines, parse those.
+3. In `Invoke-WinPulseMigrationBackup`: DELETE the C48 pre-robocopy
+   `Measure-WinPulseFolderFiltered` walk. After the robocopy call, for UNC sources
+   only, if `$rc.CopiedFiles`/`$rc.CopiedBytes` are non-null, pass them as
+   `-knownSourceFiles`/`-knownSourceBytes` to `Get-WinPulseCopyVerification`. If
+   parsing failed (null), FALL BACK to the existing measure path (call verify
+   without the known params - it will measure the source itself). Local (non-UNC)
+   sources stay exactly as today: no known counts, verify measures locally. Net
+   effect: a remote source is now enumerated ONCE (the robocopy copy) instead of
+   twice.
+4. Partial-copy caution: when robocopy returns Partial (exit 8-15) the Copied
+   totals are LESS than the full source set, so using them as the "expected"
+   baseline would mask the shortfall and wrongly report Verified. Therefore only
+   pass the parsed counts when `$rc.Success` is true (NOT on Partial); on Partial,
+   fall back to measuring the source so the existing mismatch detection still
+   fires. Document this in a comment.
+
+Tests (extend `tests/WinPulse.Pure.Tests.ps1`, add the parser to the extraction
+list):
+- `Get-WinPulseRobocopySummaryCounts`: a realistic robocopy summary fixture
+  (multi-line, the `Total/Copied/...` table) -> correct Files and Bytes; a
+  human-unit Bytes row (`1.5 m`, `812 k`) -> correct byte math; missing summary /
+  empty / garbage -> `$null` (and does not throw). ASCII fixtures only.
+- Reuse the existing C48 `Get-WinPulseCopyVerification` override tests as-is
+  (the seam is unchanged).
+
+Acceptance:
+- Parser + ASCII clean; `git diff --check` clean.
+- All five non-elevated smoke modes exit 0 (local backup+restore on the temp
+  fixture still verifies Verified via the unchanged LOCAL path; this task does not
+  touch local sources). Report the output.
+- `tests/Invoke-WinPulseTests.ps1` green; report the Pester summary.
+- "Does it bite" check: feed `Get-WinPulseRobocopySummaryCounts` a summary with a
+  known Files total, temporarily assert the wrong number, confirm it FAILS, revert.
+- Confirm by grep that the C48 pre-robocopy `Measure-WinPulseFolderFiltered` walk
+  in `Invoke-WinPulseMigrationBackup` is GONE and the counts now come from `$rc`.
+
+Out of scope: changing the verify override logic itself, restore-side counts
+(restore is not the remote-pull direction in MVP), report/manifest shape, hash
+sampling, dry-run sizing, anything in the copy engine beyond reading robocopy's
+own summary.
+
 ## Project Direction
 
 WinPulse is the main project going forward.
