@@ -17,6 +17,7 @@ BeforeAll {
         Logs    = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath 'WinPulsePester\logs'
     }
     $script:WinPulseServiceNoiselist = @()
+    $script:WinPulseDefaultBackupRoot = 'C:\WinPulseBackups'
 
     $script:OriginalCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
     $script:OriginalUICulture = [System.Threading.Thread]::CurrentThread.CurrentUICulture
@@ -74,7 +75,13 @@ BeforeAll {
         'ConvertFrom-WinPulseExtendedPath',
         'Get-WinPulseFilteredFiles',
         'Measure-WinPulseFolderFiltered',
-        'Get-WinPulseCopyVerification'
+        'Get-WinPulseCopyVerification',
+        'ConvertFrom-WinPulseAvProductState',
+        'ConvertTo-WinPulseDateText',
+        'Read-WinPulseBackupManifest',
+        'Test-WinPulseManifestIsDryRun',
+        'Get-WinPulseBackupSearchRoots',
+        'Get-WinPulseAvailableBackups'
     )
 
     foreach ($functionText in @(Get-SmokeBootstrapFunctionText -BootstrapPath $script:BootstrapPath -Name $functionNames)) {
@@ -712,6 +719,60 @@ Describe 'Get-WinPulseCopyVerification' {
             $result.Status | Should -Be 'Verified'
         }
         finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'ConvertFrom-WinPulseAvProductState' {
+    It 'decodes enabled and up-to-date products' {
+        $state = ConvertFrom-WinPulseAvProductState -state 0x041000
+        $state.Enabled | Should -BeTrue
+        $state.UpToDate | Should -BeTrue
+    }
+
+    It 'flags enabled products with outdated definitions' {
+        $state = ConvertFrom-WinPulseAvProductState -state 0x041010
+        $state.Enabled | Should -BeTrue
+        $state.UpToDate | Should -BeFalse
+    }
+
+    It 'treats disabled, snoozed and missing states as not protecting' {
+        (ConvertFrom-WinPulseAvProductState -state 0x040000).Enabled | Should -BeFalse
+        (ConvertFrom-WinPulseAvProductState -state 0x060100).Enabled | Should -BeFalse
+        (ConvertFrom-WinPulseAvProductState -state 0).Enabled | Should -BeFalse
+    }
+}
+
+Describe 'Test-WinPulseManifestIsDryRun' {
+    It 'recognises dry-run manifests only' {
+        Test-WinPulseManifestIsDryRun -manifest ([pscustomobject]@{ Tool = [pscustomobject]@{ Action = 'DryRun' } }) | Should -BeTrue
+        Test-WinPulseManifestIsDryRun -manifest ([pscustomobject]@{ Tool = [pscustomobject]@{ Action = 'Execute' } }) | Should -BeFalse
+        Test-WinPulseManifestIsDryRun -manifest ([pscustomobject]@{ Items = @() }) | Should -BeFalse
+        Test-WinPulseManifestIsDryRun -manifest $null | Should -BeFalse
+    }
+}
+
+Describe 'Get-WinPulseAvailableBackups' {
+    It 'lists executed backups from the default root and skips dry runs' {
+        $root = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('WinPulse-backups-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $previousDefault = $script:WinPulseDefaultBackupRoot
+        try {
+            $executed = Join-Path -Path $root -ChildPath 'MigrationBackup-PC-20261007-100000'
+            $dryRun = Join-Path -Path $root -ChildPath 'MigrationBackup-PC-20261007-090000'
+            New-Item -Path $executed -ItemType Directory -Force | Out-Null
+            New-Item -Path $dryRun -ItemType Directory -Force | Out-Null
+            '{ "Tool": { "Action": "Execute" }, "Users": ["alice"], "Items": [] }' | Set-Content -LiteralPath (Join-Path -Path $executed -ChildPath 'manifest.json') -Encoding ASCII
+            '{ "Tool": { "Action": "DryRun" }, "Users": ["alice"], "Items": [] }' | Set-Content -LiteralPath (Join-Path -Path $dryRun -ChildPath 'manifest.json') -Encoding ASCII
+            $script:WinPulseDefaultBackupRoot = $root
+
+            $paths = @(Get-WinPulseAvailableBackups | ForEach-Object { $_.Path })
+
+            $paths | Should -Contain $executed
+            $paths | Should -Not -Contain $dryRun
+        }
+        finally {
+            $script:WinPulseDefaultBackupRoot = $previousDefault
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

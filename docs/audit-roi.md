@@ -1,7 +1,9 @@
 # WinPulse – nálezy auditu seřazené podle ROI
 
-Zdroj: `docs/audit-2026-10-06.md` (3 kola, 50 nálezů). Stav: **čeká na review
-vlastníka**. Po review budeme opravovat shora dolů. Sloupec „Stav“ budu
+Zdroj: `docs/audit-2026-10-06.md` (3 kola, 50 nálezů). Stav: **řádky 1, 2,
+4, 5, 6, 7, 9 a 10 opravené ve větvi `claude/roi-wave1-fixes`** (2026-10-07).
+Čekají na vizuální kontrolu TUI vlastníkem a smoke testy na Windows. Ostatní
+řádky čekají na review vlastníka. Po review budeme opravovat shora dolů. Sloupec „Stav“ budu
 průběžně aktualizovat.
 
 ## Jak se ROI počítá
@@ -26,16 +28,16 @@ je zařadit do první vlny bez ohledu na pořadí. Jsou označené ⚑.
 
 | # | ID | Nález | D | P | N | ROI | Stav |
 |---|----|-------|---|---|---|-----|------|
-| 1 | TU3 | Enter v multi-selectu bez zaškrtnutí = zrušení (výběr uživatelů/složek) | 3 | 5 | 1 | **15** | čeká |
-| 2 | N1 | Store/AppX oprava ukončí `WindowsTerminal`, tedy i samotný WinPulse | 4 | 3 | 1 | **12** | čeká |
+| 1 | TU3 | Enter v multi-selectu bez zaškrtnutí = zrušení (výběr uživatelů/složek) | 3 | 5 | 1 | **15** | opraveno – Enter vybere zvýrazněnou položku; `-AllowEmpty` u volitelných voleb, cleanupu a odinstalace |
+| 2 | N1 | Store/AppX oprava ukončí `WindowsTerminal`, tedy i samotný WinPulse | 4 | 3 | 1 | **12** | opraveno – `WindowsTerminal` vyřazen ze seznamu ukončovaných procesů |
 | 3 | H3 | Zálohy v `C:\WinPulseBackups` čitelné a zapisovatelné pro všechny přihlášené uživatele | 4 | 3 | 1 | **12** | čeká |
-| 4 | T1 | Dry run nebo druhá záloha přepíše `manifest.json` skutečné zálohy (chybí podsložka s časem) | 4 | 3 | 1 | **12** | čeká |
-| 5 | N3 | AV „OK“ při jakékoli registraci třetí strany, `productState` se ignoruje | 4 | 3 | 1 | **12** | čeká |
-| 6 | N4 | Ping 1.1.1.1 jako test internetu → repair plán „Network Stack“ smaže statickou IP | 4 | 3 | 1 | **12** | čeká |
-| 7 | T6 | winget bez `--exact` (instaluje nebo odinstaluje jiný balíček, falešné „installed“) | 3 | 4 | 1 | **12** | čeká |
+| 4 | T1 | Dry run nebo druhá záloha přepíše `manifest.json` skutečné zálohy (chybí podsložka s časem) | 4 | 3 | 1 | **12** | opraveno – vybraný cíl dostane podsložku s časem; dry run nepřepíše skutečný manifest; Restore/Verify odmítnou dry-run manifest |
+| 5 | N3 | AV „OK“ při jakékoli registraci třetí strany, `productState` se ignoruje | 4 | 3 | 1 | **12** | opraveno – dekódování `productState`, počítají se jen zapnuté AV; stav vidět v Diagnostics > Security |
+| 6 | N4 | Ping 1.1.1.1 jako test internetu → repair plán „Network Stack“ smaže statickou IP | 4 | 3 | 1 | **12** | opraveno – ping + HTTP NCSI záloha (max ~2.3 s); kroky opravy sítě varují před smazáním statické IP |
+| 7 | T6 | winget bez `--exact` (instaluje nebo odinstaluje jiný balíček, falešné „installed“) | 3 | 4 | 1 | **12** | opraveno – `--exact` u install/uninstall/list; detekce instalace podle exit kódu |
 | 8 | TU7 | `Q` spustí destruktivní exit cleanup bez dotazu; nekonzistentní potvrzování | 3 | 4 | 1 | **12** | čeká |
-| 9 | M5 | Restore, Verify a Apps nevidí zálohy v `C:\WinPulseBackups` | 2 | 5 | 1 | **10** | čeká |
-| 10 | TU1 | Výběr zálohy zobrazuje celou cestu jako klávesu, název se uřízne | 2 | 5 | 1 | **10** | čeká (spolu s M5) |
+| 9 | M5 | Restore, Verify a Apps nevidí zálohy v `C:\WinPulseBackups` | 2 | 5 | 1 | **10** | opraveno – hledá v `C:\WinPulseBackups`, `<disk>:\WinPulseBackups`, `MigrationBackup-*` v kořenech disků i v ProgramData |
+| 10 | TU1 | Výběr zálohy zobrazuje celou cestu jako klávesu, název se uřízne | 2 | 5 | 1 | **10** | opraveno – dlouhé interní klíče (cesty) se v menu nezobrazují |
 | 11 | M2 | Exit maže celou PS historii účtu + skryté menu „no trace“ | 2 | 5 | 1 | **10** | **rozhodnutí vlastníka** |
 | 12 | N5 | Firewall „OFF“ (Critical), když chrání firewall třetí strany | 3 | 3 | 1 | **9** | čeká |
 | 13 | TU9 | Ověřit menu ve Windows Terminal (zmizení dashboardu) | 3 | 3 | 1 | **9** | ověření na Windows |

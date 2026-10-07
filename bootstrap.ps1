@@ -221,6 +221,9 @@ $script:WinPulsePaths = [ordered]@{
     Config  = $null
 }
 
+# Persistent default for real backups, outside the exit-cleanup zone.
+$script:WinPulseDefaultBackupRoot = 'C:\WinPulseBackups'
+
 function ConvertTo-ReadableSize {
     [CmdletBinding()]
     param(
@@ -581,6 +584,24 @@ function Get-WinPulseSecureBootState {
     }
 }
 
+function ConvertFrom-WinPulseAvProductState {
+    # Decodes the SecurityCenter2 AntiVirusProduct.productState bitmask
+    # (0xPPSSDD): SS = scanner state, 0x10 bit set means real-time protection
+    # is ON; DD = definitions, 0x10 bit set means signatures are OUT of date.
+    # A missing/zero state decodes as not enabled.
+    [CmdletBinding()]
+    param(
+        [int]$state = 0
+    )
+
+    $scanner = ($state -shr 8) -band 0xFF
+    $definitions = $state -band 0xFF
+    return [pscustomobject][ordered]@{
+        Enabled  = (($scanner -band 0x10) -ne 0)
+        UpToDate = (($definitions -band 0x10) -eq 0)
+    }
+}
+
 function Get-WinPulseAntivirusProducts {
     [CmdletBinding()]
     param()
@@ -603,10 +624,13 @@ function Get-WinPulseAntivirusProducts {
                 $stateRaw = [int]$row.productState
             }
 
+            $decodedState = ConvertFrom-WinPulseAvProductState -state $stateRaw
             $products += [pscustomobject]@{
                 Name = $name
                 ProductState = ('0x{0:X6}' -f $stateRaw)
                 IsMicrosoft = ($name -match 'Windows Defender|Microsoft Defender')
+                Enabled = [bool]$decodedState.Enabled
+                UpToDate = [bool]$decodedState.UpToDate
             }
         }
     }
@@ -701,8 +725,8 @@ function Get-WinPulseRepairPlans {
                 Reason = 'Network-related update failures detected.'
                 Steps = @(
                     'Flush DNS cache.',
-                    'Reset TCP/IP and Winsock.',
-                    'Restart active network adapters.'
+                    'Reset TCP/IP and Winsock (clears static IP/DNS settings and VPN/LSP hooks).',
+                    'Restart active network adapters (drops remote sessions).'
                 )
             }
         }
@@ -739,11 +763,11 @@ function Get-WinPulseRepairPlans {
         $plans += [pscustomobject]@{
             Id = 'network_stack'
             Label = 'Repair Network Stack'
-            Reason = 'No internet connectivity detected.'
+            Reason = 'No internet connectivity detected (ping and HTTP probe both failed).'
             Steps = @(
                 'Flush DNS cache.',
-                'Reset TCP/IP and Winsock.',
-                'Restart active network adapters.'
+                'Reset TCP/IP and Winsock (clears static IP/DNS settings and VPN/LSP hooks).',
+                'Restart active network adapters (drops remote sessions).'
             )
         }
     }
@@ -1521,6 +1545,49 @@ function Get-WinPulseVirtualizationInfo {
     }
 }
 
+function Test-WinPulseInternetConnectivity {
+    # Bounded, two-step internet check. ICMP alone is not enough: many company
+    # networks block ping or 1.1.1.1, which used to report "no internet" and
+    # then suggest a destructive network-stack reset. Step 1: ping 1.1.1.1
+    # (800 ms). Step 2 (only if the ping fails): the Windows NCSI probe over
+    # HTTP (honours the system proxy, 1500 ms). Worst case ~2.3 s offline.
+    [CmdletBinding()]
+    param()
+
+    try {
+        $ping = New-Object System.Net.NetworkInformation.Ping
+        $reply = $ping.Send('1.1.1.1', 800)
+        if ($reply -and $reply.Status -eq 'Success') {
+            return [pscustomobject][ordered]@{ Internet = $true; Method = 'ICMP' }
+        }
+    }
+    catch {
+    }
+
+    $response = $null
+    $reader = $null
+    try {
+        $request = [Net.HttpWebRequest]::Create('http://www.msftconnecttest.com/connecttest.txt')
+        $request.Timeout = 1500
+        $request.ReadWriteTimeout = 1500
+        $request.AllowAutoRedirect = $false
+        $response = $request.GetResponse()
+        $reader = New-Object IO.StreamReader($response.GetResponseStream())
+        $body = $reader.ReadToEnd()
+        if ([string]$body -match 'Microsoft Connect Test') {
+            return [pscustomobject][ordered]@{ Internet = $true; Method = 'HTTP' }
+        }
+    }
+    catch {
+    }
+    finally {
+        if ($reader) { try { $reader.Dispose() } catch {} }
+        if ($response) { try { $response.Close() } catch {} }
+    }
+
+    return [pscustomobject][ordered]@{ Internet = $false; Method = 'None' }
+}
+
 function Write-WinPulseBootLine {
     param(
         [Parameter(Mandatory = $true)][string]$Message,
@@ -1570,6 +1637,7 @@ function Invoke-CoreScan {
             Antivirus = [ordered]@{
                 Products = @()
                 ThirdPartyCount = 0
+                ThirdPartyEnabledCount = 0
                 EffectiveRealtimeProtection = $false
             }
             BitLocker = @()
@@ -1723,8 +1791,12 @@ function Invoke-CoreScan {
         $defenderStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
         $avProducts = @(Get-WinPulseAntivirusProducts | Where-Object { $_ -and $_.PSObject.Properties['Name'] })
         $thirdPartyCount = @($avProducts | Where-Object { -not $_.IsMicrosoft }).Count
+        # A registered third-party AV only counts when its productState says
+        # real-time protection is on: disabled/expired products and leftover
+        # registrations of uninstalled AVs must not report as protection.
+        $thirdPartyEnabledCount = @($avProducts | Where-Object { -not $_.IsMicrosoft -and $_.PSObject.Properties['Enabled'] -and $_.Enabled }).Count
         $effectiveRt = $false
-        if ($thirdPartyCount -gt 0) {
+        if ($thirdPartyEnabledCount -gt 0) {
             $effectiveRt = $true
         }
         elseif ($defenderStatus) {
@@ -1759,6 +1831,7 @@ function Invoke-CoreScan {
             Antivirus = [ordered]@{
                 Products = $avProducts
                 ThirdPartyCount = $thirdPartyCount
+                ThirdPartyEnabledCount = $thirdPartyEnabledCount
                 EffectiveRealtimeProtection = $effectiveRt
             }
             BitLocker = $bitlockerStatus
@@ -1835,23 +1908,15 @@ function Invoke-CoreScan {
         $ipCfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1
         $dns = if ($ipCfg) { @($ipCfg.DNSServer.ServerAddresses) } else { @() }
 
-        # Bounded ping (800 ms) so an offline machine does not stall startup on
-        # the default Test-Connection timeout.
-        $internet = $false
-        try {
-            $ping = New-Object System.Net.NetworkInformation.Ping
-            $reply = $ping.Send('1.1.1.1', 800)
-            $internet = ($reply -and $reply.Status -eq 'Success')
-        }
-        catch {
-            $internet = $false
-        }
+        $connectivity = Test-WinPulseInternetConnectivity
+        $internet = [bool]$connectivity.Internet
 
         $result.Network = [ordered]@{
             IPv4 = if ($ipCfg) { $ipCfg.IPv4Address.IPAddress } else { $null }
             Gateway = if ($ipCfg) { $ipCfg.IPv4DefaultGateway.NextHop } else { $null }
             DnsServers = $dns
             Internet = [bool]$internet
+            InternetMethod = [string]$connectivity.Method
         }
     }
     catch {
@@ -2176,14 +2241,19 @@ function Select-WinPulseMenuItem {
 
                 $isSelected  = ($selectableIdx[$sel] -eq $i)
                 $pointer     = if ($isSelected) { '>' } else { ' ' }
-                $keyTag      = if ($item['Key']) { '[{0}]' -f $item['Key'] } else { '   ' }
+                # Only single-character keys are hotkeys worth showing. Long keys
+                # (backup paths, '__manual__') are internal ids: rendering them
+                # as '[C:\...]' pushed the real label off the row.
+                $keyText     = [string]$item['Key']
+                $keyTag      = if ($keyText.Length -eq 1) { '[{0}]' -f $keyText } elseif ($keyText) { '' } else { '   ' }
                 $hint        = if ($item['Hint']) { $item['Hint'] } else { '' }
                 $color       = if ($item['Color']) { $item['Color'] } else { 'White' }
                 $badge       = if ($item['Badge']) { [string]$item['Badge'] } else { '' }
                 $badgeColor  = if ($item['BadgeColor']) { [string]$item['BadgeColor'] } else { $color }
 
                 $labelText = [string]$item['Label']
-                $left = if ($badge) { ' {0} {1} {2} {3}' -f $pointer, $keyTag, $badge, $labelText } else { ' {0} {1} {2}' -f $pointer, $keyTag, $labelText }
+                $keyPart = if ($keyTag) { '{0} ' -f $keyTag } else { '' }
+                $left = if ($badge) { ' {0} {1}{2} {3}' -f $pointer, $keyPart, $badge, $labelText } else { ' {0} {1}{2}' -f $pointer, $keyPart, $labelText }
                 $avail = $w - 4
                 $rightSpace = $avail - $left.Length
                 if ($rightSpace -lt 0) { $left = $left.Substring(0, $avail); $rightSpace = 0 }
@@ -2199,7 +2269,7 @@ function Select-WinPulseMenuItem {
                     Write-Host -NoNewline $line -ForegroundColor Black -BackgroundColor White
                 }
                 elseif ($badge) {
-                    $prefixPart = ' {0} {1} ' -f $pointer, $keyTag
+                    $prefixPart = ' {0} {1}' -f $pointer, $keyPart
                     $badgePart  = '{0} ' -f $badge
                     $afterLabel = if ($hint -and $rightSpace -gt ($hint.Length + 2)) { (' ' * ($rightSpace - $hint.Length)) + $hint } else { ' ' * $rightSpace }
                     Write-Host -NoNewline $prefixPart -ForegroundColor Gray
@@ -2251,12 +2321,16 @@ function Select-WinPulseMenuItem {
 
 function Select-WinPulseMultiMenuItem {
     # Arrow-key multi-select menu. Space toggles, Enter confirms, Esc cancels.
-    # Returns array of selected Keys (empty array = cancelled/none).
+    # Returns array of selected Keys (empty array = cancelled/none). Enter with
+    # nothing ticked picks the highlighted item (the common "arrow + Enter"
+    # habit); pass -AllowEmpty where "none" is a valid answer or where picking
+    # the highlighted item would trigger an unconfirmed action.
     [CmdletBinding()]
     param(
         [string]$Title = 'Select',
         [Parameter(Mandatory = $true)]
-        [array]$Items
+        [array]$Items,
+        [switch]$AllowEmpty
     )
 
     $selectableIdx = @()
@@ -2430,7 +2504,8 @@ function Select-WinPulseMultiMenuItem {
 
             Write-Host ('  {0}{1}{2}' -f ([char]0x255A), $hLine, ([char]0x255D)) -ForegroundColor $script:WinPulseBoxColor
             $drawnLines++
-            $helpText = '  Up/Dn Move  Space Toggle  A All/None  / Filter  Enter OK  Esc Cancel  {0} selected' -f $checked.Count
+            $enterHint = if ($checked.Count -eq 0 -and -not $AllowEmpty) { 'Enter Pick' } else { 'Enter OK' }
+            $helpText = '  Up/Dn Move  Space Toggle  A All/None  / Filter  {0}  Esc Cancel  {1} selected' -f $enterHint, $checked.Count
             Write-Host ($helpText + (' ' * [math]::Max(0, $w - $helpText.Length + 2))) -ForegroundColor Gray
             $drawnLines++
             if ($filterEditing -or $filterActive) {
@@ -2519,7 +2594,12 @@ function Select-WinPulseMultiMenuItem {
                         }
                     }
                 }
-                13 { return @($checked.Keys | Sort-Object | ForEach-Object { $Items[$_]['Key'] }) }
+                13 {
+                    if ($checked.Count -eq 0 -and -not $AllowEmpty -and $visibleSelectableIdx.Count -gt 0) {
+                        return @($Items[$visibleSelectableIdx[$sel]]['Key'])
+                    }
+                    return @($checked.Keys | Sort-Object | ForEach-Object { $Items[$_]['Key'] })
+                }
                 27 { return @() }
             }
         }
@@ -5371,7 +5451,7 @@ function Select-WinPulseBackupScopeOptIns {
         @{ Label = 'Include AppData folder';                            Key = 'appdata';     Hint = 'Large/noisy' }
     )
 
-    return @(Select-WinPulseMultiMenuItem -Title 'Include extras?  (optional, off by default)' -Items $items)
+    return @(Select-WinPulseMultiMenuItem -Title 'Include extras?  (optional, off by default)' -Items $items -AllowEmpty)
 }
 
 function Select-WinPulseBackupUsers {
@@ -5442,7 +5522,7 @@ function Select-WinPulseBackupApps {
         $items += @{ Label = $target['Label']; Key = $target['Key']; Hint = $target['Relative'] }
     }
 
-    return @(Select-WinPulseMultiMenuItem -Title 'Detected application data (optional)' -Items $items)
+    return @(Select-WinPulseMultiMenuItem -Title 'Detected application data (optional)' -Items $items -AllowEmpty)
 }
 
 function Measure-WinPulseBackupPlanItem {
@@ -6715,7 +6795,7 @@ function Invoke-WinPulseMigrationBackup {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     # Default to a persistent top-level folder, NOT under C:\ProgramData\WinPulse
     # (which exit cleanup wipes). A real backup must survive the exit cleanup.
-    $defaultRoot = Join-Path -Path 'C:\WinPulseBackups' -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp)
+    $defaultRoot = Join-Path -Path $script:WinPulseDefaultBackupRoot -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp)
 
     Clear-Host
     Write-WinPulseHeader -title 'Migration Backup'
@@ -6725,7 +6805,10 @@ function Invoke-WinPulseMigrationBackup {
     }
     else {
         $destPicked = Select-WinPulseFolderPath -Title 'Backup destination'
-        $destinationRoot = if ([string]::IsNullOrWhiteSpace($destPicked)) { $defaultRoot } else { $destPicked }
+        # A picked folder (e.g. E:\) is a parent, never the backup root itself:
+        # each run gets its own stamped subfolder so a later backup or dry run
+        # cannot overwrite an earlier manifest.json or mix data.
+        $destinationRoot = if ([string]::IsNullOrWhiteSpace($destPicked)) { $defaultRoot } else { Join-Path -Path $destPicked.Trim() -ChildPath ('MigrationBackup-{0}-{1}' -f $computerName, $stamp) }
     }
 
     Write-Host ''
@@ -6929,10 +7012,29 @@ function Invoke-WinPulseMigrationBackup {
         SafetyNotes     = @($safetyNotes)
     }
 
-    $manifestPath = Join-Path -Path $destinationRoot -ChildPath 'manifest.json'
+    # Never let a dry run replace the manifest/reports of a real (executed)
+    # backup already sitting in the same destination: write the dry-run
+    # artifacts beside it under a .dryrun name instead.
+    $manifestFileName = 'manifest.json'
+    $reportBaseName = 'migration-backup-report'
+    $existingManifestPath = Join-Path -Path $destinationRoot -ChildPath 'manifest.json'
+    if ($dryRun -and (Test-Path -LiteralPath $existingManifestPath)) {
+        $existingManifest = Read-WinPulseBackupManifest -path $existingManifestPath
+        $existingAction = $null
+        if ($existingManifest -and $existingManifest.PSObject.Properties['Tool'] -and $existingManifest.Tool -and $existingManifest.Tool.PSObject.Properties['Action']) {
+            $existingAction = [string]$existingManifest.Tool.Action
+        }
+        if ($existingAction -ne 'DryRun') {
+            $manifestFileName = 'manifest.dryrun.json'
+            $reportBaseName = 'migration-backup-report.dryrun'
+            Write-Host '  Destination already holds a real backup; dry-run results are saved as manifest.dryrun.json.' -ForegroundColor Yellow
+            Write-WinPulseMigrationLog -path $logPath -level 'WARNING' -message 'Existing executed backup manifest kept; dry-run manifest written as manifest.dryrun.json.'
+        }
+    }
+    $manifestPath = Join-Path -Path $destinationRoot -ChildPath $manifestFileName
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
-    $reportTextPath = Join-Path -Path $destinationRoot -ChildPath 'migration-backup-report.txt'
-    $reportHtmlPath = Join-Path -Path $destinationRoot -ChildPath 'migration-backup-report.html'
+    $reportTextPath = Join-Path -Path $destinationRoot -ChildPath ('{0}.txt' -f $reportBaseName)
+    $reportHtmlPath = Join-Path -Path $destinationRoot -ChildPath ('{0}.html' -f $reportBaseName)
     Export-WinPulseMigrationCopyReportText -manifest $manifest -path $reportTextPath
     Export-WinPulseMigrationCopyReportHtml -manifest $manifest -path $reportHtmlPath
     Write-WinPulseMigrationLog -path $logPath -level 'INFO' -message ('Migration backup completed. Failed={0}, Partial={1}, Mismatch={2}' -f $failed.Count, $partialItems.Count, $mismatch.Count)
@@ -7075,43 +7177,107 @@ function Read-WinPulseBackupManifest {
     return $manifest
 }
 
-function Get-WinPulseAvailableBackups {
-    # Scans the backups root for folders that contain a manifest.json.
+function Test-WinPulseManifestIsDryRun {
+    # True when a backup manifest records a dry run (nothing was copied), so it
+    # must not be offered or used as a restore/verify source.
+    [CmdletBinding()]
+    param(
+        [object]$manifest
+    )
+
+    if (-not $manifest) { return $false }
+    if (-not $manifest.PSObject.Properties['Tool'] -or -not $manifest.Tool) { return $false }
+    if (-not $manifest.Tool.PSObject.Properties['Action']) { return $false }
+    return ([string]$manifest.Tool.Action -eq 'DryRun')
+}
+
+function Get-WinPulseBackupSearchRoots {
+    # Folders that may hold WinPulse backups, in priority order: the persistent
+    # default (C:\WinPulseBackups), the legacy ProgramData backups folder, and
+    # on every ready fixed/removable drive both <drive>:\WinPulseBackups and the
+    # drive root itself (a backup to a picked folder such as E:\ lands in
+    # E:\MigrationBackup-<PC>-<stamp>). Network drives are skipped (slow).
     [CmdletBinding()]
     param()
 
-    $root = $script:WinPulsePaths.Backups
-    if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) {
-        return @()
+    $roots = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $addRoot = {
+        param([string]$path, [bool]$namedOnly)
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+        $key = $path.TrimEnd('\').ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+        [void]$roots.Add([pscustomobject][ordered]@{ Path = $path; NamedOnly = $namedOnly })
     }
+
+    & $addRoot ([string]$script:WinPulseDefaultBackupRoot) $false
+    & $addRoot ([string]$script:WinPulsePaths.Backups) $false
+
+    $drives = @()
+    try { $drives = @([System.IO.DriveInfo]::GetDrives()) } catch { $drives = @() }
+    foreach ($drive in $drives) {
+        try {
+            if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -and $drive.DriveType -ne [System.IO.DriveType]::Removable) { continue }
+            if (-not $drive.IsReady) { continue }
+            $driveRoot = [string]$drive.RootDirectory.FullName
+            & $addRoot (Join-Path -Path $driveRoot -ChildPath 'WinPulseBackups') $false
+            & $addRoot $driveRoot $true
+        }
+        catch {
+        }
+    }
+
+    return $roots.ToArray()
+}
+
+function Get-WinPulseAvailableBackups {
+    # Scans the known backup locations (see Get-WinPulseBackupSearchRoots) for
+    # folders that contain an executed backup manifest.json. Dry-run manifests
+    # are skipped: they reference no copied data.
+    [CmdletBinding()]
+    param()
 
     $backups = @()
-    foreach ($dir in (Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
-        $manifestPath = Join-Path -Path $dir.FullName -ChildPath 'manifest.json'
-        if (-not (Test-Path -LiteralPath $manifestPath)) { continue }
+    $seenPaths = @{}
+    foreach ($searchRoot in @(Get-WinPulseBackupSearchRoots)) {
+        $root = [string]$searchRoot.Path
+        if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { continue }
 
-        $manifest = Read-WinPulseBackupManifest -path $manifestPath
-        if (-not $manifest) { continue }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ([bool]$searchRoot.NamedOnly -and $dir.Name -notlike 'MigrationBackup-*' -and $dir.Name -notlike 'LiveMigration-*') { continue }
+            $pathKey = $dir.FullName.ToLowerInvariant()
+            if ($seenPaths.ContainsKey($pathKey)) { continue }
+            $seenPaths[$pathKey] = $true
 
-        $action = 'Unknown'
-        if ($manifest.PSObject.Properties['Tool'] -and $manifest.Tool.PSObject.Properties['Action']) {
-            $action = [string]$manifest.Tool.Action
-        }
-        $userCount = if ($manifest.PSObject.Properties['Users']) { @($manifest.Users).Count } else { 0 }
-        $totalSize = if ($manifest.PSObject.Properties['Plan'] -and $manifest.Plan.PSObject.Properties['TotalSize']) { [string]$manifest.Plan.TotalSize } else { '' }
+            $manifestPath = Join-Path -Path $dir.FullName -ChildPath 'manifest.json'
+            if (-not (Test-Path -LiteralPath $manifestPath)) { continue }
 
-        $backups += [pscustomobject][ordered]@{
-            Name         = $dir.Name
-            Path         = $dir.FullName
-            ManifestPath = $manifestPath
-            Action       = $action
-            UserCount    = $userCount
-            TotalSize    = $totalSize
-            LastWrite    = ConvertTo-WinPulseDateText -value $dir.LastWriteTime
+            $manifest = Read-WinPulseBackupManifest -path $manifestPath
+            if (-not $manifest) { continue }
+            if (Test-WinPulseManifestIsDryRun -manifest $manifest) { continue }
+
+            $action = 'Unknown'
+            if ($manifest.PSObject.Properties['Tool'] -and $manifest.Tool.PSObject.Properties['Action']) {
+                $action = [string]$manifest.Tool.Action
+            }
+            $userCount = if ($manifest.PSObject.Properties['Users']) { @($manifest.Users).Count } else { 0 }
+            $totalSize = if ($manifest.PSObject.Properties['Plan'] -and $manifest.Plan.PSObject.Properties['TotalSize']) { [string]$manifest.Plan.TotalSize } else { '' }
+
+            $backups += [pscustomobject][ordered]@{
+                Name          = $dir.Name
+                Path          = $dir.FullName
+                ManifestPath  = $manifestPath
+                Action        = $action
+                UserCount     = $userCount
+                TotalSize     = $totalSize
+                LastWrite     = ConvertTo-WinPulseDateText -value $dir.LastWriteTime
+                LastWriteTime = $dir.LastWriteTime
+            }
         }
     }
 
-    return @($backups)
+    return @($backups | Sort-Object -Property LastWriteTime -Descending)
 }
 
 function Get-WinPulseManifestItemRelative {
@@ -7596,6 +7762,12 @@ function Invoke-WinPulseMigrationVerify {
         Write-Host ('  Could not read a valid manifest.json under {0}.' -f $selectedBackupRoot) -ForegroundColor Red
         return $null
     }
+    if (Test-WinPulseManifestIsDryRun -manifest $manifest) {
+        $dryRunMessage = ('The backup under {0} is a dry run (nothing was copied); pick an executed backup.' -f $selectedBackupRoot)
+        if ($nonInteractive) { throw $dryRunMessage }
+        Write-Host ('  {0}' -f $dryRunMessage) -ForegroundColor Red
+        return $null
+    }
 
     Write-Host ('  Backup: {0}' -f $selectedBackupRoot) -ForegroundColor Gray
     Write-Host ''
@@ -7940,6 +8112,12 @@ function Invoke-WinPulseMigrationRestore {
     $manifest = Read-WinPulseBackupManifest -path $manifestPath
     if (-not $manifest) {
         Write-Host ('  Could not read a valid manifest.json under {0}.' -f $selectedBackupRoot) -ForegroundColor Red
+        return $null
+    }
+    if (Test-WinPulseManifestIsDryRun -manifest $manifest) {
+        $dryRunMessage = ('The backup under {0} is a dry run (nothing was copied); pick an executed backup.' -f $selectedBackupRoot)
+        if ($nonInteractive) { throw $dryRunMessage }
+        Write-Host ('  {0}' -f $dryRunMessage) -ForegroundColor Red
         return $null
     }
 
@@ -8360,7 +8538,7 @@ function Invoke-WinPulseMigrationLive {
     if ([string]::IsNullOrWhiteSpace($LiveDestination)) {
         $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
         $safeHost = ($hostname -replace '[\\/:*?"<>|]', '_')
-        $destination = 'C:\WinPulseBackups\LiveMigration-{0}-{1}' -f $safeHost, $stamp
+        $destination = Join-Path -Path $script:WinPulseDefaultBackupRoot -ChildPath ('LiveMigration-{0}-{1}' -f $safeHost, $stamp)
     }
     else {
         $destination = $LiveDestination.Trim()
@@ -9916,7 +10094,7 @@ function Invoke-StoreAppRepair {
     param()
 
     Write-Log -level 'INFO' -message 'Running Store/AppX repair flow.'
-    foreach ($processName in @('WinStore.App', 'WindowsTerminal', 'Widgets', 'WidgetService', 'StartMenuExperienceHost', 'SearchHost')) {
+    foreach ($processName in @('WinStore.App', 'Widgets', 'WidgetService', 'StartMenuExperienceHost', 'SearchHost')) {
         Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 
@@ -10081,7 +10259,7 @@ function Invoke-WinGetInstall {
         [string]$id
     )
 
-    & winget install --id $id --accept-source-agreements --accept-package-agreements --silent
+    & winget install --id $id --exact --accept-source-agreements --accept-package-agreements --silent
 }
 
 function Select-WinPulsePackageManager {
@@ -10106,14 +10284,14 @@ function Invoke-WinPulseInstallInWindow {
         [switch]$dryrun
     )
     if ($dryrun) {
-        foreach ($pkg in $packages) { Write-Host ('[DRY RUN] winget install --id {0}' -f $pkg.Id) -ForegroundColor Cyan }
+        foreach ($pkg in $packages) { Write-Host ('[DRY RUN] winget install --id {0} --exact' -f $pkg.Id) -ForegroundColor Cyan }
         return
     }
     $lines = @("Write-Host 'WinPulse - winget install' -ForegroundColor Cyan; Write-Host ''")
     foreach ($pkg in $packages) {
         $locale = if ($pkg.Locale) { " --locale $($pkg.Locale)" } else { '' }
         $lines += "Write-Host 'Installing $($pkg.Name)...' -ForegroundColor White"
-        $lines += "winget install --id '$($pkg.Id)' --accept-source-agreements --accept-package-agreements$locale"
+        $lines += "winget install --id '$($pkg.Id)' --exact --accept-source-agreements --accept-package-agreements$locale"
     }
     $lines += "Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
     Start-Process powershell -ArgumentList @('-NoProfile', '-Command', ($lines -join '; ')) -Wait
@@ -10460,8 +10638,13 @@ function Test-WinPulsePackageInstalled {
     )
 
     try {
-        $output = (& winget list --id $id --accept-source-agreements 2>$null | Out-String)
-        return ($output -match [regex]::Escape($id))
+        # --exact: without it 'Mozilla.Firefox' also matches Mozilla.Firefox.ESR
+        # and a different installed package was reported as this one.
+        $output = (& winget list --id $id --exact --accept-source-agreements 2>$null | Out-String)
+        # Exit code decides (winget returns non-zero when nothing matches); the
+        # table text is not parsed because winget truncates long ids with '...'.
+        if ($LASTEXITCODE -ne 0) { return $false }
+        return ($output -notmatch 'No installed package found')
     }
     catch {
         return $false
@@ -10611,7 +10794,7 @@ function Invoke-WinPulseCustomUninstall {
     }
 
     $menuItems = @($installed | ForEach-Object { @{ Label = $_.Name; Key = $_.Id; Hint = $_.Category } })
-    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Uninstall - Space to toggle, Enter to confirm' -Items $menuItems)
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'Custom Uninstall - Space to toggle, Enter to confirm' -Items $menuItems -AllowEmpty)
     if ($selectedKeys.Count -eq 0) { return }
 
     $selected = @($installed | Where-Object { $selectedKeys -contains $_.Id })
@@ -10619,7 +10802,7 @@ function Invoke-WinPulseCustomUninstall {
     if (-not $dryrun) {
         $cmd = "Write-Host 'WinPulse - winget uninstall' -ForegroundColor Cyan; Write-Host ''"
         foreach ($pkg in $selected) {
-            $cmd += "; Write-Host 'Uninstalling $($pkg.Name)...' -ForegroundColor White; winget uninstall --id '$($pkg.Id)' --silent"
+            $cmd += "; Write-Host 'Uninstalling $($pkg.Name)...' -ForegroundColor White; winget uninstall --id '$($pkg.Id)' --exact --silent"
         }
         $cmd += "; Write-Host ''; Write-Host 'Done. Press Enter to close.' -ForegroundColor Green; Read-Host"
         Start-Process powershell -ArgumentList @('-NoProfile', '-Command', $cmd) -Wait
@@ -10643,7 +10826,7 @@ function Uninstall-Application {
         [string]$id
     )
 
-    & winget uninstall --id $id --silent
+    & winget uninstall --id $id --exact --silent
 }
 
 function Get-WinPulseOfficeCatalog {
@@ -11017,6 +11200,7 @@ function Get-WinPulseSecurityAssessment {
     $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
     $avProducts = @(Get-WinPulseAntivirusProducts | Where-Object { $_ -and $_.PSObject.Properties['Name'] })
     $thirdPartyCount = @($avProducts | Where-Object { -not $_.IsMicrosoft }).Count
+    $thirdPartyEnabledCount = @($avProducts | Where-Object { -not $_.IsMicrosoft -and $_.PSObject.Properties['Enabled'] -and $_.Enabled }).Count
     $uac = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableLUA' -ErrorAction SilentlyContinue
     $secureBoot = Confirm-SecureBootUEFI -ErrorAction SilentlyContinue
     $bitlocker = Get-BitLockerVolume -ErrorAction SilentlyContinue
@@ -11025,7 +11209,8 @@ function Get-WinPulseSecurityAssessment {
         LocalAdmins = $localAdmins
         AntivirusProducts = $avProducts
         AntivirusThirdPartyCount = $thirdPartyCount
-        EffectiveRealtimeProtection = if ($thirdPartyCount -gt 0) { $true } elseif ($defender) { [bool]$defender.RealTimeProtectionEnabled } else { $false }
+        AntivirusThirdPartyEnabledCount = $thirdPartyEnabledCount
+        EffectiveRealtimeProtection = if ($thirdPartyEnabledCount -gt 0) { $true } elseif ($defender) { [bool]$defender.RealTimeProtectionEnabled } else { $false }
         DefenderRealTime = if ($defender) { [bool]$defender.RealTimeProtectionEnabled } else { $false }
         UacEnabled = if ($uac) { [bool]$uac.EnableLUA } else { $false }
         SecureBootEnabled = [bool]$secureBoot
@@ -11536,7 +11721,7 @@ function Invoke-WinPulseOSJunkCleanupMenu {
             })
     }
 
-    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'OS junk cleanup targets' -Items $menuItems.ToArray())
+    $selectedKeys = @(Select-WinPulseMultiMenuItem -Title 'OS junk cleanup targets' -Items $menuItems.ToArray() -AllowEmpty)
     if ($selectedKeys.Count -eq 0) {
         Write-Host 'Cancelled.' -ForegroundColor Yellow
         Wait-WinPulseKey
@@ -13536,7 +13721,19 @@ function Show-WinPulseDiagnosticsSecurity {
     if ($products.Count -gt 0) {
         Write-Host '  Antivirus products:' -ForegroundColor Yellow
         foreach ($p in $products) {
-            Write-Host ('    {0}' -f $p.Name) -ForegroundColor White
+            $pState = ''
+            $pColor = 'White'
+            if ($p.PSObject.Properties['Enabled']) {
+                if ($p.Enabled) {
+                    $pState = if ($p.PSObject.Properties['UpToDate'] -and -not $p.UpToDate) { '  (on, definitions OUT OF DATE)' } else { '  (on)' }
+                    $pColor = if ($p.PSObject.Properties['UpToDate'] -and -not $p.UpToDate) { 'Yellow' } else { 'White' }
+                }
+                else {
+                    $pState = '  (OFF / not protecting)'
+                    $pColor = 'Red'
+                }
+            }
+            Write-Host ('    {0}{1}' -f $p.Name, $pState) -ForegroundColor $pColor
         }
     }
     else {
